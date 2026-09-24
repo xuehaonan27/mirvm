@@ -847,6 +847,12 @@ fn name_of(strings: &[u8], offset: usize) -> Result<Box<str>, String> {
     Ok(Box::from(name.strip_prefix('_').unwrap_or(name)))
 }
 
+/// Whether `bytes` is a 64-bit Mach-O image at all, which is what a caller holding a member of an
+/// archive asks before reading symbols out of it.
+pub(crate) fn is_image(bytes: &[u8]) -> bool {
+    read_u32(bytes, 0) == Some(MH_MAGIC_64)
+}
+
 /// The image's `ncmds` and `sizeofcmds`.
 fn header(bytes: &[u8]) -> Result<(u32, u32), String> {
     match read_u32(bytes, 0) {
