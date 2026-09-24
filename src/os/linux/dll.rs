@@ -60,6 +60,15 @@ pub fn open(path: &CStr, mode: Mode) -> Result<usize, crate::os::Error> {
     open_with_flags(path, flag)
 }
 
+/// Nothing: this platform's loader reads an ELF's bytes as they are, so a private copy mirvm
+/// rewrote is one it still loads.
+///
+/// The name is the ladder's, so a caller that rewrites a copy names one function on every target
+/// and the question of whether anything has to happen stays here.
+pub fn reseal(_path: &std::path::Path) -> Result<(), crate::os::Error> {
+    Ok(())
+}
+
 /// `dlopen` with explicit flag form.
 /// Used for testing/partial visibility; use [`open`] for product paths.
 pub fn open_with_flags(path: &CStr, flag: i32) -> Result<usize, crate::os::Error> {

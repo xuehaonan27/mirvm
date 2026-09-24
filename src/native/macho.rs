@@ -53,6 +53,8 @@ const NLIST_SIZE: usize = 16;
 
 /// The load command that carries `__TEXT` and its `__text` section.
 const LC_SEGMENT_64: u32 = 0x19;
+/// The load command carrying the singular constructor address in 64-bit images.
+const LC_ROUTINES_64: u32 = 0x1a;
 /// The load command naming this image, and the one dyld needs to tell two loads of it apart.
 const LC_ID_DYLIB: u32 = 0x0d;
 const LC_UUID: u32 = 0x1b;
@@ -71,6 +73,17 @@ const PROT_EXECUTE: u32 = 4;
 /// `n_type` for a symbol defined at a section offset and visible to other images.
 const N_SECT: u8 = 0x0e;
 const N_EXT: u8 = 0x01;
+
+/// The low byte of `section_64.flags`, which is the section's type. The two types a pointer array
+/// of functions can have, and the plain type that is not one: a loader runs the arrays it sees
+/// typed, so a section whose type stops saying "function pointer array" is one it leaves alone.
+const SECTION_TYPE_MASK: u32 = 0xff;
+const S_MOD_INIT_FUNC_POINTERS: u32 = 0x9;
+const S_MOD_TERM_FUNC_POINTERS: u32 = 0xa;
+const S_REGULAR: u32 = 0x0;
+
+/// `VM_PROT_EXECUTE`, as `segment_command_64.initprot` reports it.
+const VM_PROT_EXECUTE: u32 = 0x4;
 
 /// `S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS` on the `__text` section.
 const TEXT_SECTION_FLAGS: u32 = 0x8000_0400;
@@ -621,6 +634,154 @@ pub(crate) fn hidden_symbols(bytes: &[u8]) -> Result<Vec<(Box<str>, u64)>, Strin
         .collect())
 }
 
+/// One `LC_SEGMENT_64`: the virtual range it maps, how it is protected, and the sections it holds.
+pub(crate) struct Segment {
+    pub(crate) vmaddr: u64,
+    pub(crate) vmsize: u64,
+    pub(crate) initprot: u32,
+    pub(crate) sections: Vec<Section>,
+}
+
+/// One `section_64`: the two names a caller matches it by, its virtual range, and its type.
+pub(crate) struct Section {
+    pub(crate) segname: String,
+    pub(crate) sectname: String,
+    pub(crate) addr: u64,
+    pub(crate) size: u64,
+    pub(crate) section_type: u32,
+    /// Where the type lives in the load commands, which is where clearing it is written.
+    flags_at: usize,
+}
+
+impl Section {
+    /// Whether this section is one a loader runs as an array of function pointers.
+    pub(crate) fn is_function_pointer_array(&self) -> bool {
+        matches!(
+            self.section_type,
+            S_MOD_INIT_FUNC_POINTERS | S_MOD_TERM_FUNC_POINTERS
+        )
+    }
+
+    /// Stop the loader running this section as an array of function pointers, leaving the array and
+    /// everything else about the image where they are.
+    ///
+    /// Clearing the type rather than the contents is what the two measured hazards force: a loader
+    /// rebases these slots, so a zeroed one arrives as the slide and is called, and pointing the
+    /// section at nothing would move everything laid out after it. Only the type is load-bearing for
+    /// the loader, and this file's caller signs the image again afterwards.
+    pub(crate) fn detach(&self, bytes: &mut [u8]) -> Result<(), String> {
+        let short = || "a section header lies outside the image".to_string();
+        let attributes = read_u32(bytes, self.flags_at).ok_or_else(short)? & !SECTION_TYPE_MASK;
+        let field = bytes
+            .get_mut(self.flags_at..self.flags_at + 4)
+            .ok_or_else(short)?;
+        field.copy_from_slice(&(S_REGULAR | attributes).to_le_bytes());
+        Ok(())
+    }
+}
+
+impl Segment {
+    /// Whether this segment maps executable code, which is what a caller attributes instruction
+    /// addresses to.
+    pub(crate) fn is_executable(&self) -> bool {
+        self.initprot & VM_PROT_EXECUTE != 0
+    }
+}
+
+/// What walking an image's load commands yields a caller.
+pub(crate) struct Image {
+    pub(crate) segments: Vec<Segment>,
+    /// The singular constructor address an `LC_ROUTINES_64` carries, which this linker does not
+    /// emit but an older image may have.
+    pub(crate) routines_init: Option<u64>,
+}
+
+/// The image's `LC_SEGMENT_64` commands, in the order the header lists them.
+pub(crate) fn image(bytes: &[u8]) -> Result<Image, String> {
+    let (ncmds, sizeofcmds) = header(bytes)?;
+    let commands_end = HEADER_SIZE
+        .checked_add(sizeofcmds as usize)
+        .ok_or_else(|| "the image's load commands are too long".to_string())?;
+    if commands_end > bytes.len() {
+        return Err("the image ends inside its load commands".to_string());
+    }
+    let mut segments = Vec::new();
+    let mut routines_init = None;
+    let mut cursor = HEADER_SIZE;
+    for _ in 0..ncmds {
+        let (command, cmdsize) = load_command(bytes, cursor)?;
+        let size = cmdsize as usize;
+        // Every command is at least its own header and the header's count and total size are the
+        // only bounds on the run.
+        if size < 8 || cursor + size > commands_end {
+            return Err("a load command has an implausible size".to_string());
+        }
+        if command == LC_SEGMENT_64 {
+            segments.push(segment(bytes, cursor, size)?);
+        } else if command == LC_ROUTINES_64 {
+            if size < 16 {
+                return Err("an LC_ROUTINES_64 is truncated".to_string());
+            }
+            routines_init = read_u64(bytes, cursor + 8);
+        }
+        cursor += size;
+    }
+    Ok(Image {
+        segments,
+        routines_init,
+    })
+}
+
+fn segment(bytes: &[u8], cursor: usize, cmdsize: usize) -> Result<Segment, String> {
+    let short = || "a segment command is truncated".to_string();
+    if cmdsize < SEGMENT_COMMAND_SIZE {
+        return Err(short());
+    }
+    let vmaddr = read_u64(bytes, cursor + 24).ok_or_else(short)?;
+    let vmsize = read_u64(bytes, cursor + 32).ok_or_else(short)?;
+    let initprot = read_u32(bytes, cursor + 60).ok_or_else(short)?;
+    let nsects = read_u32(bytes, cursor + 64).ok_or_else(short)? as usize;
+    let sections_start = cursor + SEGMENT_COMMAND_SIZE;
+    let sections_size = nsects
+        .checked_mul(SECTION_SIZE)
+        .ok_or_else(|| "a segment declares too many sections".to_string())?;
+    if sections_start + sections_size > cursor + cmdsize {
+        return Err(short());
+    }
+    let mut sections = Vec::with_capacity(nsects);
+    for index in 0..nsects {
+        sections.push(section(bytes, sections_start + index * SECTION_SIZE)?);
+    }
+    Ok(Segment {
+        vmaddr,
+        vmsize,
+        initprot,
+        sections,
+    })
+}
+
+fn section(bytes: &[u8], at: usize) -> Result<Section, String> {
+    let short = || "a section header is truncated".to_string();
+    Ok(Section {
+        sectname: fixed_name(bytes, at).ok_or_else(short)?,
+        segname: fixed_name(bytes, at + 16).ok_or_else(short)?,
+        addr: read_u64(bytes, at + 32).ok_or_else(short)?,
+        size: read_u64(bytes, at + 40).ok_or_else(short)?,
+        section_type: read_u32(bytes, at + 64).ok_or_else(short)? & SECTION_TYPE_MASK,
+        flags_at: at + 64,
+    })
+}
+
+/// A `section_64`'s 16-byte name field, NUL-padded, as a string.
+fn fixed_name(bytes: &[u8], at: usize) -> Option<String> {
+    let field = bytes.get(at..at + 16)?;
+    let end = field
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(field.len());
+    Some(String::from_utf8_lossy(&field[..end]).into_owned())
+}
+
 /// The `LC_SYMTAB` fields at `cursor`: `symoff`, `nsyms`, `stroff` and `strsize`.
 fn symtab_at(bytes: &[u8], cursor: usize) -> Result<[usize; 4], String> {
     let short = || "the image ends inside a load command".to_string();
@@ -713,7 +874,7 @@ mod tests {
 
     const NAMES: [&str; 3] = ["mirvm_probe_a", "mirvm_probe_b", "mirvm_probe_c"];
 
-    fn image() -> (Vec<u8>, usize) {
+    fn symbol_image() -> (Vec<u8>, usize) {
         let names: Vec<Box<str>> = NAMES.iter().map(|name| Box::from(*name)).collect();
         build(&names).expect("a symbol image")
     }
@@ -722,7 +883,7 @@ mod tests {
     /// second has to find, at the addresses the first promised.
     #[test]
     fn the_reader_finds_what_the_writer_wrote() {
-        let (bytes, text_off) = image();
+        let (bytes, text_off) = symbol_image();
         let symbols = symbols(&bytes).expect("an image this module wrote");
         assert_eq!(symbols.len(), NAMES.len());
         for (index, symbol) in symbols.iter().enumerate() {
@@ -737,7 +898,7 @@ mod tests {
     /// writer's first entry into one is what a caller of `undefined_symbols` is looking for.
     #[test]
     fn an_undefined_symbol_is_reported_without_the_formats_underscore() {
-        let (mut bytes, _) = image();
+        let (mut bytes, _) = symbol_image();
         // Make the first entry external and sectionless, which is what "the loader resolves this"
         // is: the reader has to report it, and without the underscore the file spells it with.
         let symoff = first_nlist(&bytes);
@@ -752,7 +913,7 @@ mod tests {
     /// through the loader, which is what the fallback table is for.
     #[test]
     fn a_private_symbol_is_reported_with_its_address() {
-        let (mut bytes, text_off) = image();
+        let (mut bytes, text_off) = symbol_image();
         let symoff = first_nlist(&bytes);
         bytes[symoff + 4] |= N_PEXT;
         let hidden = hidden_symbols(&bytes).expect("an image");
@@ -838,7 +999,7 @@ mod tests {
     /// checks that every symbol comes back at the address the symbol table gives it.
     #[test]
     fn the_export_trie_carries_every_symbol_at_its_address() {
-        let (bytes, text_off) = image();
+        let (bytes, text_off) = symbol_image();
         let mut entries = Vec::new();
         walk(trie_of(&bytes), 0, &mut String::new(), &mut entries);
         let mut expected: Vec<(String, u64)> = NAMES
@@ -868,5 +1029,30 @@ mod tests {
         assert_eq!(entries[0].1 as usize, text_off);
         assert_eq!(&*entries[1].0, "_probe_long");
         assert_eq!(entries[1].1 as usize, text_off + SLOT);
+    }
+
+    /// The segment walker and the writer are two halves of one layout: the sections the walker
+    /// reports have to be the ones the writer laid down, at the addresses it promised.
+    #[test]
+    fn the_segment_walker_finds_what_the_writer_wrote() {
+        let (bytes, text_off) = symbol_image();
+        let image = super::image(&bytes).expect("an image this module wrote");
+        let text = image
+            .segments
+            .iter()
+            .find(|segment| segment.sections.iter().any(|s| s.sectname == "__text"))
+            .expect("a text segment");
+        assert!(text.is_executable());
+        assert_eq!(
+            text.sections.len(),
+            1,
+            "the writer lays down exactly one section"
+        );
+        let section = &text.sections[0];
+        assert_eq!(section.segname, "__TEXT");
+        assert_eq!(section.addr as usize, text_off);
+        assert_eq!(section.size as usize, SLOT * NAMES.len());
+        assert!(!section.is_function_pointer_array());
+        assert_eq!(image.routines_init, None);
     }
 }

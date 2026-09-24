@@ -21,6 +21,12 @@
 //! platform's toolchain writes and its loader accepts (`OBJECT_FORMAT`), and the sequence that gets
 //! bytes to the loader at all (`load_private_image`). The bytes and their layout are
 //! `crate::native`'s, which writes one without knowing which platform is asking.
+//!
+//! A third is `reseal`: whether this loader accepts a file whose bytes were rewritten after it was
+//! last published. A platform whose loader checks nothing answers by doing nothing; one that
+//! refuses an image its signer has not seen has to be asked again. A caller that rewrites a private
+//! copy — suppressing constructors is the one such rewrite — names this on every target, so the
+//! decision of whether anything has to happen is the platform's rather than the caller's.
 
 /// The dlopen mode.
 /// All call points always carry RTLD_GLOBAL (fixed as an internal constant).
