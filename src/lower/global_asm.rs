@@ -10,6 +10,7 @@
 //! than const/sym, another target than this build's, `link_section`) are rejected loudly.
 
 use crate::lower::Error;
+use crate::native::asmtext::{Region, Visibility, Vocabulary};
 
 use std::fmt::Write as _;
 
@@ -63,32 +64,26 @@ pub(crate) fn materialize<'tcx>(
     // Executable trampolines all go up front. The bridge bakes in only a RIP-relative
     // hidden data slot, never a runtime P1 address; each Engine loads its own copy of the
     // machine-code image or shared library and then writes its closure address into the slot.
+    let fmt = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     let mut head = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
     let mut dedup = std::collections::HashSet::new();
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in abs_defs {
         if dedup.insert(name.clone()) {
             let slot = crate::vm::ir::native_entry_slot_name(crate::vm::ir::LinkAddr(addr));
-            let _ = writeln!(head, ".globl {name}");
-            let _ = writeln!(head, ".hidden {name}");
-            let _ = writeln!(head, ".type {name},@function");
-            let _ = writeln!(head, "{name}:");
-            let _ = writeln!(head, "    jmp QWORD PTR [rip + {slot}]");
-            let _ = writeln!(head, ".size {name}, . - {name}");
+            fmt.define_fn(&mut head, &name, Visibility::Private);
+            let _ = writeln!(head, "    jmp QWORD PTR [rip + {}]", fmt.symbol(&slot));
+            fmt.end_fn(&mut head, &name);
             slots.insert(slot);
         }
     }
     if !slots.is_empty() {
-        head.push_str(".pushsection .data.mirvm_p1,\"aw\",@progbits\n.balign 8\n");
+        fmt.open(&mut head, Region::Slots { name: "mirvm_p1" });
+        head.push_str(".balign 8\n");
         for slot in slots {
-            let _ = writeln!(head, ".globl {slot}");
-            let _ = writeln!(head, ".hidden {slot}");
-            let _ = writeln!(head, ".type {slot},@object");
-            let _ = writeln!(head, ".size {slot},8");
-            let _ = writeln!(head, "{slot}:");
-            let _ = writeln!(head, "    .quad 0");
+            fmt.define_slot(&mut head, &slot);
         }
-        head.push_str(".popsection\n");
+        fmt.close(&mut head);
     }
     let asm = format!("{head}{asm}");
     Ok(Some(assemble(&asm)?))
@@ -357,14 +352,13 @@ fn render_naked<'tcx>(
         return Err(Error::internal("naked fn body is not a single InlineAsm"));
     };
     let att = options.contains(InlineAsmOptions::ATT_SYNTAX);
+    let fmt = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     let name = tcx.symbol_name(inst).name;
     // A trimmed cg_ssa prefix_and_suffix: a raw machine-code function
     out.push_str(&crate::arch::asm_text::syntax_prefix(att));
-    let _ = writeln!(out, ".pushsection .text.{name},\"ax\", @progbits");
-    let _ = writeln!(out, ".balign 16");
-    let _ = writeln!(out, ".globl {name}");
-    let _ = writeln!(out, ".type {name}, @function");
-    let _ = writeln!(out, "{name}:");
+    fmt.open(out, Region::Text { name });
+    out.push_str(".balign 16\n");
+    fmt.define_fn(out, name, Visibility::Exported);
     for piece in template.iter() {
         match piece {
             InlineAsmTemplatePiece::String(s) => out.push_str(s),
@@ -400,10 +394,10 @@ fn render_naked<'tcx>(
                         rustc_span::DUMMY_SP,
                     );
                     absorb(tcx, callee, abs_defs)?;
-                    out.push_str(tcx.symbol_name(callee).name);
+                    out.push_str(&fmt.symbol(tcx.symbol_name(callee).name));
                 }
                 InlineAsmOperand::SymStatic { def_id } => {
-                    out.push_str(tcx.symbol_name(Instance::mono(tcx, *def_id)).name);
+                    out.push_str(&fmt.symbol(tcx.symbol_name(Instance::mono(tcx, *def_id)).name));
                 }
                 _ => {
                     return Err(Error::unsupported(
@@ -414,8 +408,8 @@ fn render_naked<'tcx>(
         }
     }
     out.push('\n');
-    let _ = writeln!(out, ".size {name}, . - {name}");
-    let _ = writeln!(out, ".popsection");
+    fmt.end_fn(out, name);
+    fmt.close(out);
     Ok(())
 }
 
