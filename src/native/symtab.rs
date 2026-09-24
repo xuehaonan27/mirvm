@@ -212,14 +212,17 @@ fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>,
 /// (skipping the ar symbol table and long-name table members), read each ELF64 member's
 /// `.symtab`, and collect the names of GLOBAL/WEAK symbols with `SHN_UNDEF`. This parses bytes
 /// (the same structural walk as `symbol_table_values`) and never parses tool text output.
-pub fn archive_undefined_symbols(archive_path: &str) -> Result<Vec<Box<str>>, Error> {
+pub fn archive_undefined_symbols(
+    archive_path: &str,
+    format: crate::os::dll::ObjectFormat,
+) -> Result<Vec<Box<str>>, Error> {
     let bytes = std::fs::read(archive_path).map_err(|e| {
         Error::io(
             format!("cannot read the native archive `{archive_path}`"),
             e,
         )
     })?;
-    archive_undefined_symbols_in(&bytes).map_err(|why| {
+    archive_undefined_symbols_in(&bytes, format).map_err(|why| {
         Error::malformed(format!(
             "undefined-symbol enumeration failed for static native archive `{archive_path}`: {why}"
         ))
@@ -227,20 +230,34 @@ pub fn archive_undefined_symbols(archive_path: &str) -> Result<Vec<Box<str>>, Er
 }
 
 /// Undefined-symbol enumeration over the archive's members. The container walk is
-/// [`ar::members`]; what is left here is the part that is about symbols: read each ELF member's
-/// `.symtab` and keep the GLOBAL/WEAK names with `SHN_UNDEF`.
-fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
+/// [`ar::members`]; what is left here is the part that is about symbols: read each member's symbol
+/// table and keep the names it says something outside the archive has to provide.
+///
+/// The format is a parameter for the same reason [`object_undefined_symbols`]'s is: it is the
+/// platform's, because the toolchain that produced the archive is what decided it.
+fn archive_undefined_symbols_in(
+    bytes: &[u8],
+    format: crate::os::dll::ObjectFormat,
+) -> Result<Vec<Box<str>>, Error> {
     let members = ar::members(bytes).map_err(|why| Error::malformed(why.to_string()))?;
     let mut out: Vec<Box<str>> = Vec::new();
     for member in members {
-        if member.starts_with(&elf::IDENT) {
-            for symbol in elf_undefined_symbols(member)? {
-                if !out.contains(&symbol) {
-                    out.push(symbol);
-                }
+        let names: Vec<Box<str>> = match format {
+            crate::os::dll::ObjectFormat::Elf if elf::is_elf64_le(member) => {
+                elf_undefined_symbols(member)?
+            }
+            crate::os::dll::ObjectFormat::MachO if super::macho::is_image(member) => {
+                super::macho::undefined_symbols(member).map_err(Error::malformed)?
+            }
+            // A member that is not an object of this format (a text listing, or the archive's own
+            // symbol index) carries no symbols to enumerate.
+            _ => continue,
+        };
+        for symbol in names {
+            if !out.contains(&symbol) {
+                out.push(symbol);
             }
         }
-        // A non-ELF member (a text listing, for example) carries no symbols to enumerate.
     }
     Ok(out)
 }
@@ -436,7 +453,8 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        let undef = archive_undefined_symbols(a.to_str().unwrap()).unwrap();
+        let undef =
+            archive_undefined_symbols(a.to_str().unwrap(), crate::os::dll::OBJECT_FORMAT).unwrap();
         assert!(
             undef.iter().any(|s| &**s == "rlib_side_def"),
             "GLOBAL undef missed: {undef:?}"
@@ -463,6 +481,11 @@ mod tests {
     /// Link an archive with -fvisibility=hidden using `native::archive`'s parameters: its symbols
     /// do not enter .dynsym, but the .symtab fallback must resolve the same address that a
     /// direct dlsym returns.
+    /// The subject is ELF's two tables: a definition the image does not export is absent from
+    /// `.dynsym` and present in `.symtab`, and the fallback table is the difference. This format
+    /// keeps one table and says "do not offer this" with a bit instead, which is what
+    /// `native::macho`'s own test covers.
+    #[cfg(target_os = "linux")]
     #[test]
     fn hidden_symbols_resolve_via_symtab_with_same_address_as_dlsym() {
         let dir = std::env::temp_dir().join(format!("mirvm-symtab-test-{}", std::process::id()));

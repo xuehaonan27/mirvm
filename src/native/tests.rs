@@ -112,6 +112,7 @@ fn make_thin_archive(dir: &Path, source: &str) -> PathBuf {
     archive_path
 }
 
+#[cfg(target_arch = "x86_64")]
 fn make_non_pic_archive(dir: &Path, source: &str) -> PathBuf {
     let source_path = dir.join("non_pic_probe.c");
     let object_path = dir.join("non_pic_probe.o");
@@ -199,21 +200,26 @@ fn native_signal_calls_receive_the_engine_owner() {
     )
     .unwrap_or_else(|e| panic!("dlopen {} failed: {e}", so.display()));
     let bias = crate::os::dll::load_bias(handle, &c_so).expect("native bridge load bias") as u64;
-    // The probe this test builds is an ELF object whatever the host is, so it asks as one, and on
-    // that platform the bridge's slots are private and reached through the image's own table. Which
-    // of the two routes a platform needs is `os::linker`'s answer; `wire` is what takes both.
+    // The slots are reached the two ways the engine reaches them, because the platform decides
+    // whether the bridge exports them: through the loader, which searches an image's whole load
+    // closure, and through the image's own table where they are not exported.
     let hidden = crate::native::symtab::hidden_symtab_values(
         so.to_str().unwrap(),
-        crate::os::dll::ObjectFormat::Elf,
+        crate::os::dll::OBJECT_FORMAT,
     )
     .unwrap();
     let patch = |name: &str, value: u64| {
-        let offset = hidden
-            .get(name)
-            .unwrap_or_else(|| panic!("native bridge has no hidden slot `{name}`"));
-        let address = bias
-            .checked_add(*offset)
-            .expect("native bridge slot address");
+        let cname = CString::new(name).unwrap();
+        let exported = crate::os::dll::sym(handle, &cname);
+        let address = if exported != 0 {
+            exported
+        } else {
+            let offset = hidden
+                .get(name)
+                .unwrap_or_else(|| panic!("native bridge has no slot `{name}`"));
+            bias.checked_add(*offset)
+                .expect("native bridge slot address") as usize
+        };
         unsafe { (address as *mut u64).write(value) };
     };
     patch("__mirvm_signal_owner", OWNER);
@@ -251,6 +257,10 @@ fn native_signal_calls_receive_the_engine_owner() {
     unsafe { crate::os::dll::close(handle) };
 }
 
+/// `ar crsT` on this host leaves an ordinary archive -- measured, the bytes still begin with
+/// `!<arch>\n` -- so the fixture cannot be produced here. The check it exercises is a prefix test
+/// on the container's own signature, which is the same bytes on every platform.
+#[cfg(target_os = "linux")]
 #[test]
 fn thin_archive_is_rejected_because_its_content_hash_is_incomplete() {
     let temp = TempDir::new("thin");
@@ -299,6 +309,10 @@ fn constructor_runs_at_dlopen_after_lifecycle_guard_is_lifted() {
     unsafe { crate::os::dll::close(handle) };
 }
 
+/// `.init`/`.fini` sections are an ELF practice and this platform's assembler refuses the section
+/// name outright, so the fixture cannot exist here. The check reads whatever sections a member
+/// carries and is a no-op on a format that has none.
+#[cfg(target_os = "linux")]
 #[test]
 fn legacy_elf_init_and_fini_sections_are_rejected() {
     // §7.8 partition: legacy `.init`/`.fini` sections remain rejected (old gcc trick of injecting
@@ -370,7 +384,7 @@ fn cache_key_separates_target_triples() {
 }
 
 #[test]
-fn unresolved_archive_dependency_fails_during_materialization() {
+fn unresolved_archive_dependency_never_becomes_a_usable_image() {
     let temp = TempDir::new("unresolved");
     let archive = make_archive(
         temp.path(),
@@ -378,20 +392,42 @@ fn unresolved_archive_dependency_fails_during_materialization() {
              unsigned long mirvm_dependency_probe(void) { return mirvm_missing_dependency(); }\n",
     );
 
-    let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
-    // The conversion refusal covers every reason a member cannot join a shared library (non-PIC and
-    // an open dependency alike); the linker's own output is the detail.
-    assert_eq!(error.code(), Some("archive.unsupported"));
-    assert!(
-        error.to_string().contains("dependency"),
-        "unexpected diagnostic: {error}"
-    );
-    assert!(
-        error.to_string().contains("mirvm_missing_dependency"),
-        "linker detail lost: {error}"
-    );
+    // Which layer refuses depends on whether the platform can refuse at link time at all. One that
+    // cannot -- its linker is told to leave undefined references for the loader -- is caught one
+    // step later, and that is the guarantee worth stating: an archive with an open dependency never
+    // becomes an image the engine can use.
+    match materialize_in(&archive, &temp.path().join("cache")) {
+        Err(error) => {
+            // The conversion refusal covers every reason a member cannot join a shared library
+            // (non-PIC and an open dependency alike); the linker's own output is the detail.
+            assert_eq!(error.code(), Some("archive.unsupported"));
+            assert!(
+                error.to_string().contains("dependency"),
+                "unexpected diagnostic: {error}"
+            );
+            assert!(
+                error.to_string().contains("mirvm_missing_dependency"),
+                "linker detail lost: {error}"
+            );
+        }
+        Ok(so) => {
+            let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
+            assert!(
+                crate::os::dll::open_with_flags(
+                    &c_so,
+                    crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
+                )
+                .is_err(),
+                "`{}` loaded although it has an unresolved dependency",
+                so.display()
+            );
+        }
+    }
 }
 
+/// Only where a C compiler can emit a non-PIC object at all: this CPU's code is PC-relative by
+/// construction, so its relocations are never the absolute ones the check rejects.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn non_pic_archive_fails_during_materialization() {
     let temp = TempDir::new("non-pic");
