@@ -102,7 +102,17 @@ impl FfiState {
         // library. Handle resolution is independent of load order and reproducible (same for
         // ①'s hidden symbols). Residual: a symbol that collides across archive-internal
         // references still goes through the global order; known and not observed in the corpus.
-        if p == 0 {
+        //
+        // Except for the names mirvm's own bridge carries: a loader searches a library's whole
+        // closure, so where the redirection works by *defining* the call, this search finds the
+        // engine's own entry. The one call would then be handled twice -- once by the guest-side
+        // wrappers and once by the native-side replacement the entry leads to -- which is what the
+        // engine's duplicate-key guard refuses. Those names go on to the global scope, which is
+        // where the real library is, and where they are reached on the platform whose entries are
+        // renamed instead.
+        let carried_by_the_bridge = crate::vm::interpose::INTERPOSED_CALLS.contains(&name)
+            && crate::os::linker::bridge_entry_name(name) == name;
+        if p == 0 && !carried_by_the_bridge {
             for &h in &self.required_handles {
                 p = crate::os::dll::sym(h, &cname);
                 if p != 0 {
