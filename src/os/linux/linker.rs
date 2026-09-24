@@ -46,6 +46,39 @@ pub fn bridge_entry_name(call: &str) -> String {
     format!("__wrap_{call}")
 }
 
+/// The arguments a native-archive image's link starts with, and the system libraries it ends with.
+///
+/// See the macOS file for what the two intentions are; this platform spells both. `-z defs` is the
+/// one that is load-bearing rather than convenient: it makes an undefined reference outside
+/// [`NATIVE_ARCHIVE_SUFFIX`] a link error, which is what holds an archive's dependency closure to
+/// what the guest's own crate graph declares.
+pub const NATIVE_ARCHIVE_PREFIX: &[&str] = &[
+    "-shared",
+    "-fPIC",
+    "-Wl,-z,defs",
+    "-Wl,-z,text",
+    "-Wl,-Bsymbolic",
+];
+
+/// The libraries a static archive may reference directly, which the guest's own standard library
+/// would have contributed to its final link. They become the image's `DT_NEEDED` entries.
+pub const NATIVE_ARCHIVE_SUFFIX: &[&str] =
+    &["-lm", "-ldl", "-lpthread", "-lrt", "-lutil", "-lgcc_s"];
+
+/// How this linker is told to take every member of `archive` rather than only the ones something
+/// references.
+///
+/// The whole archive has to go in: the symbols mirvm resolves out of it are reached by name at run
+/// time, so nothing references them at link time. `--whole-archive` is a mode that has to be turned
+/// off again, which is why the answer is three arguments and carries its own end.
+pub fn whole_archive(archive: &std::path::Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "-Wl,--whole-archive".into(),
+        archive.into(),
+        "-Wl,--no-whole-archive".into(),
+    ]
+}
+
 /// The `cc` arguments that turn the bridge's assembly into the artifact an image is linked with,
 /// and what that artifact is called.
 ///
