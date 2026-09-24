@@ -13,6 +13,10 @@
 //! can read the base out of the handle needs only the first: the one that keys its loader's image
 //! list by name needs only the second, and a call site names one function on every target.
 //!
+//! `sym` takes a zero handle to mean the global scope — every object the process has loaded —
+//! which is a value callers can name on every target. Each platform spells that scope its own way,
+//! and the mapping from the zero handle to it is the platform half's.
+//!
 //! Two more items are the platform's, and neither is knowable from here: which object format this
 //! platform's toolchain writes and its loader accepts (`OBJECT_FORMAT`), and the sequence that gets
 //! bytes to the loader at all (`load_private_image`). The bytes and their layout are

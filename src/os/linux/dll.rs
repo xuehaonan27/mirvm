@@ -95,9 +95,18 @@ pub unsafe fn close(handle: usize) {
 /// - hit: address (non-zero)
 /// - miss: 0.
 ///
-/// Handle = 0 indicates global (RTLD_DEFAULT semantics; dlsym(NULL, ...) in glibc).
+/// A zero `handle` is the global scope. This loader spells that with a null handle, which is the
+/// same value `RTLD_DEFAULT` has here; the mapping is named rather than passed through so that a
+/// reader of either half sees which platform is doing what.
 pub fn sym(handle: usize, name: &CStr) -> usize {
-    unsafe { libc::dlsym(handle as *mut libc::c_void, name.as_ptr()) as usize }
+    let scope = if handle == 0 {
+        libc::RTLD_DEFAULT
+    } else {
+        handle as *mut libc::c_void
+    };
+    // SAFETY: `scope` is a handle this process's loader returned, or the global scope, and `name`
+    // is a NUL-terminated C string.
+    unsafe { libc::dlsym(scope, name.as_ptr()) as usize }
 }
 
 /// The current value of dlerror.

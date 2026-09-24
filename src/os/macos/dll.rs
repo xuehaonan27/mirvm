@@ -154,10 +154,19 @@ pub unsafe fn close(handle: usize) {
 /// - hit: address (non-zero)
 /// - miss: 0.
 ///
-/// Handle = 0 indicates the global search, which is what this loader treats a null handle as on
-/// both platforms this build supports.
+/// A zero `handle` is the global scope, and this loader spells that with `RTLD_DEFAULT` rather
+/// than with a null handle. Measured: `dlsym(NULL, name)` answers "invalid handle" here, while
+/// `dlsym(RTLD_DEFAULT, name)` finds the symbol — and `RTLD_DEFAULT` is negative on this platform,
+/// which is why the zero handle cannot simply be passed through.
 pub fn sym(handle: usize, name: &CStr) -> usize {
-    unsafe { libc::dlsym(handle as *mut libc::c_void, name.as_ptr()) as usize }
+    let scope = if handle == 0 {
+        libc::RTLD_DEFAULT
+    } else {
+        handle as *mut libc::c_void
+    };
+    // SAFETY: `scope` is a handle this process's loader returned, or the global scope, and `name`
+    // is a NUL-terminated C string.
+    unsafe { libc::dlsym(scope, name.as_ptr()) as usize }
 }
 
 /// The current value of dlerror.
