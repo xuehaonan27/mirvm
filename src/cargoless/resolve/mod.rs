@@ -395,7 +395,13 @@ pub fn resolve_for_known_with_features(
                             )
                         })?;
                     if let Some(checkout) = &m.git_checkout_root {
-                        if !absolute.starts_with(checkout) {
+                        // Containment is a question about real locations, so both sides have to be
+                        // the same kind of path: `absolute` is canonical, while the checkout root
+                        // is whatever the caller recorded — and a directory reached through a link,
+                        // which a temporary directory on some platforms is, is not canonical until
+                        // it is asked to be.
+                        let checkout = std::fs::canonicalize(checkout).unwrap_or(checkout.clone());
+                        if !absolute.starts_with(&checkout) {
                             return Err(format!(
                                 "path dependency {} of Git package {} escapes the repository checkout; a Cargo Git source may not reference a path outside the repository",
                                 m.name,
