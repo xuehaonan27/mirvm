@@ -118,16 +118,6 @@ fn symbol_at<'a>(
     })
 }
 
-/// Resolve a `.so`'s `.symtab`: defined symbol name -> st_value (file virtual address,
-/// relative to the load base). Err means it is not the expected ELF64 LE or the structure is
-/// out of bounds (corrupted format, which a materialized artifact should never be). Production
-/// code only uses hidden_symtab_values; this raw view exists for unit-test comparison (visible
-/// symbols must have the same address on both paths).
-#[cfg(test)]
-pub(crate) fn symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Error> {
-    symbol_table_values(so_path, SHT_SYMTAB)
-}
-
 /// The hidden-symbol fallback table: the symbols an object defines that its loader cannot reach by
 /// name.
 ///
@@ -395,8 +385,7 @@ fn elf_exports(bytes: &[u8], path: &str) -> Result<Vec<Export>, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_undefined_symbols, hidden_symtab_values, symtab_values};
-    use std::ffi::CString;
+    use super::archive_undefined_symbols;
     use std::process::Command;
 
     /// Static SHN_UNDEF enumeration of an ar archive: with definitions and undefined symbols
@@ -532,7 +521,7 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
+        let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
         let handle = crate::os::dll::open_with_flags(
             &c_so,
             crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
@@ -543,7 +532,9 @@ mod tests {
         let pvis = crate::os::dll::sym(handle, c"mirvm_visible_probe");
         assert!(pvis != 0);
         // .symtab fallback: the hidden symbol resolves and the call returns the right value
-        let syms = symtab_values(so.to_str().unwrap()).unwrap();
+        // The raw `.symtab` view, read through what `hidden_symtab_values` filters: this test
+        // exists to compare the two.
+        let syms = super::symbol_table_values(so.to_str().unwrap(), super::SHT_SYMTAB).unwrap();
         let bias = crate::os::dll::load_bias(handle, &c_so).expect("load_bias") as u64;
         let hidden_addr = *syms
             .get("mirvm_hidden_probe")
@@ -562,7 +553,8 @@ mod tests {
         // reject_symbol_ambiguity)
         // The probe this test builds is an ELF object whatever the host is, so it asks as one.
         let hidden_only =
-            hidden_symtab_values(so.to_str().unwrap(), crate::os::dll::ObjectFormat::Elf).unwrap();
+            super::hidden_symtab_values(so.to_str().unwrap(), crate::os::dll::ObjectFormat::Elf)
+                .unwrap();
         assert_eq!(
             hidden_only.get("mirvm_hidden_probe"),
             syms.get("mirvm_hidden_probe"),
