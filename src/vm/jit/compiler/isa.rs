@@ -43,17 +43,24 @@ pub(crate) fn domain_isa(domain: CodeDomain) -> cranelift_codegen::isa::OwnedTar
         CodeDomain::Plain => plain_domain_flags(),
         CodeDomain::Trace => trace_domain_flags(),
     };
-    cranelift_native::builder()
-        .expect("native ISA builder")
-        .finish(flags)
-        .unwrap_or_else(|error| {
-            // The flag this constructor adds is the one most likely to be refused, and it is
-            // about exactly one register, so the message names it.
-            panic!(
-                "native ISA rejects the domain flags (pinned register {}): {error}",
-                crate::arch::PINNED_REG
-            )
-        })
+    let mut builder = cranelift_native::builder().expect("native ISA builder");
+    // The host's own flags would have every frame description claim its return address is signed,
+    // which is a promise the code has to keep: the unwinder authenticates what it is told to, and a
+    // promise made about code that does not make it is worse than no promise. mirvm's bodies are
+    // its own, so it declines the two flags rather than adopting an ABI it does not implement.
+    // Measured, this is what a frame under this platform's unwinder needs.
+    for flag in ["sign_return_address", "sign_return_address_with_bkey"] {
+        // A platform without the flag has nothing to decline.
+        let _ = builder.set(flag, "false");
+    }
+    builder.finish(flags).unwrap_or_else(|error| {
+        // The flag this constructor adds is the one most likely to be refused, and it is
+        // about exactly one register, so the message names it.
+        panic!(
+            "native ISA rejects the domain flags (pinned register {}): {error}",
+            crate::arch::PINNED_REG
+        )
+    })
 }
 
 /// Build the trace domain's ISA. Only tests call this today, hence the `dead_code`
