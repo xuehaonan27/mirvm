@@ -232,26 +232,43 @@ fn parses_three_feature_value_forms() {
 
 #[test]
 fn cfg_platform_atoms_evaluate_for_host() {
-    assert!(eval_cfg("cfg(target_os=\"linux\")").unwrap());
+    // Every atom asked about here is derived from the host rather than spelled for one platform:
+    // what is under test is that the evaluator answers with this build's own cfg set.
+    let os = std::env::consts::OS;
+    assert!(eval_cfg(&format!("cfg(target_os=\"{os}\")")).unwrap());
     assert!(!eval_cfg("cfg(target_os=\"windows\")").unwrap());
     assert!(eval_cfg("cfg(unix)").unwrap());
-    assert!(eval_cfg("cfg(any(target_os=\"macos\", target_os=\"linux\"))").unwrap());
+    assert!(
+        eval_cfg(&format!(
+            "cfg(any(target_os=\"macos\", target_os=\"{os}\"))"
+        ))
+        .unwrap()
+    );
     assert!(!eval_cfg("cfg(not(unix))").unwrap());
-    assert!(eval_cfg("cfg(all(unix, target_arch=\"x86_64\"))").unwrap());
+    assert!(eval_cfg(&format!("cfg(target_arch=\"{}\")", std::env::consts::ARCH)).unwrap());
     assert!(eval_cfg("cfg(target_pointer_width=\"64\")").unwrap());
     assert!(eval_cfg("cfg(target_endian=\"little\")").unwrap());
     // Custom keys (rustix-style) and unknown keys are naturally false (same source
     // as rustc --print cfg)
     assert!(!eval_cfg("cfg(rustix_use_libc)").unwrap());
     assert!(!eval_cfg("cfg(some_custom_key)").unwrap());
-    // target_feature is covered exactly by rustc's list (x86_64 baseline = sse/sse2
-    // true, avx2 false)
-    assert!(eval_cfg("cfg(target_feature=\"sse2\")").unwrap());
+    // target_feature is covered exactly by rustc's list, so the compiler is asked the same question
+    // rather than one architecture's baseline being assumed: a feature every one of these
+    // architectures has, and one none of them has in its baseline.
+    let baseline = if cfg!(target_arch = "x86_64") {
+        "sse2"
+    } else {
+        "neon"
+    };
+    assert!(
+        eval_cfg(&format!("cfg(target_feature=\"{baseline}\")")).unwrap(),
+        "{baseline} is in this architecture's baseline"
+    );
     assert!(!eval_cfg("cfg(target_feature=\"avx512f\")").unwrap());
     // Complex nesting (a miniature rustix form)
-    assert!(eval_cfg(
-            "cfg(all(not(rustix_use_libc), target_os=\"linux\", any(target_arch=\"x86_64\", target_arch=\"aarch64\")))"
-        )
+    assert!(eval_cfg(&format!(
+            "cfg(all(not(rustix_use_libc), target_os=\"{os}\", any(target_arch=\"x86_64\", target_arch=\"aarch64\")))"
+        ))
         .unwrap());
 }
 
