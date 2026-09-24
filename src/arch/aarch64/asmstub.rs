@@ -62,19 +62,6 @@ pub fn int3() {
     unsafe { std::arch::asm!("brk #0", options(nomem, nostack, preserves_flags)) };
 }
 
-/// The assembly text of a jump through the hidden 8-byte slot `slot`, without a trailing newline.
-///
-/// This is the body of a P1 entry trampoline: the rlib-rescue path defines one such trampoline for
-/// each symbol a native archive left undefined and the crate graph exports, and the owning Engine
-/// writes the address the trampoline should reach into the slot. Which symbol needs one, and the
-/// directives naming it, belong to the object format; the instruction sequence is the CPU's.
-///
-/// The slot is a hidden global, so its address is a link-time constant and the pair of `adrp` plus
-/// `:lo12:` reaches it without a GOT.
-pub fn indirect_jump_asm(slot: &str) -> String {
-    format!("    adrp x16, {slot}\n    ldr x16, [x16, :lo12:{slot}]\n    br x16")
-}
-
 /// The register the bridge entry for `call` loads its engine into: the register the replacement's
 /// trailing `owner` parameter arrives in, which the procedure call standard puts after the call's
 /// own arguments in `x0..x7`.

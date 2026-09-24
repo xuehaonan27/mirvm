@@ -21,3 +21,14 @@ pub fn entry_asm(owner_register: &str, owner_slot: &str, target_slot: &str) -> S
          adrp x17, {target_slot}@PAGE\n    ldr x17, [x17, {target_slot}@PAGEOFF]\n    br x17"
     )
 }
+
+/// The body of a trampoline that reaches a native entry through the hidden 8-byte slot `slot`: the
+/// pair of relocations that load its address, then a branch through it.
+///
+/// This is what the rlib rescue defines one of per symbol a native archive left undefined, and the
+/// owning Engine writes the address the trampoline should reach into the slot. The slot is hidden,
+/// so the relocations reach it without a GOT, and `x16` is one of the two scratch registers the
+/// procedure call standard reserves -- the same one `entry_asm` uses, for the same reason.
+pub fn slot_jump_asm(slot: &str) -> String {
+    format!("    adrp x16, {slot}@PAGE\n    ldr x16, [x16, {slot}@PAGEOFF]\n    br x16")
+}

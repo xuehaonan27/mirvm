@@ -18,35 +18,9 @@ __attribute__(({attribute})) static void lifecycle(void) {{ callback(); }}
         ),
     )
     .unwrap();
-    let slot = super::super::ir::native_entry_slot_name(link_addr);
-    std::fs::write(
-        &bridge,
-        format!(
-            r#"
-.intel_syntax noprefix
-.text
-.globl callback
-.hidden callback
-.type callback,@function
-callback:
-    jmp QWORD PTR [rip + {slot}]
-.size callback,.-callback
-.pushsection .data.mirvm_p1,"aw",@progbits
-.p2align 3
-.globl {slot}
-.hidden {slot}
-.type {slot},@object
-.size {slot},8
-{slot}:
-    .quad 0
-.popsection
-.section .note.GNU-stack,"",@progbits
-"#
-        ),
-    )
-    .unwrap();
+    std::fs::write(&bridge, bridge_asm(link_addr)).unwrap();
     let output = Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wl,-z,defs", "-Wl,-Bsymbolic"])
+        .args(crate::os::linker::COMMON)
         .arg(&lifecycle)
         .arg(&bridge)
         .arg("-o")
@@ -60,6 +34,28 @@ callback:
         String::from_utf8_lossy(&output.stderr)
     );
     (directory, library)
+}
+
+/// The machine-code side of this fixture: a function that reaches the engine's budgeted entry
+/// through a hidden slot, in whatever object format this platform's toolchain writes. The shape is
+/// the same one the rlib rescue emits, which is the point -- the fixture exercises that path.
+fn bridge_asm(link_addr: LinkAddr) -> String {
+    use crate::native::asmtext::{Region, Visibility, Vocabulary};
+    let format = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+    let slot = super::super::ir::native_entry_slot_name(link_addr);
+    let mut asm = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
+    format.define_fn(&mut asm, "callback", Visibility::Private);
+    asm.push_str(&crate::os_arch::bridge::slot_jump_asm(
+        &format.symbol(&slot),
+    ));
+    asm.push('\n');
+    format.end_fn(&mut asm, "callback");
+    format.open(&mut asm, Region::Slots { name: "mirvm_p1" });
+    asm.push_str(".balign 8\n");
+    format.define_slot(&mut asm, &slot, Visibility::Private);
+    format.close(&mut asm);
+    format.no_executable_stack(&mut asm);
+    asm
 }
 
 fn constructor_signal_fault_archive(link_addr: LinkAddr) -> (NativeFixtureDir, PathBuf) {
@@ -77,33 +73,7 @@ __attribute__((constructor)) static void lifecycle(void) { callback(); }
 "#,
     )
     .unwrap();
-    let slot = super::super::ir::native_entry_slot_name(link_addr);
-    std::fs::write(
-        &bridge,
-        format!(
-            r#"
-.intel_syntax noprefix
-.text
-.globl callback
-.hidden callback
-.type callback,@function
-callback:
-    jmp QWORD PTR [rip + {slot}]
-.size callback,.-callback
-.pushsection .data.mirvm_p1,"aw",@progbits
-.p2align 3
-.globl {slot}
-.hidden {slot}
-.type {slot},@object
-.size {slot},8
-{slot}:
-    .quad 0
-.popsection
-.section .note.GNU-stack,"",@progbits
-"#
-        ),
-    )
-    .unwrap();
+    std::fs::write(&bridge, bridge_asm(link_addr)).unwrap();
     for (source, object) in [(&lifecycle, &lifecycle_object), (&bridge, &bridge_object)] {
         let output = Command::new("cc")
             .args(["-fPIC", "-c"])
