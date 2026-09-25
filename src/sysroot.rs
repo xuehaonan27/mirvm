@@ -222,8 +222,17 @@ fn sysroot_profile() -> ProfileFlags {
 /// Rustflags for the sysroot build (the rustflags channel reaches target units only --
 /// build.rs compilation does not see them, matching cargo). Unstable features in the std
 /// crates are admitted without `#[unstable]` markers, as rustbuild / `cargo -Zbuild-std` do.
+///
+/// Lints are capped because these crates are this runtime's own, compiled from the toolchain's
+/// sources rather than from anything a user wrote: measured, the vendored `std` carries an
+/// `#[expect]` its own build does not fulfil, so an uncapped build prints a warning in the middle
+/// of whatever command was running, once per cold sysroot, about code the user never sees.
 fn sysroot_rustflags() -> Vec<String> {
-    vec!["-Zforce-unstable-if-unmarked".to_string()]
+    vec![
+        "-Zforce-unstable-if-unmarked".to_string(),
+        "--cap-lints".to_string(),
+        "allow".to_string(),
+    ]
 }
 
 /// Top-level library/ sentinel: a sorted fold of (name, len, mtime_ns) over library/ itself
