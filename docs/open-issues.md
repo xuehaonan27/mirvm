@@ -111,7 +111,14 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   written inline in that function aborts with SIGABRT (134) while the same rendering behind one call
   into `vm::stats::print` exits 101; `tests/run.sh case panic_exit` and `threads_panic` are the fast-tier
   canaries. The current shape is held by the comment on that branch; a real close needs the miscompiled
-  construct identified (LLVM 22 / nightly-2026-07-02), not another layout coincidence.
+  construct identified (LLVM 22 / nightly-2026-07-02), not another layout coincidence. Further
+  evidence, measured while adding `mirvm prepare`: the whole-binary perturbation is real and
+  deterministic — giving `run_driver` one more argument (and threading it through its callers) made
+  every guest panic abort, caught or not, while the same feature shaped as a process-global flag read
+  at the execution seam kept the canaries green; the abort is a silent `abort()` after the panic hook,
+  i.e. the unwinder failing in phase 2, and the whole thing disappears under
+  `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256` but not under `=1`, which points at codegen-unit packing
+  and inlining rather than at any particular statement.
 - **E36** `OPEN`: `jit_builtin_probe` hangs — the `native-diff` mode is RED at 53 passed, 1 failed, with
   `mirvm=124` against `native=0`, and the hang is deterministic across runs. Not a regression of the
   platform refactor: it reproduces identically on `c82a065` with that refactor reverted. It also has no

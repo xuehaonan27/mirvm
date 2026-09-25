@@ -30,6 +30,7 @@ pub(crate) mod table;
 
 use std::fmt::{self, Write as _};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Which subsystem is speaking. The bracket in `mirvm[component]:` is this value's [`name`].
 ///
@@ -37,6 +38,7 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Component {
     Run,
+    Prepare,
     Pack,
     Test,
     Capture,
@@ -65,6 +67,7 @@ impl Component {
     pub fn name(self) -> &'static str {
         match self {
             Component::Run => "run",
+            Component::Prepare => "prepare",
             Component::Pack => "pack",
             Component::Test => "test",
             Component::Capture => "capture",
@@ -91,6 +94,9 @@ impl Component {
 }
 
 /// How serious a line is. Every emitted line carries one.
+///
+/// The declaration order is the order the severity threshold compares in: most serious first, so a
+/// threshold admits every line at or below its own discriminant.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
     Error,
@@ -101,6 +107,16 @@ pub enum Severity {
 }
 
 impl Severity {
+    /// Every severity, most serious first. The options register validates `MIRVM_LOG` against
+    /// these names, so the vocabulary is spelled once.
+    pub const ALL: [Severity; 5] = [
+        Severity::Error,
+        Severity::Warning,
+        Severity::Note,
+        Severity::Info,
+        Severity::Debug,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Severity::Error => "error",
@@ -110,6 +126,38 @@ impl Severity {
             Severity::Debug => "debug",
         }
     }
+
+    /// The severity `name` spells, or `None` for a word this vocabulary does not define.
+    pub fn from_name(name: &str) -> Option<Severity> {
+        Severity::ALL.into_iter().find(|one| one.name() == name)
+    }
+}
+
+/// The quietest severity that still reaches the sinks, as its own discriminant.
+///
+/// It is the threshold `MIRVM_LOG` / `-v` selects, resolved once at the dispatch boundary. The
+/// default is `Warning`: a run reports what the user must act on and says nothing about the work
+/// mirvm did to get there — preparation progress belongs to `mirvm prepare`. A fieldless enum's
+/// discriminants follow its declaration order, so the comparison needs no table and no bounds
+/// check; `Error` is 0, so no threshold can suppress a failure.
+static THRESHOLD: AtomicU8 = AtomicU8::new(Severity::Warning as u8);
+
+/// Set the quietest severity that still prints. Called once, before any diagnostic is reported.
+pub fn set_min_severity(severity: Severity) {
+    THRESHOLD.store(severity as u8, Ordering::Relaxed);
+}
+
+/// Whether a line of this severity reaches the sinks at all.
+pub fn prints(severity: Severity) -> bool {
+    (severity as u8) <= THRESHOLD.load(Ordering::Relaxed)
+}
+
+/// Whether this run asked for mirvm's own detail: the threshold admits `Info`.
+///
+/// One meaning, two users: progress lines that are otherwise silent, and guest build diagnostics
+/// that are otherwise held back until the build fails.
+pub fn verbose() -> bool {
+    prints(Severity::Info)
 }
 
 /// The exit-code class of a failure. The number itself lives in [`exit`], once.
@@ -239,7 +287,13 @@ pub fn write(bytes: &[u8]) {
 }
 
 /// Report one diagnostic: fd 2 plus the capture tee.
+///
+/// A line below the threshold is dropped here, before rendering, so nothing about it — not even its
+/// shape — reaches a sink. The usage block goes with the line that owns it.
 pub fn emit(diagnostic: &dyn Diagnostic) {
+    if !prints(diagnostic.severity()) {
+        return;
+    }
     let line = render(diagnostic);
     write(line.as_bytes());
     write_usage(diagnostic);
@@ -260,6 +314,9 @@ fn write_usage(diagnostic: &dyn Diagnostic) {
 /// cannot use [`emit`].
 pub fn emit_direct(diagnostic: &dyn Diagnostic) {
     use std::io::Write as _;
+    if !prints(diagnostic.severity()) {
+        return;
+    }
     let line = render(diagnostic);
     let _ = std::io::stderr().write_all(line.as_bytes());
     if !json::enabled()
@@ -270,6 +327,10 @@ pub fn emit_direct(diagnostic: &dyn Diagnostic) {
 }
 
 /// Render one diagnostic exactly as [`emit`] would, without writing it.
+///
+/// The threshold does not apply: this renders a line its caller owns and has already decided to
+/// show (`mirvm log` prints a recorded report), which is not the same decision as "would a live run
+/// have said this".
 ///
 /// For the one command that owns its output writers (`mirvm log` takes them so its report can be
 /// asserted in a unit test): the rendering, the mode and the grammar still come from here, so a
@@ -492,5 +553,25 @@ mod tests {
         let line = json::line(&info);
         assert!(!line.contains("exit_code"), "{line}");
         assert!(line.starts_with("{\"v\":1,\"severity\":\"info\",\"component\":null,"));
+    }
+
+    /// The threshold is a floor, not a filter on failures: it drops everything quieter than itself
+    /// and nothing else, so the quietest setting still reports an error.
+    #[test]
+    fn severity_threshold_cannot_hide_a_failure() {
+        let previous = THRESHOLD.load(Ordering::Relaxed);
+        set_min_severity(Severity::Warning);
+        assert!(prints(Severity::Error) && prints(Severity::Warning));
+        assert!(!prints(Severity::Note) && !prints(Severity::Info) && !prints(Severity::Debug));
+        assert!(!verbose(), "the default run is not verbose");
+        set_min_severity(Severity::Error);
+        assert!(prints(Severity::Error) && !prints(Severity::Warning));
+        set_min_severity(Severity::Info);
+        assert!(prints(Severity::Info) && verbose() && !prints(Severity::Debug));
+        set_min_severity(Severity::Debug);
+        assert!(Severity::ALL.into_iter().all(prints));
+        THRESHOLD.store(previous, Ordering::Relaxed);
+        assert_eq!(Severity::from_name("info"), Some(Severity::Info));
+        assert_eq!(Severity::from_name("quiet"), None);
     }
 }

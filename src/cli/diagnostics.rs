@@ -303,23 +303,29 @@ fn append(source: DiagnosticSource, bytes: &[u8]) {
     }
 }
 
-/// A copy of the pinned rustc diagnostic options needed to replace its
-/// emitter only when a capture is active.
+/// A copy of the pinned rustc diagnostic options needed to replace its emitter whenever mirvm needs
+/// to see the compiler's bytes before the user does: to tee them into a capture stream, to hold them
+/// back for a build's outcome, or both.
 pub(crate) struct CompilerEmitterSpec {
     options: Options,
+    hold: bool,
 }
 
 impl CompilerEmitterSpec {
-    pub(crate) fn for_capture(options: &Options, active: bool) -> Option<Self> {
-        active.then(|| Self {
+    /// `capture` = the session belongs to a capture and its diagnostics enter that stream. `hold` =
+    /// the session's diagnostics wait for [`crate::cli::build_log::finish`] instead of reaching
+    /// stderr at once. Neither is wanted, and rustc keeps its own emitter.
+    pub(crate) fn for_session(options: &Options, capture: bool, hold: bool) -> Option<Self> {
+        (capture || hold).then(|| Self {
             options: options.clone(),
+            hold,
         })
     }
 
     pub(crate) fn install(self, psess: &mut ParseSess) {
         psess
             .dcx()
-            .set_emitter(make_tee_emitter(&self.options, psess));
+            .set_emitter(make_tee_emitter(&self.options, psess, self.hold));
     }
 }
 
@@ -340,7 +346,7 @@ fn resolved_terminal_url(options: &Options) -> TerminalUrl {
     }
 }
 
-fn make_tee_emitter(options: &Options, psess: &ParseSess) -> Box<DynEmitter> {
+fn make_tee_emitter(options: &Options, psess: &ParseSess, hold: bool) -> Box<DynEmitter> {
     let terminal_url = resolved_terminal_url(options);
     let source_map = if options.unstable_opts.link_only {
         None
@@ -353,7 +359,7 @@ fn make_tee_emitter(options: &Options, psess: &ParseSess) -> Box<DynEmitter> {
             let HumanReadableErrorType { short, unicode } = kind;
             let stderr = io::stderr();
             let color_choice = get_stderr_color_choice(color_config, &stderr);
-            let writer: Box<dyn Write + Send> = Box::new(BufferedStderrTee::new());
+            let writer: Box<dyn Write + Send> = Box::new(BufferedStderrTee::new(hold));
             let destination: Destination = AutoStream::new(writer, color_choice);
 
             Box::new(
@@ -384,7 +390,7 @@ fn make_tee_emitter(options: &Options, psess: &ParseSess) -> Box<DynEmitter> {
             color_config,
         } => Box::new(
             JsonEmitter::new(
-                Box::new(io::BufWriter::new(BufferedStderrTee::new())),
+                Box::new(io::BufWriter::new(BufferedStderrTee::new(hold))),
                 source_map,
                 pretty,
                 json_rendered,
@@ -406,19 +412,33 @@ fn make_tee_emitter(options: &Options, psess: &ParseSess) -> Box<DynEmitter> {
 }
 
 /// Mirrors rustc's non-Windows `Buffy`: a renderer can make many small writes,
-/// but one diagnostic reaches inherited stderr and the capture sink together
-/// at its flush boundary.
+/// but one diagnostic reaches its destination whole, at its flush boundary. The destination is
+/// inherited stderr plus the capture sink, or — when `hold` is set — the build log, which decides
+/// later whether either one ever sees it.
 struct BufferedStderrTee {
     stderr: io::Stderr,
     buffer: Vec<u8>,
+    hold: bool,
 }
 
 impl BufferedStderrTee {
-    fn new() -> Self {
+    fn new(hold: bool) -> Self {
         Self {
             stderr: io::stderr(),
             buffer: Vec::new(),
+            hold,
         }
+    }
+
+    /// Send one complete diagnostic to wherever it belongs.
+    fn release(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.hold {
+            crate::cli::build_log::hold(bytes);
+            return Ok(());
+        }
+        self.stderr.write_all(bytes)?;
+        append(DiagnosticSource::Compiler, bytes);
+        Ok(())
     }
 }
 
@@ -428,10 +448,8 @@ impl Write for BufferedStderrTee {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.stderr.write_all(&self.buffer)?;
-        append(DiagnosticSource::Compiler, &self.buffer);
-        self.buffer.clear();
-        Ok(())
+        let bytes = std::mem::take(&mut self.buffer);
+        self.release(&bytes)
     }
 }
 
@@ -442,8 +460,7 @@ impl Drop for BufferedStderrTee {
             // Finalization normally flushes explicitly; this is only the
             // best-effort remainder path.
             let bytes = std::mem::take(&mut self.buffer);
-            let _ = self.stderr.write_all(&bytes);
-            append(DiagnosticSource::Compiler, &bytes);
+            let _ = self.release(&bytes);
         }
     }
 }

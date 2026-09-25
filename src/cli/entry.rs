@@ -363,10 +363,67 @@ pub(super) fn deps_main(
     }
 }
 
+/// `mirvm prepare`: everything `run` does up to the guest's first instruction, then stop.
+///
+/// The uv-shaped split: the half that can fail for a reason the user has to fix has its own
+/// command, so a run can stay quiet about it. `prepare` shows what it does — progress lines, the
+/// guest build's own compiler diagnostics, and the phase ledger.
+///
+/// An explicit `MIRVM_LOG` still outranks this default, and `-v` outranks both.
+pub(super) fn prepare_main(
+    args: impl Iterator<Item = String>,
+) -> Result<ExitCode, crate::error::Error> {
+    let args: Vec<String> = args.collect();
+    // Rejected before the shared parser runs: an option that only shapes the guest is a
+    // contradiction here, not something to ignore silently.
+    if let Some(name) = execution_only_argument(&args) {
+        return Err(crate::error::Error::usage(
+            crate::diag::Component::Prepare,
+            format!("`{name}` only affects guest execution, which `prepare` stops short of"),
+        ));
+    }
+    // The shared parser's own "needs an input" names `run`, so the missing argument is caught here,
+    // where the command the user typed is still known. An input never starts with `-`.
+    if !args.iter().any(|arg| !arg.starts_with('-')) {
+        return Err(crate::error::Error::usage_with(
+            crate::diag::Component::Prepare,
+            "`prepare` needs an input",
+            crate::cli::usage(),
+        ));
+    }
+    if crate::options::source("log_level") == crate::options::Source::Default {
+        crate::options::export_to_process("log_level", crate::diag::Severity::Info.name());
+        crate::diag::set_min_severity(crate::diag::Severity::Info);
+    }
+    crate::cli::set_prepare_only();
+    run_main(args.into_iter())
+}
+
+/// The first argument a `prepare` cannot honour, if the command line carries one.
+fn execution_only_argument(args: &[String]) -> Option<&'static str> {
+    for arg in args {
+        match arg.as_str() {
+            "--" => return Some("program arguments after `--`"),
+            "--dump-mir" => return Some("--dump-mir"),
+            "--vm-call" => return Some("--vm-call"),
+            "--vm-stats" => return Some("--vm-stats"),
+            "--stack-size" => return Some("--stack-size"),
+            "--jit" => return Some("--jit"),
+            _ => {}
+        }
+    }
+    None
+}
+
 pub(super) fn run_main(
     args: impl Iterator<Item = String>,
 ) -> Result<ExitCode, crate::error::Error> {
     use crate::diag::Component;
+    // The command owns its whole process tree: every mirvm process it spawns — a `__cless-dep`
+    // unit, the Cargo wrapper slot, a forwarded runner — compiles a guest crate on this command's
+    // behalf, so the build-diagnostic policy travels with the command instead of being re-decided.
+    // `prepare` reaches here too, and asks for the same policy.
+    crate::options::export_to_process("build_log", "hold");
     let mut args = args.peekable();
     let mut input = None;
     let mut dump_mir = false;
@@ -391,6 +448,7 @@ pub(super) fn run_main(
             }
             "--dump-mir" => dump_mir = true,
             "--json" => super::note_json_output(),
+            "--verbose" | "-v" => super::note_verbose(),
             "--edition" => edition = next("--edition")?,
             "--sysroot" => sysroot = Some(next("--sysroot")?),
             // Backward compat for old gate scripts: --engine vm is the only engine, just consume it

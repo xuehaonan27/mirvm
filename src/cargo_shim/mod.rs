@@ -202,11 +202,14 @@ fn cargo_project_command(
     // Force the host target: it makes host and target crates distinguishable and activates
     // target.runner
     cmd.arg("--target").arg(crate::options::build::HOST);
-    // Every "run a binary" action is redirected to us
-    cmd.arg("--config").arg(cargo_runner_config(
-        self_exe,
-        crate::cli::capture_directory(),
-    ));
+    // Every action that ends in running a binary is redirected to us; `build` is the one action
+    // that stops before that, so it gets Cargo's own progress and no runner.
+    if !matches!(action, CargoAction::Build { .. }) {
+        cmd.arg("--config").arg(cargo_runner_config(
+            self_exe,
+            crate::cli::capture_directory(),
+        ));
+    }
     // Shared dependency store: every script/project mirvm build uses the same target dir.
     // The cargo fingerprint is a content-addressed compile key (version x features x
     // dependency closure x flags x toolchain), so one crate compilation unit exists once per
@@ -224,7 +227,9 @@ fn cargo_project_command(
     if matches!(action, CargoAction::Run { .. }) {
         cmd.arg("--quiet");
     }
-    if !program_args.is_empty() {
+    // `build` takes no trailing arguments; the Run and Test actions pass the guest's, and the test
+    // harness's own, after `--`.
+    if !matches!(action, CargoAction::Build { .. }) && !program_args.is_empty() {
         cmd.arg("--");
         cmd.args(program_args);
     }
@@ -256,9 +261,9 @@ fn cargo_project_command(
     cmd
 }
 
-/// A user action on the Cargo-compatible track. Both actions share one wrapper/runner
-/// protocol; they differ only in whether Cargo picks one run bin or picks and launches
-/// several test harnesses in sequence.
+/// A user action on the Cargo-compatible track. Every action shares one wrapper/runner
+/// protocol; they differ in what Cargo is asked to do with the binaries it compiles: run one,
+/// run and launch several test harnesses, or build them and stop.
 #[derive(Clone, Copy)]
 enum CargoAction<'a> {
     Run {
@@ -268,6 +273,11 @@ enum CargoAction<'a> {
     Test {
         cargo_args: &'a [String],
     },
+    /// `mirvm prepare`: Cargo's own cache is the preparation, and the guest is never launched.
+    Build {
+        bin_sel: Option<&'a str>,
+        ignore_rust_version: bool,
+    },
 }
 
 impl CargoAction<'_> {
@@ -275,12 +285,17 @@ impl CargoAction<'_> {
         match self {
             Self::Run { .. } => "run",
             Self::Test { .. } => "test",
+            Self::Build { .. } => "build",
         }
     }
 
     fn append_args(self, cmd: &mut Command) {
         match self {
             Self::Run {
+                bin_sel: Some(bin),
+                ignore_rust_version,
+            }
+            | Self::Build {
                 bin_sel: Some(bin),
                 ignore_rust_version,
             } => {
@@ -290,6 +305,10 @@ impl CargoAction<'_> {
                 }
             }
             Self::Run {
+                bin_sel: None,
+                ignore_rust_version,
+            }
+            | Self::Build {
                 bin_sel: None,
                 ignore_rust_version,
             } => {
@@ -305,7 +324,7 @@ impl CargoAction<'_> {
 }
 
 /// Phase 1: drive cargo in `project_dir`. program_args go to the program that is finally
-/// interpreted.
+/// interpreted; a `prepare` process is asked for a build instead, and never launches one.
 pub fn phase_cargo(
     project_dir: &std::path::Path,
     program_args: &[String],
@@ -330,13 +349,24 @@ pub fn phase_cargo(
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
     let locked = crate::options::get().cargo_locked;
-    let cmd = cargo_project_command(
-        project_dir,
-        &guest_cwd,
+    // On this track Cargo is the preparer: `cargo build` produces the dependency artifacts and the
+    // crate's own metadata, and Cargo's fingerprints make the following run a no-op for everything
+    // but the runner's own lowering session.
+    let action = if crate::cli::prepare_only() {
+        CargoAction::Build {
+            bin_sel,
+            ignore_rust_version,
+        }
+    } else {
         CargoAction::Run {
             bin_sel,
             ignore_rust_version,
-        },
+        }
+    };
+    let cmd = cargo_project_command(
+        project_dir,
+        &guest_cwd,
+        action,
         program_args,
         &sysroot,
         &self_exe,
@@ -647,6 +677,42 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|pair| pair == [OsStr::new("run"), OsStr::new("--locked")])
+        );
+    }
+
+    /// `prepare` on this track is `cargo build`: one binary selected the same way, Cargo's own
+    /// progress (no `--quiet`), and no runner — nothing is launched, so nothing is redirected.
+    #[test]
+    fn cargo_build_action_selects_a_binary_and_redirects_nothing() {
+        let command = cargo_project_command(
+            Path::new("/tmp/project"),
+            Path::new("/tmp/caller"),
+            CargoAction::Build {
+                bin_sel: Some("app"),
+                ignore_rust_version: true,
+            },
+            &[],
+            Path::new("/tmp/sysroot"),
+            Path::new("/tmp/mirvm"),
+            false,
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[0], OsStr::new("build"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == [OsStr::new("--bin"), OsStr::new("app")])
+        );
+        assert!(
+            args.iter()
+                .any(|arg| *arg == OsStr::new("--ignore-rust-version"))
+        );
+        assert!(
+            args.iter().all(|arg| *arg != OsStr::new("--config")),
+            "a build has no runner: {args:?}"
+        );
+        assert!(
+            args.iter().all(|arg| *arg != OsStr::new("--quiet")),
+            "prepare is allowed to show Cargo's progress: {args:?}"
         );
     }
 

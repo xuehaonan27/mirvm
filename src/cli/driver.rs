@@ -54,6 +54,11 @@ pub(crate) fn pack_driver(
     if callbacks.runner_finalization_filter_installed {
         restore_runner_finalization_filter();
     }
+    // The session is over and its verdict is known, so the guest build diagnostics held back
+    // during it can be released (a build the user must fix, or a verbose run) or dropped.
+    crate::cli::build_log::finish(
+        compiler_code != ExitCode::SUCCESS || callbacks.exit_code.is_some(),
+    );
     if compiler_code != ExitCode::SUCCESS {
         return compiler_code;
     }
@@ -251,9 +256,10 @@ impl Callbacks for MirvmCallbacks {
         // Warning-counting hook (precondition for L2 entry): psess_created fires after the
         // interface overwrites TRACK_DIAGNOSTIC and before the first parse, so no session
         // diagnostic is missed.
-        let emitter = diagnostics::CompilerEmitterSpec::for_capture(
+        let emitter = diagnostics::CompilerEmitterSpec::for_session(
             &config.opts,
             self.route_compiler_diagnostics,
+            crate::options::protocol::build_log_hold(),
         );
         config.psess_created = Some(Box::new(move |psess| {
             install_warning_counter();
@@ -713,6 +719,18 @@ pub(crate) fn run_driver(
         } else {
             stack.absorb_into(&mut module, &mut instance); // asm merged and re-materialized
         }
+        if crate::cli::prepare_only() {
+            // The cache hit is the preparation: this run found everything already built. Report
+            // what was loaded and stop short of the guest.
+            print_phase_timing(&timing, None, t_start.elapsed(), crate::diag::verbose());
+            if let Err(error) = diagnostic_router.finish() {
+                diagnostics::control(format_args!(
+                    "mirvm capture: cannot finish diagnostics stream: {error}"
+                ));
+                exit(70);
+            }
+            exit(0);
+        }
         if let Some(guest) = &guest_process
             && let Err(error) = guest.enter()
         {
@@ -775,6 +793,11 @@ pub(crate) fn run_driver(
     if callbacks.runner_finalization_filter_installed {
         restore_runner_finalization_filter();
     }
+    // The session is over and its verdict is known, so the guest build diagnostics held back
+    // during it can be released (a build the user must fix, or a verbose run) or dropped.
+    crate::cli::build_log::finish(
+        compiler_code != ExitCode::SUCCESS || callbacks.exit_code.is_some(),
+    );
     // run_compiler performs finish_diagnostics, delayed-bug flushing and
     // compiler drop before returning. Only now may its stream be sealed.
     diagnostic_router.seal_compiler();
@@ -795,6 +818,25 @@ pub(crate) fn run_driver(
             exit(70);
         }
         exit(code);
+    }
+    if crate::cli::prepare_only() {
+        // The session produced everything a run needs from the compiler — frontend, lowering, the
+        // package and the cache store all happened inside it. Only the engine is left, and
+        // `prepare` stops in front of it. The ledger is `Info`-level detail, so a run that asked
+        // for less than that does not get it.
+        print_phase_timing(
+            &callbacks.timing,
+            None,
+            t_start.elapsed(),
+            crate::diag::verbose(),
+        );
+        if let Err(error) = diagnostic_router.finish() {
+            diagnostics::control(format_args!(
+                "mirvm capture: cannot finish diagnostics stream: {error}"
+            ));
+            return ExitCode::from(70);
+        }
+        return ExitCode::SUCCESS;
     }
     if let Some(module) = callbacks.module.take() {
         let mut module = module;
