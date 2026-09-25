@@ -490,6 +490,14 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     let mut asm = asm.to_string();
     strip_slash_comments(&mut asm);
     crate::lower::asm::rewrite_syscall_text(&mut asm);
+    // Guest text is assembled as written, so the note the toolchain appends to output of its own
+    // making is appended here: without it the link warns and the stack is marked executable. It is
+    // empty, and a format that has no such note writes nothing.
+    let format = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+    if !asm.ends_with('\n') {
+        asm.push('\n');
+    }
+    format.no_executable_stack(&mut asm);
     let dir = crate::store::GLOBAL_ASM.dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
         Error::io(
