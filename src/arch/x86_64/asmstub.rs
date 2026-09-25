@@ -93,82 +93,87 @@ pub const INERT_SLOT: [u8; STUB_STRIDE as usize] = {
 // Stack alignment accounting: on entry rsp≡8 (call pushed the return address);
 // pushfq -> 0; sub 272 -> 0; 6 pushes -> 0 (48 ≡ 0 mod 16); so rsp≡0 at `call`.
 
-unsafe extern "C" {
-    fn mirvm_syscall_trampoline();
-}
+// TODO:
+// 1. movdqu only save lower 128 bits, AVX/AVX-512 will crash (e.g. taget-cpu=native)
+// 2. using xsave/xsavec to save?
+// 3. common VM/sandbox would use such structure to hook syscall as well, mirvm might
+// integrate with VM/sandbox.
 
 /// Get trampoline address, which would be filled into asm-stub/global-asm
 pub fn syscall_trampoline_addr() -> u64 {
     mirvm_syscall_trampoline as *const () as u64
 }
 
-// TODO:
-// 1. movdqu only save lower 128 bits, AVX/AVX-512 will crash (e.g. taget-cpu=native)
-// 2. using xsave/xsavec to save?
-// 3. common VM/sandbox would use such structure to hook syscall as well, mirvm might
-// integrate with VM/sandbox.
-std::arch::global_asm!(
-    ".globl mirvm_syscall_trampoline", // global symbol
-    ".p2align 4",                      // align to 16 bytes
-    "mirvm_syscall_trampoline:",       // declare entry
-    "pushfq",                          // save RFLAGS (including DF, CF/ZF/SF)
-    "sub rsp, 272",                    // save all SSE state to stack, 16 * xmm + 16 = = 272
-    // `mirvm_syscall_dispatch` does not guarantee anything
-    "movdqu [rsp], xmm0",
-    "movdqu [rsp+16], xmm1",
-    "movdqu [rsp+32], xmm2",
-    "movdqu [rsp+48], xmm3",
-    "movdqu [rsp+64], xmm4",
-    "movdqu [rsp+80], xmm5",
-    "movdqu [rsp+96], xmm6",
-    "movdqu [rsp+112], xmm7",
-    "movdqu [rsp+128], xmm8",
-    "movdqu [rsp+144], xmm9",
-    "movdqu [rsp+160], xmm10",
-    "movdqu [rsp+176], xmm11",
-    "movdqu [rsp+192], xmm12",
-    "movdqu [rsp+208], xmm13",
-    "movdqu [rsp+224], xmm14",
-    "movdqu [rsp+240], xmm15",
-    "stmxcsr [rsp+256]", // SSE control/status register
-    // Here: still 16 bytes aligned.
-    // rax: holding syscall number, do not need saving.
-    // rcx, r11: to be destroyed by syscall according to ISA.
-    // rbx, rbp, r12-r15: callee-saved registers.
-    "push r9",
-    "push r8",
-    "push r10",
-    "push rdx",
-    "push rsi",
-    "push rdi",
-    "mov rdi, rax", // syscall number
-    "mov rsi, rsp", // syscall arguments
-    "call mirvm_syscall_dispatch",
-    // rax should not be touched since it's holding return value.
-    "pop rdi",
-    "pop rsi",
-    "pop rdx",
-    "pop r10",
-    "pop r8",
-    "pop r9",
-    "ldmxcsr [rsp+256]",
-    "movdqu xmm0, [rsp+0]",
-    "movdqu xmm1, [rsp+16]",
-    "movdqu xmm2, [rsp+32]",
-    "movdqu xmm3, [rsp+48]",
-    "movdqu xmm4, [rsp+64]",
-    "movdqu xmm5, [rsp+80]",
-    "movdqu xmm6, [rsp+96]",
-    "movdqu xmm7, [rsp+112]",
-    "movdqu xmm8, [rsp+128]",
-    "movdqu xmm9, [rsp+144]",
-    "movdqu xmm10, [rsp+160]",
-    "movdqu xmm11, [rsp+176]",
-    "movdqu xmm12, [rsp+192]",
-    "movdqu xmm13, [rsp+208]",
-    "movdqu xmm14, [rsp+224]",
-    "movdqu xmm15, [rsp+240]",
-    "add rsp, 272",
-    "popfq",
-    "ret",
-);
+/// A naked function rather than a block of module-level asm, for the reason the other
+/// architecture's twin gives: a naked function is one symbol, spelled once, on every object format,
+/// and the dispatch below is named by the compiler rather than written out, so neither has to carry
+/// whatever prefix this platform's format puts on a C symbol. The entry's own alignment is the
+/// compiler's business now and is not part of the accounting above, which counts only what the
+/// caller's `call` put on the stack.
+#[unsafe(naked)]
+pub extern "C" fn mirvm_syscall_trampoline() {
+    core::arch::naked_asm!(
+        "pushfq",                          // save RFLAGS (including DF, CF/ZF/SF)
+        "sub rsp, 272",                    // save all SSE state to stack, 16 * xmm + 16 = = 272
+        // `mirvm_syscall_dispatch` does not guarantee anything
+        "movdqu [rsp], xmm0",
+        "movdqu [rsp+16], xmm1",
+        "movdqu [rsp+32], xmm2",
+        "movdqu [rsp+48], xmm3",
+        "movdqu [rsp+64], xmm4",
+        "movdqu [rsp+80], xmm5",
+        "movdqu [rsp+96], xmm6",
+        "movdqu [rsp+112], xmm7",
+        "movdqu [rsp+128], xmm8",
+        "movdqu [rsp+144], xmm9",
+        "movdqu [rsp+160], xmm10",
+        "movdqu [rsp+176], xmm11",
+        "movdqu [rsp+192], xmm12",
+        "movdqu [rsp+208], xmm13",
+        "movdqu [rsp+224], xmm14",
+        "movdqu [rsp+240], xmm15",
+        "stmxcsr [rsp+256]", // SSE control/status register
+        // Here: still 16 bytes aligned.
+        // rax: holding syscall number, do not need saving.
+        // rcx, r11: to be destroyed by syscall according to ISA.
+        // rbx, rbp, r12-r15: callee-saved registers.
+        "push r9",
+        "push r8",
+        "push r10",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "mov rdi, rax", // syscall number
+        "mov rsi, rsp", // syscall arguments
+        "call {dispatch}",
+        // rax should not be touched since it's holding return value.
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop r10",
+        "pop r8",
+        "pop r9",
+        "ldmxcsr [rsp+256]",
+        "movdqu xmm0, [rsp+0]",
+        "movdqu xmm1, [rsp+16]",
+        "movdqu xmm2, [rsp+32]",
+        "movdqu xmm3, [rsp+48]",
+        "movdqu xmm4, [rsp+64]",
+        "movdqu xmm5, [rsp+80]",
+        "movdqu xmm6, [rsp+96]",
+        "movdqu xmm7, [rsp+112]",
+        "movdqu xmm8, [rsp+128]",
+        "movdqu xmm9, [rsp+144]",
+        "movdqu xmm10, [rsp+160]",
+        "movdqu xmm11, [rsp+176]",
+        "movdqu xmm12, [rsp+192]",
+        "movdqu xmm13, [rsp+208]",
+        "movdqu xmm14, [rsp+224]",
+        "movdqu xmm15, [rsp+240]",
+        "add rsp, 272",
+        "popfq",
+        "ret",
+        // A named operand belongs after the body, so the dispatch is named here.
+        dispatch = sym crate::os::process::mirvm_syscall_dispatch,
+    );
+}
