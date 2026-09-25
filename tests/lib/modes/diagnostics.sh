@@ -29,10 +29,13 @@ run_case() { # <name> <deps> <fixture> <unused-name> <missing-symbol> <guest-hex
     local stderr_hex diagnostics_hex expected_hex
     mkdir -p "$plain" "$captured" "$session"
 
+    # The compiler diagnostic this case routes is preparation detail: a `run` holds it back unless
+    # the build failed or the run is verbose. Both legs therefore ask with -v; what the case then
+    # judges — that a capture is byte-identical to the run it captured — is unaffected by that.
     MIRVM_HOME="$HOME_DIR" MIRVM_DEPS="$deps" MIRVM_SYSROOT="$TEST_SYSROOT" \
-        "$MIRVM" run "$fixture" >"$plain/stdout" 2>"$plain/stderr" || plain_code=$?
+        "$MIRVM" run -v "$fixture" >"$plain/stdout" 2>"$plain/stderr" || plain_code=$?
     MIRVM_HOME="$HOME_DIR" MIRVM_DEPS="$deps" MIRVM_SYSROOT="$TEST_SYSROOT" \
-        "$MIRVM" capture -o "$session" -- run "$fixture" \
+        "$MIRVM" capture -o "$session" -- run -v "$fixture" \
         >"$captured/stdout" 2>"$captured/stderr" || capture_code=$?
 
     if [ "$plain_code" -eq 70 ] && [ "$capture_code" -eq 70 ] \

@@ -171,6 +171,24 @@ struct DepCallbacks {
 }
 
 impl Callbacks for DepCallbacks {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        // A dependency compile belongs to the build, not to the guest: when this command holds
+        // build diagnostics back, so does every unit it schedules, and the unit's own outcome
+        // decides whether they are shown. A capture never reaches this process (`__cless-dep` and
+        // the Cargo wrapper slot are not handed a capture directory), so there is no stream to tee
+        // into here.
+        let emitter = diagnostics::CompilerEmitterSpec::for_session(
+            &config.opts,
+            false,
+            crate::options::protocol::build_log_hold(),
+        );
+        config.psess_created = Some(Box::new(move |psess| {
+            if let Some(emitter) = emitter {
+                emitter.install(psess);
+            }
+        }));
+    }
+
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let _ = tcx.collect_and_partition_mono_items(());
         match crate::lower::global_asm::materialize_dep_text(tcx) {
@@ -223,6 +241,9 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
     let code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&session_args, &mut callbacks)
     });
+    // This unit's verdict is known: release the diagnostics held back during its session when it
+    // failed, drop them when it succeeded (unless the run asked for detail).
+    super::build_log::finish(code != ExitCode::SUCCESS);
     exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
 }
 

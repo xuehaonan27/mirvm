@@ -27,10 +27,12 @@ executed in a VM. `DESIGN.md` is the contract; `docs/designs/` holds the per-top
   pthread-exit TSD teardown, and a fork guard that admits `fork` only while the guest is
   single-threaded. `exec` passes through.
 - **Cargo** — the compat track occupies Cargo's `RUSTC` slot, so ordinary and workspace wrappers keep
-  Cargo's own composition and ordering. `MIRVM_DEPS` defaults to `self`: `mirvm run` and `mirvm test`
-  resolve, schedule and build with no cargo in the process, using the in-tree `src/cargoless/` stack.
+  Cargo's own composition and ordering. `MIRVM_DEPS` defaults to `self`: `mirvm run`, `mirvm prepare`
+  and `mirvm test` resolve, schedule and build with no cargo in the process, using the in-tree
+  `src/cargoless/` stack.
   `MIRVM_DEPS=cargo` remains the user fallback and behaviour referee, and both tracks are compared
-  continuously. `mirvm test` covers lib/bin/test/bench/example with libtest or a custom harness, and a
+  continuously; on that track `prepare` is `cargo build`, since Cargo's own cache is what a following
+  run would reuse. `mirvm test` covers lib/bin/test/bench/example with libtest or a custom harness, and a
   rustdoc front end adds doctests without pretending they are ordinary tests.
 - **Images and caches** — a byte-deterministic std base image plus a deps image make warm runs load
   instead of re-lower. An image stack of `[std base, deps…]` carries multi-source lookup, cumulative
@@ -196,14 +198,19 @@ product covering all of Rust.
    must not switch the trace code domain.
 4. **Data rulings.** Rule on 4/16/64 KiB page sizes, hard-pool numbers, writer batching and checksums
    under one memory budget, then implement 4→64 KiB auto-scaling.
-5. **Diagnostics.** The default `run` keeps compiler, frontend, lower, MIRVM control and guest stderr
-   physically merged on fd2 in unchanged byte order; capture tees compiler/control byte-for-byte into
-   `diagnostics.log` from the command boundary, and guest fd2 enters neither the router nor the event
-   ring. Perf capture reuses that boundary. MIRVM-owned lines go through `src/diag`, which renders
-   `mirvm[component]: severity: message` (one JSON object per line under `MIRVM_OUTPUT=json`) and
-   owns the two sinks: routed (fd2 plus the capture tee) and direct (fd2 alone, for signal-adjacent
-   and teardown paths where the tee lock would deadlock). Guest fd1/fd2, the rustc emitter and the
-   cargo-compatibility lines never pass through it. Remaining conversions are T13.
+5. **Diagnostics.** Preparation and execution are separate commands: `mirvm prepare` builds a guest —
+   sysroot, dependencies, frontend, lowering, cache entry — reports the phases, and stops; `mirvm run`
+   does the same work and starts the guest. A guest build's own compiler output is preparation detail,
+   so `run` holds it back and releases it only when the build failed or the run asked for detail
+   (`-v`, `MIRVM_LOG=info|debug`); the severity threshold behind the same option drops mirvm's own
+   quieter lines, and never a failure. Guest fd1/fd2 are never held back. Capture tees
+   compiler/control byte-for-byte into `diagnostics.log` from the command boundary, and guest fd2
+   enters neither the router nor the event ring. Perf capture reuses that boundary. MIRVM-owned lines
+   go through `src/diag`, which renders `mirvm[component]: severity: message` (one JSON object per
+   line under `MIRVM_OUTPUT=json`) and owns the two sinks: routed (fd2 plus the capture tee) and
+   direct (fd2 alone, for signal-adjacent and teardown paths where the tee lock would deadlock). Guest
+   fd1/fd2, the rustc emitter's own rendering and the cargo-compatibility lines never pass through it.
+   Remaining conversions are T13.
 6. **Product capability.** Direct archive semantic verification needs a new offset-based read-only
    representation before a format freeze can be reviewed. OS-level sandboxing is deliberately paused.
    Remaining stage boundaries and acceptance criteria are in `open-issues.md`.

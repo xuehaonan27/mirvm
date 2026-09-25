@@ -40,6 +40,7 @@ impl Identity {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
     Run,
+    Prepare,
     Test,
     Pack,
     Capture,
@@ -55,6 +56,7 @@ impl Scope {
     pub fn name(self) -> &'static str {
         match self {
             Scope::Run => "run",
+            Scope::Prepare => "prepare",
             Scope::Test => "test",
             Scope::Pack => "pack",
             Scope::Capture => "capture",
@@ -71,6 +73,7 @@ impl Scope {
     fn parse(name: &str) -> Self {
         match name {
             "Run" => Scope::Run,
+            "Prepare" => Scope::Prepare,
             "Test" => Scope::Test,
             "Pack" => Scope::Pack,
             "Capture" => Scope::Capture,
@@ -260,6 +263,8 @@ entries! {
     protocol doctest_builder          env(protocol::DOCTEST_BUILDER) default("unset");
     /// Doctest working directory.
     protocol doctest_run_dir          env(protocol::DOCTEST_RUN_DIR) default("unset");
+    /// `hold` = a build's own compiler diagnostics wait for its outcome; `live` = they print at once.
+    protocol build_log                env(protocol::BUILD_LOG) default("live");
 
     /// Print the entry function's MIR and exit.
     user     dump_mir                 cli("--dump-mir", "Run") flag default("off");
@@ -304,7 +309,9 @@ entries! {
     /// `log export` filter: a sequence number or a START:END range.
     user     log_sequence             cli("--sequence", "Log") default("unset");
     /// Machine output: reports as one JSON document, diagnostics as one JSON object per line.
-    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Pack Capture Cache Deps Options") flag default("text");
+    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Prepare Pack Capture Cache Deps Options") flag default("text");
+    /// The quietest diagnostic that still prints: error | warning | note | info | debug.
+    user     log_level                env("MIRVM_LOG") cli("--verbose", "-v", "Run Prepare") flag default("warning");
     /// Internal: forwarded capture directory for the Cargo runner form.
     user     mirvm_capture_directory  cli("--mirvm-capture-directory", "Internal") default("unset");
 }
@@ -431,6 +438,10 @@ pub enum Error {
     ClessJobs { env: &'static str, value: String },
     #[error("{env} only accepts `off`, `sync` or an integer in 0..=256 (got `{value}`)")]
     Threads { env: &'static str, value: String },
+    #[error(
+        "{env} only accepts a severity name: error, warning, note, info or debug (got `{value}`)"
+    )]
+    LogLevel { env: &'static str, value: String },
 }
 
 crate::diag_codes! {
@@ -439,6 +450,7 @@ crate::diag_codes! {
         OutputFormat => "options.output_format" Usage,
         ClessJobs => "options.cless_jobs" Usage,
         Threads => "options.threads" Usage,
+        LogLevel => "options.log_level" Usage,
     }
 }
 
@@ -610,6 +622,21 @@ impl Options {
         }
     }
 
+    /// `MIRVM_LOG` / `--verbose`: the quietest diagnostic that still prints.
+    ///
+    /// The names are [`crate::diag::Severity`]'s own vocabulary, so a severity this register
+    /// accepts is one the emitter can render, and an unknown word is rejected rather than silently
+    /// read as the default.
+    pub(crate) fn log_level(&self) -> Result<crate::diag::Severity, Error> {
+        match raw("log_level").as_deref() {
+            None | Some("") => Ok(crate::diag::Severity::Warning),
+            Some(name) => crate::diag::Severity::from_name(name).ok_or_else(|| Error::LogLevel {
+                env: env_var_name("log_level"),
+                value: name.to_string(),
+            }),
+        }
+    }
+
     /// `MIRVM_CLESS_JOBS`, defaulting to the available parallelism.
     pub fn cless_jobs(&self) -> Result<usize, Error> {
         match raw("cless_jobs") {
@@ -673,6 +700,7 @@ pub mod protocol {
     pub const CALLER_SYSROOT_PRESENT: &str = "MIRVM_CALLER_SYSROOT_PRESENT";
     pub const DOCTEST_BUILDER: &str = "MIRVM_DOCTEST_BUILDER";
     pub const DOCTEST_RUN_DIR: &str = "MIRVM_DOCTEST_RUN_DIR";
+    pub const BUILD_LOG: &str = "MIRVM_BUILD_LOG";
 
     pub fn cargo_session() -> bool {
         std::env::var_os(CARGO_SESSION).is_some()
@@ -740,6 +768,11 @@ pub mod protocol {
 
     pub fn set_doctest_run_dir(cmd: &mut Command, dir: &Path) {
         cmd.env(DOCTEST_RUN_DIR, dir);
+    }
+
+    /// Whether this process holds a guest build's compiler diagnostics back.
+    pub fn build_log_hold() -> bool {
+        std::env::var(BUILD_LOG).is_ok_and(|value| value == "hold")
     }
 }
 

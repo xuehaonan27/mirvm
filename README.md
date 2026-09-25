@@ -26,10 +26,15 @@ cargo build --release --locked
 ./target/release/mirvm run tests/data/programs/fib.rs             # single file
 ./target/release/mirvm run tests/data/programs/ecosystem.rs       # single file with dependencies
 ./target/release/mirvm run path/to/project -- arg1 arg2     # Cargo project
+./target/release/mirvm prepare path/to/project              # build it, report it, run nothing
 ./target/release/mirvm test path/to/project -- --nocapture  # cargo test, without Cargo
 ./target/release/mirvm pack path/to/project -o app.mirvm    # self-contained package
 ./target/release/mirvm run app.mirvm
 ```
+
+`run` is quiet on success: it says what the guest said, not what building it cost. `prepare` is the
+command that does the building and shows it, and `run -v` (`MIRVM_LOG=debug`) is how one run asks for
+that detail.
 
 A single file declares its dependencies with cargo-script (RFC 3424) frontmatter:
 

@@ -41,9 +41,11 @@ mode_run() {
     base=$TMP/$name
     apply_env "$(field env "")"
 
-    # The native leg's compiler diagnostics are part of the compared stderr: mirvm emits the same
-    # front-end warnings, so a divergence there is a real difference.
-    if ! "$RUSTC" --edition 2024 -o "$base.native.bin" "$src" 2>"$base.build"; then
+    # `mirvm run` holds a guest build's own front-end diagnostics back on success — they are
+    # preparation detail, released only when the build failed or under `-v` — so the native leg is
+    # compiled with the same discipline and the compared stderr is the guest's own output on both
+    # sides. A compiler error still fails this leg, and is reported as such.
+    if ! "$RUSTC" --edition 2024 -Awarnings -o "$base.native.bin" "$src" 2>"$base.build"; then
         bad "$name (native rustc failed)"
         head -20 "$base.build"
         return 1

@@ -8,10 +8,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::OnceLock;
 
 use crate::cargo_shim;
 
 mod base_image;
+mod build_log;
 mod cargo;
 pub(crate) mod diagnostics;
 mod driver;
@@ -104,6 +106,7 @@ USAGE:
     mirvm run <x.mirvm>  [OPTIONS] [-- <program args>]   # run a .mirvm package (mode B slice 2)
     mirvm pack <target>  [-o out.mirvm]                  # cargo project / script / single file -> .mirvm package
     mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo project (deps auto-built as MIR rlibs)
+    mirvm prepare <same inputs as run> [OPTIONS]         # do everything run does, then stop before the guest starts
     mirvm test [dir | Cargo.toml] [OPTIONS] [TESTNAME] [-- <libtest args>]
     mirvm capture [-o DIR] -- run <input> [OPTIONS]      # record one real guest execution
     mirvm options [--json]                               # every external input mirvm defines, with value and source
@@ -117,6 +120,25 @@ USAGE:
     mirvm cache purge --all                              # purge cache/ + build/ + run/: everything that needs no network
     mirvm cache purge --all --data                       # also data/ (crate store + sysroot): full cold start
 ";
+
+/// Set once at the `prepare` command boundary: the process prepares and stops instead of running.
+///
+/// A process-global rather than a parameter, the same way `capture_directory` is one: it is a
+/// command-scoped decision read at a single seam, and a parameter on `run_driver` would change the
+/// frame of every caller. That shape change is not free here — it is enough to trip the pinned
+/// toolchain's release-build cleanup-chain miscompile (`open-issues.md` E35), which turns every guest
+/// panic into a SIGABRT, while this shape leaves the fast-tier canaries green.
+static PREPARE_ONLY: OnceLock<()> = OnceLock::new();
+
+/// Whether this process is a `mirvm prepare` that must stop before the guest starts.
+pub(crate) fn prepare_only() -> bool {
+    PREPARE_ONLY.get().is_some()
+}
+
+/// Mark this process as a `prepare`. Called once, by the command boundary.
+pub(crate) fn set_prepare_only() {
+    let _ = PREPARE_ONLY.set(());
+}
 
 /// The full help text: the command summary plus the option, environment and diagnostic blocks,
 /// which are generated from [`crate::options::entries`] so help cannot drift from the code.
@@ -143,6 +165,12 @@ pub fn main() -> ExitCode {
     // once here rather than silently falling back to text at every call site.
     if let Err(error) = crate::options::get().output_format() {
         return crate::error::Error::from(error).report();
+    }
+    // And the same for how much mirvm says: the threshold is read by `diag` at every call site,
+    // including the ones that run before a command exists, so it is resolved once here.
+    match crate::options::get().log_level() {
+        Ok(severity) => crate::diag::set_min_severity(severity),
+        Err(error) => return crate::error::Error::from(error).report(),
     }
     let mut argv = std::env::args();
     let argv0 = argv.next().unwrap_or_default();
@@ -198,6 +226,7 @@ pub fn main() -> ExitCode {
 
     let command = match first.as_str() {
         "run" => entry::run_main(argv),
+        "prepare" => entry::prepare_main(argv),
         "capture" => capture_main(argv),
         "test" => test_main(argv),
         "pack" => entry::pack_main(argv),
@@ -228,12 +257,24 @@ pub(crate) fn note_json_output() {
     crate::options::export_to_process("output_format", "json");
 }
 
+/// Record `-v`/`--verbose` on the command line: the command line's spelling of `MIRVM_LOG=debug`.
+///
+/// Same discipline as [`note_json_output`] — the resolved value is exported so every child process
+/// reads back one decision — plus the one thing a child cannot observe through the environment
+/// alone: this process's own threshold, which the emitter consults directly.
+pub(crate) fn note_verbose() {
+    crate::options::note_cli("log_level");
+    crate::options::export_to_process("log_level", crate::diag::Severity::Debug.name());
+    crate::diag::set_min_severity(crate::diag::Severity::Debug);
+}
+
 /// The component a dispatch spelling speaks for, in the `diag` vocabulary. An unrecognized command
 /// is about to be rejected with the usage text, so its scope never reaches a diagnostic.
 fn component_of(command: &str) -> crate::diag::Component {
     use crate::diag::Component;
     match command {
         "run" => Component::Run,
+        "prepare" => Component::Prepare,
         "capture" => Component::Capture,
         "test" => Component::Test,
         "pack" => Component::Pack,
