@@ -129,6 +129,14 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, Error> 
     // Bare `syscall` instructions become indirect slot calls. The rewrite runs before content
     // hashing, so the cache key matches the final bytes.
     rewrite_syscall_text(&mut src);
+    // The assembler's own output ends with this note, and a linker that does not find it warns and
+    // marks the stack executable. This text is generated, so it says so here; the note is empty and
+    // this platform's format needs none, which is why the vocabulary decides what to write.
+    let format = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+    if !src.ends_with('\n') {
+        src.push('\n');
+    }
+    format.no_executable_stack(&mut src);
 
     // FNV-1a content hash: stable, so runs reuse the same cache key
     let h = fnv1a(src.as_bytes());
