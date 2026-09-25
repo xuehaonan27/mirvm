@@ -24,6 +24,10 @@ pub(crate) const INTERPOSED_CALLS: &[&str] = &[
     "signal",
     "sigaction",
     "raise",
+    // A native image's destructors are the loader's to run at process exit unless the engine owns
+    // their registration; measured, this is how a modern toolchain emits one -- an initializer that
+    // hands the function to `__cxa_atexit` rather than a terminator list the engine can read.
+    "__cxa_atexit",
 ];
 
 /// The slot holding the engine that owns `call`, or `None` when `call` is not one a bridge entry
@@ -38,6 +42,7 @@ pub(crate) fn owner_slot(call: &str) -> Option<&'static str> {
             Some("__mirvm_pthread_owner")
         }
         "signal" | "sigaction" | "raise" => Some("__mirvm_signal_owner"),
+        "__cxa_atexit" => Some("__mirvm_lifecycle_owner"),
         _ => None,
     }
 }

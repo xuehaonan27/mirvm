@@ -65,7 +65,11 @@ pub(crate) fn bridge_asm() -> Result<String, String> {
     }
     // One region per engine-wide owner rather than one for the whole bridge, so that an image
     // carrying more than one family keeps them apart the way the owners are.
-    for owner in ["__mirvm_pthread_owner", "__mirvm_signal_owner"] {
+    let owner_families: std::collections::BTreeSet<&str> = INTERPOSED_CALLS
+        .iter()
+        .filter_map(|call| owner_slot(call))
+        .collect();
+    for owner in owner_families {
         format.open(&mut out, Region::Slots { name: &owner[9..] });
         out.push_str(".balign 8\n");
         format.define_slot(&mut out, owner, slot_visibility);

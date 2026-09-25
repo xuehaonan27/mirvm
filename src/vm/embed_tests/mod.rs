@@ -302,13 +302,7 @@ fn native_signal_handler_library() -> (NativeFixtureDir, PathBuf) {
 static volatile uint64_t trace;
 static volatile sig_atomic_t finalizer_signal;
 
-/* On a platform whose toolchain emits this attribute as an `__cxa_atexit` registration rather
-   than a terminator section the engine can read, the fixture declares that section itself, so the
-   builder leaves the declaration here to the assembler. */
-#ifndef MIRVM_FINALIZER
-#define MIRVM_FINALIZER __attribute__((destructor)) static
-#endif
-MIRVM_FINALIZER void image_finalizer_raise(void) {
+__attribute__((destructor)) static void image_finalizer_raise(void) {
     int signum = finalizer_signal;
     if (signum != 0) {
         trace = trace * 10 + 7;
@@ -416,35 +410,15 @@ uint64_t read_image_signal_trace(void) { return trace; }
 "#,
     )
     .unwrap();
-    // A platform that emits a terminator section for the attribute needs the C member's own; one
-    // that does not needs the section spelled out beside it, in the one form per format that types
-    // it as a list the loader runs.
-    let assembler_terminator = cfg!(target_os = "macos");
-    let finalizer = directory.path().join("finalizer.S");
-    let finalizer_object = directory.path().join("finalizer.o");
-    if assembler_terminator {
-        use crate::native::asmtext::Vocabulary;
-        let format = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
-        let mut asm = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
-        asm.push_str(terminator_section(crate::os::dll::OBJECT_FORMAT));
-        asm.push_str(".balign 8\n");
-        asm.push_str(&format!(
-            ".quad {}\n",
-            format.symbol("image_finalizer_raise")
-        ));
-        asm.push_str(".popsection\n");
-        format.no_executable_stack(&mut asm);
-        std::fs::write(&finalizer, asm).unwrap();
-    }
-    let mut compile = Command::new("cc");
-    compile.args(["-fPIC", "-c"]).arg(format!(
-        "-DMIRVM_REALTIME_SIGNAL={}",
-        crate::os::signal::realtime_min()
-    ));
-    if assembler_terminator {
-        compile.arg("-DMIRVM_FINALIZER=");
-    }
-    let cc = compile
+    // The destructor is written the way the toolchain writes one: this image's teardown reaches the
+    // engine through the interposed `__cxa_atexit` its generated initializer calls, not through a
+    // terminator section, because an archive this engine links is linked against its bridge.
+    let cc = Command::new("cc")
+        .args(["-fPIC", "-c"])
+        .arg(format!(
+            "-DMIRVM_REALTIME_SIGNAL={}",
+            crate::os::signal::realtime_min()
+        ))
         .arg(&source)
         .arg("-o")
         .arg(&object)
@@ -456,27 +430,12 @@ uint64_t read_image_signal_trace(void) { return trace; }
         String::from_utf8_lossy(&cc.stdout),
         String::from_utf8_lossy(&cc.stderr)
     );
-    if assembler_terminator {
-        let assembled = Command::new("cc")
-            .args(["-fPIC", "-c"])
-            .arg(&finalizer)
-            .arg("-o")
-            .arg(&finalizer_object)
-            .output()
-            .unwrap();
-        assert!(
-            assembled.status.success(),
-            "failed to assemble native signal handler finalizer list:\n{}{}",
-            String::from_utf8_lossy(&assembled.stdout),
-            String::from_utf8_lossy(&assembled.stderr)
-        );
-    }
-    let mut archive_members = Command::new("ar");
-    archive_members.arg("crs").arg(&archive).arg(&object);
-    if assembler_terminator {
-        archive_members.arg(&finalizer_object);
-    }
-    let ar = archive_members.output().unwrap();
+    let ar = Command::new("ar")
+        .arg("crs")
+        .arg(&archive)
+        .arg(&object)
+        .output()
+        .unwrap();
     assert!(
         ar.status.success(),
         "failed to archive native signal handler fixture:\n{}{}",

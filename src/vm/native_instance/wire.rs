@@ -104,6 +104,10 @@ pub(crate) fn patch_pthread_slots(instance: &Instance, engine_id: u64) -> Result
             "__mirvm_raise_target",
             super::super::signal::native_raise as *const () as usize as u64,
         ),
+        (
+            "__mirvm___cxa_atexit_target",
+            super::super::atexit::native_cxa_atexit as *const () as usize as u64,
+        ),
     ];
     // The owner slots the bridge defines, named by the one function that also names them in the
     // bridge text: a name written twice is a slot wired to nothing when the two spellings drift.
