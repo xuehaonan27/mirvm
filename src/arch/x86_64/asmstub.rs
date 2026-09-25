@@ -57,7 +57,7 @@ pub fn bridge_owner_register(call: &str) -> Option<&'static str> {
         "pthread_create" => Some("r8"),
         "pthread_key_create" | "pthread_setspecific" | "signal" => Some("rdx"),
         "pthread_key_delete" | "raise" => Some("rsi"),
-        "sigaction" => Some("rcx"),
+        "sigaction" | "__cxa_atexit" => Some("rcx"),
         _ => None,
     }
 }

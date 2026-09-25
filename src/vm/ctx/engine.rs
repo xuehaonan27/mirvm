@@ -752,7 +752,11 @@ fn finalize_shared(shared: &Shared) {
     // owned by ordinary VM pending state and cannot die with this pthread.
     let _close_signal_drain = CloseSignalDrainGuard::enter(activation.contexts, true);
     super::super::unwind::guard_native_teardown(|| {
-        super::super::native_instance::run_finalizers(&shared.instance)
+        // The image's own terminator list first, then the handlers its initializers registered
+        // with the interposed `__cxa_atexit`: both are this Engine's teardown, and both run under
+        // one guard because an escaping fault has no caller that could own it either way.
+        super::super::native_instance::run_finalizers(&shared.instance);
+        super::super::atexit::run_native_handlers(shared.id);
     });
     drop(activation);
     drop(finalizer);

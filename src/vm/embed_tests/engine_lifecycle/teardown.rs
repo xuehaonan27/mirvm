@@ -8,12 +8,14 @@ fn lifecycle_callback_library(link_addr: LinkAddr, attribute: &str) -> (NativeFi
     let lifecycle = directory.path().join("lifecycle.c");
     let bridge = directory.path().join("bridge.S");
     let library = directory.path().join("lifecycle.so");
-    // Measured on the macos aarch64 toolchain: `__attribute__((destructor))` is not emitted as a
-    // `__mod_term_func` section at all. The compiler generates an initializer that hands the
-    // function to `__cxa_atexit`, which is the *process's* list rather than the image's, so a
-    // destructor fixture declares the terminator section itself (see `bridge_asm`) and keeps only
-    // the callback the assembler half reaches. A constructor needs no such help: that attribute
-    // does become a list this loader runs, in one form or the other.
+    // This fixture is a dylib linked *outside* the engine, so the interposed `__cxa_atexit` an
+    // engine-linked image would reach is not in its link: measured, this platform's toolchain
+    // emits `__attribute__((destructor))` as a `__cxa_atexit` registration from a generated
+    // initializer rather than as a `__mod_term_func` section, and this link's registration goes to
+    // the platform's list. A fixture that needs the engine to own its destructor therefore declares
+    // the terminator section itself (see `bridge_asm`) and keeps only the callback the assembler
+    // half reaches. A constructor needs no such help: that attribute does become a list this
+    // loader runs, in one form or the other.
     let assembler_terminator = cfg!(target_os = "macos") && attribute == "destructor";
     let source = if assembler_terminator {
         "extern void callback(void);\n".to_string()

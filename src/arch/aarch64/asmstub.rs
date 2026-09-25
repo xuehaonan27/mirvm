@@ -69,7 +69,7 @@ pub fn bridge_owner_register(call: &str) -> Option<&'static str> {
     match call {
         "pthread_create" => Some("x4"),
         "pthread_key_create" | "pthread_setspecific" | "signal" => Some("x2"),
-        "sigaction" => Some("x3"),
+        "sigaction" | "__cxa_atexit" => Some("x3"),
         "pthread_key_delete" | "raise" => Some("x1"),
         _ => None,
     }
