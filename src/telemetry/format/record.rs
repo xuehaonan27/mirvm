@@ -43,7 +43,7 @@ impl Control {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
-        let word = read_u64(bytes, 0, "control")?;
+        let word = read_u64(bytes, 0).ok_or_else(|| WireError::truncated("control"))?;
         let reserved = (word >> 48) as u16;
         if reserved != 0 {
             return Err(WireError::new(format!(
@@ -91,20 +91,20 @@ impl PageHeader {
             .checked_add(self.used_bytes as usize)
             .ok_or_else(|| WireError::new("page encoded length overflow"))?;
         let mut out = [0_u8; PAGE_HEADER_BYTES];
-        put(
+        write_bytes(
             &mut out,
             0,
             &Control::new(KIND_PAGE, 0, encoded_bytes).to_le_bytes(),
         );
-        put_u64(&mut out, 8, self.producer_id);
-        put_u64(&mut out, 16, self.first_sequence);
-        put_u64(&mut out, 24, self.next_sequence);
-        put_u64(&mut out, 32, self.initial_engine_id);
-        put_u64(&mut out, 40, self.page_ordinal);
-        put_u32(&mut out, 48, self.thread_generation);
-        put_u32(&mut out, 52, self.os_tid);
-        put_u32(&mut out, 56, self.page_bytes);
-        put_u32(&mut out, 60, self.used_bytes);
+        write_u64(&mut out, 8, self.producer_id);
+        write_u64(&mut out, 16, self.first_sequence);
+        write_u64(&mut out, 24, self.next_sequence);
+        write_u64(&mut out, 32, self.initial_engine_id);
+        write_u64(&mut out, 40, self.page_ordinal);
+        write_u32(&mut out, 48, self.thread_generation);
+        write_u32(&mut out, 52, self.os_tid);
+        write_u32(&mut out, 56, self.page_bytes);
+        write_u32(&mut out, 60, self.used_bytes);
         Ok(out)
     }
 
@@ -145,15 +145,22 @@ impl PageHeader {
             return Err(WireError::new("payload block is not a v0 page"));
         }
         let header = Self {
-            producer_id: read_u64(bytes, 8, "producer id")?,
-            first_sequence: read_u64(bytes, 16, "first sequence")?,
-            next_sequence: read_u64(bytes, 24, "next sequence")?,
-            initial_engine_id: read_u64(bytes, 32, "initial engine id")?,
-            page_ordinal: read_u64(bytes, 40, "page ordinal")?,
-            thread_generation: read_u32(bytes, 48, "thread generation")?,
-            os_tid: read_u32(bytes, 52, "OS tid")?,
-            page_bytes: read_u32(bytes, 56, "logical page bytes")?,
-            used_bytes: read_u32(bytes, 60, "used page bytes")?,
+            producer_id: read_u64(bytes, 8).ok_or_else(|| WireError::truncated("producer id"))?,
+            first_sequence: read_u64(bytes, 16)
+                .ok_or_else(|| WireError::truncated("first sequence"))?,
+            next_sequence: read_u64(bytes, 24)
+                .ok_or_else(|| WireError::truncated("next sequence"))?,
+            initial_engine_id: read_u64(bytes, 32)
+                .ok_or_else(|| WireError::truncated("initial engine id"))?,
+            page_ordinal: read_u64(bytes, 40)
+                .ok_or_else(|| WireError::truncated("page ordinal"))?,
+            thread_generation: read_u32(bytes, 48)
+                .ok_or_else(|| WireError::truncated("thread generation"))?,
+            os_tid: read_u32(bytes, 52).ok_or_else(|| WireError::truncated("OS tid"))?,
+            page_bytes: read_u32(bytes, 56)
+                .ok_or_else(|| WireError::truncated("logical page bytes"))?,
+            used_bytes: read_u32(bytes, 60)
+                .ok_or_else(|| WireError::truncated("used page bytes"))?,
         };
         header.validate()?;
         if control.byte_len() != PAGE_HEADER_BYTES + header.used_bytes as usize {
@@ -173,7 +180,7 @@ pub(crate) struct EngineContext {
 impl EngineContext {
     pub(crate) fn to_le_bytes(&self) -> [u8; ENGINE_CONTEXT_BYTES] {
         let mut out = [0_u8; ENGINE_CONTEXT_BYTES];
-        put(
+        write_bytes(
             &mut out,
             0,
             &Control::new(
@@ -183,7 +190,7 @@ impl EngineContext {
             )
             .to_le_bytes(),
         );
-        put_u64(&mut out, 8, self.engine_id);
+        write_u64(&mut out, 8, self.engine_id);
         out
     }
 
@@ -198,7 +205,7 @@ impl EngineContext {
             return Err(WireError::new("invalid EngineContext control"));
         }
         Ok(Self {
-            engine_id: read_u64(bytes, 8, "Engine id")?,
+            engine_id: read_u64(bytes, 8).ok_or_else(|| WireError::truncated("Engine id"))?,
         })
     }
 }
@@ -225,25 +232,25 @@ impl ProducerEnd {
     pub(crate) fn to_le_bytes(&self) -> Result<[u8; PRODUCER_END_BYTES], WireError> {
         self.validate()?;
         let mut out = [0_u8; PRODUCER_END_BYTES];
-        put(
+        write_bytes(
             &mut out,
             0,
             &Control::new(KIND_PRODUCER_END, 0, PRODUCER_END_BYTES).to_le_bytes(),
         );
-        put_u64(&mut out, 8, self.producer_id);
-        put_u64(&mut out, 16, self.next_sequence);
-        put_u64(&mut out, 24, self.attempted);
-        put_u64(&mut out, 32, self.encoded);
-        put_u64(&mut out, 40, self.committed);
-        put_u64(&mut out, 48, self.drop_capacity);
-        put_u64(&mut out, 56, self.drop_context);
-        put_u64(&mut out, 64, self.drop_recursive);
-        put_u64(&mut out, 72, self.sink_loss);
-        put_u64(&mut out, 80, self.page_count);
-        put_u64(&mut out, 88, self.last_page_ordinal);
-        put_u32(&mut out, 96, self.thread_generation);
-        put_u32(&mut out, 100, self.os_tid);
-        put_u64(&mut out, 104, self.flags);
+        write_u64(&mut out, 8, self.producer_id);
+        write_u64(&mut out, 16, self.next_sequence);
+        write_u64(&mut out, 24, self.attempted);
+        write_u64(&mut out, 32, self.encoded);
+        write_u64(&mut out, 40, self.committed);
+        write_u64(&mut out, 48, self.drop_capacity);
+        write_u64(&mut out, 56, self.drop_context);
+        write_u64(&mut out, 64, self.drop_recursive);
+        write_u64(&mut out, 72, self.sink_loss);
+        write_u64(&mut out, 80, self.page_count);
+        write_u64(&mut out, 88, self.last_page_ordinal);
+        write_u32(&mut out, 96, self.thread_generation);
+        write_u32(&mut out, 100, self.os_tid);
+        write_u64(&mut out, 104, self.flags);
         Ok(out)
     }
 
@@ -286,20 +293,31 @@ impl ProducerEnd {
         }
         require_zero(bytes, 112..128, "ProducerEnd reserved bytes")?;
         let end = Self {
-            producer_id: read_u64(bytes, 8, "producer id")?,
-            next_sequence: read_u64(bytes, 16, "producer next sequence")?,
-            attempted: read_u64(bytes, 24, "producer attempted count")?,
-            encoded: read_u64(bytes, 32, "producer encoded count")?,
-            committed: read_u64(bytes, 40, "producer committed count")?,
-            drop_capacity: read_u64(bytes, 48, "capacity drop count")?,
-            drop_context: read_u64(bytes, 56, "context drop count")?,
-            drop_recursive: read_u64(bytes, 64, "recursive drop count")?,
-            sink_loss: read_u64(bytes, 72, "sink loss count")?,
-            page_count: read_u64(bytes, 80, "producer page count")?,
-            last_page_ordinal: read_u64(bytes, 88, "last page ordinal")?,
-            thread_generation: read_u32(bytes, 96, "thread generation")?,
-            os_tid: read_u32(bytes, 100, "OS tid")?,
-            flags: read_u64(bytes, 104, "ProducerEnd flags")?,
+            producer_id: read_u64(bytes, 8).ok_or_else(|| WireError::truncated("producer id"))?,
+            next_sequence: read_u64(bytes, 16)
+                .ok_or_else(|| WireError::truncated("producer next sequence"))?,
+            attempted: read_u64(bytes, 24)
+                .ok_or_else(|| WireError::truncated("producer attempted count"))?,
+            encoded: read_u64(bytes, 32)
+                .ok_or_else(|| WireError::truncated("producer encoded count"))?,
+            committed: read_u64(bytes, 40)
+                .ok_or_else(|| WireError::truncated("producer committed count"))?,
+            drop_capacity: read_u64(bytes, 48)
+                .ok_or_else(|| WireError::truncated("capacity drop count"))?,
+            drop_context: read_u64(bytes, 56)
+                .ok_or_else(|| WireError::truncated("context drop count"))?,
+            drop_recursive: read_u64(bytes, 64)
+                .ok_or_else(|| WireError::truncated("recursive drop count"))?,
+            sink_loss: read_u64(bytes, 72)
+                .ok_or_else(|| WireError::truncated("sink loss count"))?,
+            page_count: read_u64(bytes, 80)
+                .ok_or_else(|| WireError::truncated("producer page count"))?,
+            last_page_ordinal: read_u64(bytes, 88)
+                .ok_or_else(|| WireError::truncated("last page ordinal"))?,
+            thread_generation: read_u32(bytes, 96)
+                .ok_or_else(|| WireError::truncated("thread generation"))?,
+            os_tid: read_u32(bytes, 100).ok_or_else(|| WireError::truncated("OS tid"))?,
+            flags: read_u64(bytes, 104).ok_or_else(|| WireError::truncated("ProducerEnd flags"))?,
         };
         end.validate()?;
         Ok(end)
@@ -329,7 +347,7 @@ impl SessionEnd {
     pub(crate) fn to_le_bytes(&self) -> Result<[u8; SESSION_END_BYTES], WireError> {
         self.validate()?;
         let mut out = [0_u8; SESSION_END_BYTES];
-        put(
+        write_bytes(
             &mut out,
             0,
             &Control::new(KIND_SESSION_END, 0, SESSION_END_BYTES).to_le_bytes(),
@@ -348,11 +366,11 @@ impl SessionEnd {
             (88, self.bytes_committed),
             (96, self.write_error_count),
         ] {
-            put_u64(&mut out, offset, value);
+            write_u64(&mut out, offset, value);
         }
-        put_i32(&mut out, 104, self.first_write_errno);
-        put_i32(&mut out, 108, self.last_write_errno);
-        put_u64(&mut out, 112, self.flags);
+        write_i32(&mut out, 104, self.first_write_errno);
+        write_i32(&mut out, 108, self.last_write_errno);
+        write_u64(&mut out, 112, self.flags);
         Ok(out)
     }
 
@@ -397,21 +415,35 @@ impl SessionEnd {
         }
         require_zero(bytes, 120..128, "SessionEnd reserved bytes")?;
         let end = Self {
-            producer_count: read_u64(bytes, 8, "session producer count")?,
-            attempted: read_u64(bytes, 16, "session attempted count")?,
-            encoded: read_u64(bytes, 24, "session encoded count")?,
-            committed: read_u64(bytes, 32, "session committed count")?,
-            drop_capacity: read_u64(bytes, 40, "session capacity drop count")?,
-            drop_context: read_u64(bytes, 48, "session context drop count")?,
-            drop_recursive: read_u64(bytes, 56, "session recursive drop count")?,
-            sink_loss: read_u64(bytes, 64, "session sink loss count")?,
-            chunks_committed: read_u64(bytes, 72, "session committed chunks")?,
-            pages_committed: read_u64(bytes, 80, "session committed pages")?,
-            bytes_committed: read_u64(bytes, 88, "session committed bytes")?,
-            write_error_count: read_u64(bytes, 96, "session write error count")?,
-            first_write_errno: read_i32(bytes, 104, "first write errno")?,
-            last_write_errno: read_i32(bytes, 108, "last write errno")?,
-            flags: read_u64(bytes, 112, "SessionEnd flags")?,
+            producer_count: read_u64(bytes, 8)
+                .ok_or_else(|| WireError::truncated("session producer count"))?,
+            attempted: read_u64(bytes, 16)
+                .ok_or_else(|| WireError::truncated("session attempted count"))?,
+            encoded: read_u64(bytes, 24)
+                .ok_or_else(|| WireError::truncated("session encoded count"))?,
+            committed: read_u64(bytes, 32)
+                .ok_or_else(|| WireError::truncated("session committed count"))?,
+            drop_capacity: read_u64(bytes, 40)
+                .ok_or_else(|| WireError::truncated("session capacity drop count"))?,
+            drop_context: read_u64(bytes, 48)
+                .ok_or_else(|| WireError::truncated("session context drop count"))?,
+            drop_recursive: read_u64(bytes, 56)
+                .ok_or_else(|| WireError::truncated("session recursive drop count"))?,
+            sink_loss: read_u64(bytes, 64)
+                .ok_or_else(|| WireError::truncated("session sink loss count"))?,
+            chunks_committed: read_u64(bytes, 72)
+                .ok_or_else(|| WireError::truncated("session committed chunks"))?,
+            pages_committed: read_u64(bytes, 80)
+                .ok_or_else(|| WireError::truncated("session committed pages"))?,
+            bytes_committed: read_u64(bytes, 88)
+                .ok_or_else(|| WireError::truncated("session committed bytes"))?,
+            write_error_count: read_u64(bytes, 96)
+                .ok_or_else(|| WireError::truncated("session write error count"))?,
+            first_write_errno: read_i32(bytes, 104)
+                .ok_or_else(|| WireError::truncated("first write errno"))?,
+            last_write_errno: read_i32(bytes, 108)
+                .ok_or_else(|| WireError::truncated("last write errno"))?,
+            flags: read_u64(bytes, 112).ok_or_else(|| WireError::truncated("SessionEnd flags"))?,
         };
         end.validate()?;
         Ok(end)

@@ -24,25 +24,25 @@ pub(crate) struct FileHeader {
 impl FileHeader {
     pub(crate) fn to_le_bytes(&self) -> [u8; FILE_HEADER_BYTES] {
         let mut out = [0_u8; FILE_HEADER_BYTES];
-        put(&mut out, 0, FILE_MAGIC);
-        put_u16(&mut out, 8, FORMAT_MAJOR);
-        put_u16(&mut out, 10, FORMAT_MINOR);
-        put_u32(&mut out, 12, FILE_HEADER_BYTES as u32);
-        put_u16(&mut out, 16, SCHEMA_MAJOR);
-        put_u16(&mut out, 18, SCHEMA_MINOR);
+        write_bytes(&mut out, 0, FILE_MAGIC);
+        write_u16(&mut out, 8, FORMAT_MAJOR);
+        write_u16(&mut out, 10, FORMAT_MINOR);
+        write_u32(&mut out, 12, FILE_HEADER_BYTES as u32);
+        write_u16(&mut out, 16, SCHEMA_MAJOR);
+        write_u16(&mut out, 18, SCHEMA_MINOR);
         out[20] = self.pointer_width;
         out[21] = self.clock_kind;
-        put_u32(&mut out, 24, self.pid);
-        put(&mut out, 32, &self.session_id);
-        put_u64(&mut out, 48, self.build_id);
-        put_u64(&mut out, 56, self.process_generation);
-        put_u64(&mut out, 64, self.segment_number);
-        put_u64(&mut out, 72, self.monotonic_anchor);
-        put_u64(&mut out, 80, self.wall_unix_ns);
-        put_u64(&mut out, 88, self.clock_frequency_num);
-        put_u64(&mut out, 96, self.clock_frequency_den);
+        write_u32(&mut out, 24, self.pid);
+        write_bytes(&mut out, 32, &self.session_id);
+        write_u64(&mut out, 48, self.build_id);
+        write_u64(&mut out, 56, self.process_generation);
+        write_u64(&mut out, 64, self.segment_number);
+        write_u64(&mut out, 72, self.monotonic_anchor);
+        write_u64(&mut out, 80, self.wall_unix_ns);
+        write_u64(&mut out, 88, self.clock_frequency_num);
+        write_u64(&mut out, 96, self.clock_frequency_den);
         let digest = blake3::hash(&out[..128]);
-        put(&mut out, 128, digest.as_bytes());
+        write_bytes(&mut out, 128, digest.as_bytes());
         out
     }
 
@@ -74,10 +74,14 @@ impl FileHeader {
                 "unsupported v0 clock kind {clock_kind}"
             )));
         }
-        let monotonic_anchor = read_u64(bytes, 72, "monotonic anchor")?;
-        let wall_unix_ns = read_u64(bytes, 80, "wall clock anchor")?;
-        let clock_frequency_num = read_u64(bytes, 88, "clock frequency numerator")?;
-        let clock_frequency_den = read_u64(bytes, 96, "clock frequency denominator")?;
+        let monotonic_anchor =
+            read_u64(bytes, 72).ok_or_else(|| WireError::truncated("monotonic anchor"))?;
+        let wall_unix_ns =
+            read_u64(bytes, 80).ok_or_else(|| WireError::truncated("wall clock anchor"))?;
+        let clock_frequency_num =
+            read_u64(bytes, 88).ok_or_else(|| WireError::truncated("clock frequency numerator"))?;
+        let clock_frequency_den = read_u64(bytes, 96)
+            .ok_or_else(|| WireError::truncated("clock frequency denominator"))?;
         if [
             monotonic_anchor,
             wall_unix_ns,
@@ -89,7 +93,8 @@ impl FileHeader {
         {
             return Err(WireError::new("no-time v0 file has non-zero clock anchors"));
         }
-        let segment_number = read_u64(bytes, 64, "segment number")?;
+        let segment_number =
+            read_u64(bytes, 64).ok_or_else(|| WireError::truncated("segment number"))?;
         if segment_number != 0 {
             return Err(WireError::new(format!(
                 "v0 does not support segment number {segment_number}"
@@ -98,10 +103,11 @@ impl FileHeader {
         Ok(Self {
             pointer_width,
             clock_kind,
-            pid: read_u32(bytes, 24, "pid")?,
-            session_id: read_array(bytes, 32, "session id")?,
-            build_id: read_u64(bytes, 48, "build id")?,
-            process_generation: read_u64(bytes, 56, "process generation")?,
+            pid: read_u32(bytes, 24).ok_or_else(|| WireError::truncated("pid"))?,
+            session_id: read_array(bytes, 32).ok_or_else(|| WireError::truncated("session id"))?,
+            build_id: read_u64(bytes, 48).ok_or_else(|| WireError::truncated("build id"))?,
+            process_generation: read_u64(bytes, 56)
+                .ok_or_else(|| WireError::truncated("process generation"))?,
             segment_number,
             monotonic_anchor,
             wall_unix_ns,
@@ -156,14 +162,14 @@ impl ChunkHeader {
 
     pub(crate) fn to_le_bytes(&self) -> [u8; CHUNK_HEADER_BYTES] {
         let mut out = [0_u8; CHUNK_HEADER_BYTES];
-        put(&mut out, 0, CHUNK_MAGIC);
-        put_u16(&mut out, 8, FORMAT_MAJOR);
-        put_u16(&mut out, 10, FORMAT_MINOR);
-        put_u32(&mut out, 12, CHUNK_HEADER_BYTES as u32);
-        put_u64(&mut out, 16, self.chunk_ordinal);
-        put_u64(&mut out, 24, self.payload_bytes);
-        put_u32(&mut out, 32, self.block_count);
-        put_u32(&mut out, 36, self.page_count);
+        write_bytes(&mut out, 0, CHUNK_MAGIC);
+        write_u16(&mut out, 8, FORMAT_MAJOR);
+        write_u16(&mut out, 10, FORMAT_MINOR);
+        write_u32(&mut out, 12, CHUNK_HEADER_BYTES as u32);
+        write_u64(&mut out, 16, self.chunk_ordinal);
+        write_u64(&mut out, 24, self.payload_bytes);
+        write_u32(&mut out, 32, self.block_count);
+        write_u32(&mut out, 36, self.page_count);
         out
     }
 
@@ -174,10 +180,10 @@ impl ChunkHeader {
         require_eq_u32(bytes, 12, CHUNK_HEADER_BYTES as u32, "chunk header length")?;
         require_zero(bytes, 40..64, "chunk flags/reserved bytes")?;
         Self::new(
-            read_u64(bytes, 16, "chunk ordinal")?,
-            read_u64(bytes, 24, "chunk payload length")?,
-            read_u32(bytes, 32, "chunk block count")?,
-            read_u32(bytes, 36, "chunk page count")?,
+            read_u64(bytes, 16).ok_or_else(|| WireError::truncated("chunk ordinal"))?,
+            read_u64(bytes, 24).ok_or_else(|| WireError::truncated("chunk payload length"))?,
+            read_u32(bytes, 32).ok_or_else(|| WireError::truncated("chunk block count"))?,
+            read_u32(bytes, 36).ok_or_else(|| WireError::truncated("chunk page count"))?,
         )
     }
 }
@@ -222,13 +228,13 @@ impl ChunkFooter {
 
     pub(crate) fn to_le_bytes(&self) -> [u8; CHUNK_FOOTER_BYTES] {
         let mut out = [0_u8; CHUNK_FOOTER_BYTES];
-        put(&mut out, 0, COMMIT_MAGIC);
-        put_u16(&mut out, 8, FORMAT_MAJOR);
-        put_u16(&mut out, 10, FORMAT_MINOR);
-        put_u32(&mut out, 12, CHUNK_FOOTER_BYTES as u32);
-        put_u64(&mut out, 16, self.chunk_ordinal);
-        put_u64(&mut out, 24, self.payload_bytes);
-        put(&mut out, 32, &self.digest);
+        write_bytes(&mut out, 0, COMMIT_MAGIC);
+        write_u16(&mut out, 8, FORMAT_MAJOR);
+        write_u16(&mut out, 10, FORMAT_MINOR);
+        write_u32(&mut out, 12, CHUNK_FOOTER_BYTES as u32);
+        write_u64(&mut out, 16, self.chunk_ordinal);
+        write_u64(&mut out, 24, self.payload_bytes);
+        write_bytes(&mut out, 32, &self.digest);
         out
     }
 
@@ -238,9 +244,11 @@ impl ChunkFooter {
         require_version(bytes, 8, "chunk commit")?;
         require_eq_u32(bytes, 12, CHUNK_FOOTER_BYTES as u32, "chunk footer length")?;
         Ok(Self {
-            chunk_ordinal: read_u64(bytes, 16, "committed chunk ordinal")?,
-            payload_bytes: read_u64(bytes, 24, "committed payload length")?,
-            digest: read_array(bytes, 32, "chunk digest")?,
+            chunk_ordinal: read_u64(bytes, 16)
+                .ok_or_else(|| WireError::truncated("committed chunk ordinal"))?,
+            payload_bytes: read_u64(bytes, 24)
+                .ok_or_else(|| WireError::truncated("committed payload length"))?,
+            digest: read_array(bytes, 32).ok_or_else(|| WireError::truncated("chunk digest"))?,
         })
     }
 

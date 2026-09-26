@@ -49,7 +49,7 @@ pub(crate) struct SyscallEnter {
 impl SyscallEnter {
     pub(crate) fn to_le_bytes(&self) -> [u8; SYSCALL_ENTER_BYTES] {
         let mut out = [0_u8; SYSCALL_ENTER_BYTES];
-        put(
+        write_bytes(
             &mut out,
             0,
             &Control::new(
@@ -59,9 +59,9 @@ impl SyscallEnter {
             )
             .to_le_bytes(),
         );
-        put_i64(&mut out, 8, self.nr);
+        write_i64(&mut out, 8, self.nr);
         for (index, arg) in self.args.iter().enumerate() {
-            put_u64(&mut out, 16 + index * 8, *arg);
+            write_u64(&mut out, 16 + index * 8, *arg);
         }
         out
     }
@@ -75,11 +75,12 @@ impl SyscallEnter {
         let semantics = SyscallSemantics::from_control(control, KIND_SYSCALL_ENTER)?;
         let mut args = [0_u64; 6];
         for (index, arg) in args.iter_mut().enumerate() {
-            *arg = read_u64(bytes, 16 + index * 8, "syscall argument")?;
+            *arg = read_u64(bytes, 16 + index * 8)
+                .ok_or_else(|| WireError::truncated("syscall argument"))?;
         }
         Ok(Self {
             semantics,
-            nr: read_i64(bytes, 8, "syscall number")?,
+            nr: read_i64(bytes, 8).ok_or_else(|| WireError::truncated("syscall number"))?,
             args,
         })
     }
@@ -96,17 +97,17 @@ impl SyscallExit {
     pub(crate) fn to_le_bytes(&self) -> Result<[u8; SYSCALL_EXIT_BYTES], WireError> {
         self.validate()?;
         let mut out = [0_u8; SYSCALL_EXIT_BYTES];
-        put(
+        write_bytes(
             &mut out,
             0,
             &Control::new(KIND_SYSCALL_EXIT, self.semantics.flag(), SYSCALL_EXIT_BYTES)
                 .to_le_bytes(),
         );
-        put_i64(&mut out, 8, self.result);
+        write_i64(&mut out, 8, self.result);
         let status = self
             .errno
             .map_or(0, |errno| u64::from(errno) | STATUS_ERRNO_VALID);
-        put_u64(&mut out, 16, status);
+        write_u64(&mut out, 16, status);
         Ok(out)
     }
 
@@ -132,8 +133,8 @@ impl SyscallExit {
             return Err(WireError::new("SyscallExit has wrong record length"));
         }
         let semantics = SyscallSemantics::from_control(control, KIND_SYSCALL_EXIT)?;
-        let result = read_i64(bytes, 8, "syscall result")?;
-        let status = read_u64(bytes, 16, "syscall status")?;
+        let result = read_i64(bytes, 8).ok_or_else(|| WireError::truncated("syscall result"))?;
+        let status = read_u64(bytes, 16).ok_or_else(|| WireError::truncated("syscall status"))?;
         if status & !STATUS_KNOWN_MASK != 0 {
             return Err(WireError::new(format!(
                 "SyscallExit status has reserved bits: 0x{status:016x}"
