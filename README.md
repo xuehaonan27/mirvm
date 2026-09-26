@@ -14,7 +14,8 @@ method-level Cranelift JIT, which is on by default (`--jit off` disables it).
 
 > Under development, not a complete Rust implementation. Current surface and verified boundaries:
 > [docs/current-status.md](docs/current-status.md). Open debt:
-> [docs/open-issues.md](docs/open-issues.md). Design contract: [DESIGN.md](DESIGN.md) (Chinese).
+> [docs/open-issues.md](docs/open-issues.md). Design contract:
+> [docs/designs/](docs/designs/) — start at its `README.md`.
 
 Baseline: Linux/ELF/x86_64, toolchain pinned to `nightly-2026-07-02`.
 

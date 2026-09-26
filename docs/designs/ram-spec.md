@@ -2,7 +2,7 @@
 
 > Status: Contract · Scope: the Rust abstract machine (RAM) that mirvm targets — the correctness
 > contract, the degrees of definition, boundaries, as-if freedom, UB stance and declared deviations.
-> How each part is implemented lives in [DESIGN.md](../../DESIGN.md) and the sibling contracts
+> How each part is implemented lives in [README.md](README.md) and the sibling contracts
 > ([concurrency-arch.md](concurrency-arch.md), [frame-abi-bytecode.md](frame-abi-bytecode.md),
 > [c-unwind-contract.md](c-unwind-contract.md)).
 
@@ -72,9 +72,17 @@ detection is an optional quality property of mirvm rather than its identity.
   distinct aligned non-null address; every byte carries an initialization state and pointer-sized bytes
   may carry provenance, so a pointer is address plus provenance (covering int→ptr, ptr→int and
   exposed provenance); and the aliasing model defines UB when violated, which legal programs never do.
-  mirvm uses **real addresses** — an allocation's base address is the host's real address — tracks no
-  per-allocation metadata, since init masks, provenance and bounds are checker overlays a fast machine
-  does not need, and does not enforce aliasing.
+  mirvm uses **real addresses** — an allocation's base address is the host's real address — and tracks
+  no per-allocation metadata: init masks, provenance maps and bounds are the `AllocId`-keyed checker
+  overlay the Miri-derived tier-0 inherited, and a fast machine that assumes legality needs none of it.
+  It does not enforce aliasing. Storage is realized as **three parts, separated by who manages them**
+  rather than by address space, which is one and belongs to the host: **VM metadata** (provenance
+  tables, MIR/bytecode caches, the thread table, layout tables — implementation-private, outside RAM,
+  structurally insulated from guest UB), the **Rust Heap** (`__rust_alloc`: `Box`, `Vec`, interpreted
+  Rust allocation — RAM storage, managed but never moved) and the **Native Heap** (`libc::malloc` and
+  allocations inside C libraries — outside RAM, straight to the real libc, untracked). The split exists
+  for ownership: a guest `malloc` pointer must survive being handed to C `free`, so those bytes never
+  come from the Rust Heap ([ffi-boundary.md](ffi-boundary.md) §2.1).
 - **Values and layout.** A type is realized as bytes: size, align, field offsets, discriminant
   encoding and niche optimization, fixed by the rustc layout algorithm and target-specific. repr(C)
   follows the C ABI, repr(Rust) layout is unspecified, and value shapes are scalar, scalar pair (a fat
@@ -105,7 +113,9 @@ that freedom:
 
 - **Execution tier** — interpreter, bytecode VM or JIT; they are different implementations of one RAM.
 - **Heap allocator** — arena or TLAB with real addresses; RAM only requires distinct, aligned,
-  non-null allocations, so the memory's origin is free.
+  non-null allocations, so the memory's origin is free. Managed, but **never moved**: pointer-to-integer
+  casts, provenance and pointers handed to native code all depend on stable addresses, which is the one
+  place where Rust's storage model rules out what a moving collector would otherwise be allowed to do.
 - **Thread implementation** — real OS threads, or in a transitional design a GIL over them, as long as
   the concurrency semantics and legal executions are preserved.
 - **Scheduling** — any schedule producing a legal execution.
@@ -137,7 +147,9 @@ if it did not, the choice is free.
 - **Inside** — interpreted or compiled Rust, which implements RAM semantics.
 - **Outside** — native code such as libc, C libraries and raw machine code. RAM does not model its
   interior; mirvm only hands over control (FFI out) or receives it (thunk in). Native allocation and
-  native internal behaviour are outside RAM.
+  native internal behaviour are outside RAM. Allocation is the one place where that line must also
+  settle ownership: Rust allocation goes to the managed heap, while `libc::malloc` passes through to the
+  real libc, so that a C `free` stays valid for the pointer it returned.
 - **Inline asm** is an opaque machine-code effect inside RAM: mirvm can only model its effect or
   intercept it at function level.
 - **Cross-boundary exceptions**: plain `extern "C"` must never unwind, a Rust panic escaping it
