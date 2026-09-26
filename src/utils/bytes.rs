@@ -17,7 +17,7 @@
 //! A width appears below once a format needs it; add the next one with its caller.
 
 /// The `N` bytes at `offset`, or `None` when the buffer is shorter.
-fn field<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
+pub(crate) fn read_array<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
     let end = offset.checked_add(N)?;
     bytes.get(offset..end)?.try_into().ok()
 }
@@ -33,7 +33,7 @@ fn take_field<const N: usize>(rest: &mut &[u8]) -> Option<[u8; N]> {
 ///
 /// Both bounds are checked explicitly so that a wrapped range cannot become a write at the wrong
 /// offset in a build without overflow checks.
-fn write_field(out: &mut [u8], offset: usize, bytes: &[u8]) {
+pub(crate) fn write_bytes(out: &mut [u8], offset: usize, bytes: &[u8]) {
     let end = offset
         .checked_add(bytes.len())
         .expect("a write offset cannot overflow");
@@ -44,17 +44,27 @@ fn write_field(out: &mut [u8], offset: usize, bytes: &[u8]) {
 
 /// Read one little-endian `u16` at `offset`. `None` when the buffer is shorter than two bytes.
 pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(field(bytes, offset)?))
+    Some(u16::from_le_bytes(read_array(bytes, offset)?))
 }
 
 /// Read one little-endian `u32` at `offset`. `None` when the buffer is shorter than four bytes.
 pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(field(bytes, offset)?))
+    Some(u32::from_le_bytes(read_array(bytes, offset)?))
 }
 
 /// Read one little-endian `u64` at `offset`. `None` when the buffer is shorter than eight bytes.
 pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(field(bytes, offset)?))
+    Some(u64::from_le_bytes(read_array(bytes, offset)?))
+}
+
+/// Read one little-endian `i32` at `offset`. `None` when the buffer is shorter than four bytes.
+pub(crate) fn read_i32(bytes: &[u8], offset: usize) -> Option<i32> {
+    Some(i32::from_le_bytes(read_array(bytes, offset)?))
+}
+
+/// Read one little-endian `i64` at `offset`. `None` when the buffer is shorter than eight bytes.
+pub(crate) fn read_i64(bytes: &[u8], offset: usize) -> Option<i64> {
+    Some(i64::from_le_bytes(read_array(bytes, offset)?))
 }
 
 /// Write one little-endian `u16` at `offset`.
@@ -62,17 +72,27 @@ pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 /// Panics when the buffer is shorter than the value: see the module note on why a caller-computed
 /// offset is not input.
 pub(crate) fn write_u16(out: &mut [u8], offset: usize, value: u16) {
-    write_field(out, offset, &value.to_le_bytes());
+    write_bytes(out, offset, &value.to_le_bytes());
 }
 
 /// Write one little-endian `u32` at `offset`. Panics as [`write_u16`] does.
 pub(crate) fn write_u32(out: &mut [u8], offset: usize, value: u32) {
-    write_field(out, offset, &value.to_le_bytes());
+    write_bytes(out, offset, &value.to_le_bytes());
 }
 
 /// Write one little-endian `u64` at `offset`. Panics as [`write_u16`] does.
 pub(crate) fn write_u64(out: &mut [u8], offset: usize, value: u64) {
-    write_field(out, offset, &value.to_le_bytes());
+    write_bytes(out, offset, &value.to_le_bytes());
+}
+
+/// Write one little-endian `i32` at `offset`. Panics as [`write_u16`] does.
+pub(crate) fn write_i32(out: &mut [u8], offset: usize, value: i32) {
+    write_bytes(out, offset, &value.to_le_bytes());
+}
+
+/// Write one little-endian `i64` at `offset`. Panics as [`write_u16`] does.
+pub(crate) fn write_i64(out: &mut [u8], offset: usize, value: i64) {
+    write_bytes(out, offset, &value.to_le_bytes());
 }
 
 /// Take one little-endian `u32` off the front of `rest`, advancing it.
@@ -115,6 +135,13 @@ mod tests {
         assert_eq!(read_u64(&buf, 6), Some(0x0708_090a_0b0c_0d0e));
         // A read may straddle fields: bytes 3..7 are 05 04 03 0e.
         assert_eq!(read_u32(&buf, 3), Some(0x0e03_0405));
+
+        // Signed widths keep two's complement on disk.
+        write_i32(&mut buf, 0, -2);
+        write_i64(&mut buf, 4, i64::MIN);
+        assert_eq!(read_i32(&buf, 0), Some(-2));
+        assert_eq!(read_i64(&buf, 4), Some(i64::MIN));
+        assert_eq!(&buf[..4], &[0xfe, 0xff, 0xff, 0xff]);
     }
 
     /// The advancing form reads the same values and leaves the reader past them, including past the

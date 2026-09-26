@@ -6,13 +6,18 @@
 //! The format is one hierarchy and the modules follow it: [`container`] is the file and the chunk
 //! framing around each sealed group of pages, [`record`] is a record's envelope plus the records a
 //! producer and a session write about themselves, and [`syscall`] is the one record about the
-//! guest. What all of them share lives here: the version, magic, size, kind and flag constants, the
-//! little-endian field codec, and the [`WireError`] that names the field a record got wrong.
+//! guest. What all of them share lives here: the version, magic, size, kind and flag constants, and
+//! the [`WireError`] that names the field a record got wrong. The little-endian codec itself is
+//! [`crate::utils::bytes`].
 
 pub(crate) mod container;
 pub(crate) mod record;
 pub(crate) mod syscall;
 
+pub(crate) use crate::utils::bytes::{
+    read_array, read_i32, read_i64, read_u16, read_u32, read_u64, write_bytes, write_i32,
+    write_i64, write_u16, write_u32, write_u64,
+};
 pub(crate) use container::{ChunkFooter, ChunkHeader, FileHeader};
 pub(crate) use record::{Control, EngineContext, PageHeader, ProducerEnd, SessionEnd};
 pub(crate) use syscall::{SyscallEnter, SyscallExit, SyscallSemantics};
@@ -69,6 +74,12 @@ impl WireError {
     fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
+
+    /// The refusal for a record that ends inside a field: the format names the field, while the
+    /// [`crate::utils::bytes`] readers answer `Option` and keep no policy of their own.
+    fn truncated(what: &str) -> Self {
+        Self(format!("truncated while reading {what}"))
+    }
 }
 
 fn require_exact_len(bytes: &[u8], expected: usize, what: &str) -> Result<(), WireError> {
@@ -89,8 +100,8 @@ fn require_magic(bytes: &[u8], magic: &[u8; 8], what: &str) -> Result<(), WireEr
 }
 
 fn require_version(bytes: &[u8], offset: usize, what: &str) -> Result<(), WireError> {
-    let major = read_u16(bytes, offset, "format major")?;
-    let minor = read_u16(bytes, offset + 2, "format minor")?;
+    let major = read_u16(bytes, offset).ok_or_else(|| WireError::truncated("format major"))?;
+    let minor = read_u16(bytes, offset + 2).ok_or_else(|| WireError::truncated("format minor"))?;
     if (major, minor) != (FORMAT_MAJOR, FORMAT_MINOR) {
         return Err(WireError::new(format!(
             "unsupported {what} format version {major}.{minor}"
@@ -100,7 +111,7 @@ fn require_version(bytes: &[u8], offset: usize, what: &str) -> Result<(), WireEr
 }
 
 fn require_eq_u16(bytes: &[u8], offset: usize, expected: u16, what: &str) -> Result<(), WireError> {
-    let value = read_u16(bytes, offset, what)?;
+    let value = read_u16(bytes, offset).ok_or_else(|| WireError::truncated(what))?;
     if value != expected {
         return Err(WireError::new(format!(
             "{what} is {value}, expected {expected}"
@@ -110,7 +121,7 @@ fn require_eq_u16(bytes: &[u8], offset: usize, expected: u16, what: &str) -> Res
 }
 
 fn require_eq_u32(bytes: &[u8], offset: usize, expected: u32, what: &str) -> Result<(), WireError> {
-    let value = read_u32(bytes, offset, what)?;
+    let value = read_u32(bytes, offset).ok_or_else(|| WireError::truncated(what))?;
     if value != expected {
         return Err(WireError::new(format!(
             "{what} is {value}, expected {expected}"
@@ -120,69 +131,11 @@ fn require_eq_u32(bytes: &[u8], offset: usize, expected: u32, what: &str) -> Res
 }
 
 fn require_zero(bytes: &[u8], range: std::ops::Range<usize>, what: &str) -> Result<(), WireError> {
-    let value = bytes
-        .get(range)
-        .ok_or_else(|| WireError::new(format!("truncated while reading {what}")))?;
+    let value = bytes.get(range).ok_or_else(|| WireError::truncated(what))?;
     if value.iter().any(|byte| *byte != 0) {
         return Err(WireError::new(format!("{what} must be zero in v0")));
     }
     Ok(())
-}
-
-fn read_array<const N: usize>(
-    bytes: &[u8],
-    offset: usize,
-    what: &str,
-) -> Result<[u8; N], WireError> {
-    bytes
-        .get(offset..offset + N)
-        .ok_or_else(|| WireError::new(format!("truncated while reading {what}")))?
-        .try_into()
-        .map_err(|_| WireError::new(format!("invalid width while reading {what}")))
-}
-
-fn read_u16(bytes: &[u8], offset: usize, what: &str) -> Result<u16, WireError> {
-    Ok(u16::from_le_bytes(read_array(bytes, offset, what)?))
-}
-
-fn read_u32(bytes: &[u8], offset: usize, what: &str) -> Result<u32, WireError> {
-    Ok(u32::from_le_bytes(read_array(bytes, offset, what)?))
-}
-
-fn read_i32(bytes: &[u8], offset: usize, what: &str) -> Result<i32, WireError> {
-    Ok(i32::from_le_bytes(read_array(bytes, offset, what)?))
-}
-
-fn read_u64(bytes: &[u8], offset: usize, what: &str) -> Result<u64, WireError> {
-    Ok(u64::from_le_bytes(read_array(bytes, offset, what)?))
-}
-
-fn read_i64(bytes: &[u8], offset: usize, what: &str) -> Result<i64, WireError> {
-    Ok(i64::from_le_bytes(read_array(bytes, offset, what)?))
-}
-
-fn put<const N: usize>(out: &mut [u8], offset: usize, value: &[u8; N]) {
-    out[offset..offset + N].copy_from_slice(value);
-}
-
-fn put_u16(out: &mut [u8], offset: usize, value: u16) {
-    put(out, offset, &value.to_le_bytes());
-}
-
-fn put_u32(out: &mut [u8], offset: usize, value: u32) {
-    put(out, offset, &value.to_le_bytes());
-}
-
-fn put_i32(out: &mut [u8], offset: usize, value: i32) {
-    put(out, offset, &value.to_le_bytes());
-}
-
-fn put_u64(out: &mut [u8], offset: usize, value: u64) {
-    put(out, offset, &value.to_le_bytes());
-}
-
-fn put_i64(out: &mut [u8], offset: usize, value: i64) {
-    put(out, offset, &value.to_le_bytes());
 }
 
 #[cfg(test)]
