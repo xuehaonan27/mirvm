@@ -29,6 +29,7 @@ use std::path::Path;
 
 use super::{elf, macho};
 use crate::os::dll::ObjectFormat;
+use crate::utils::bytes::{read_u32, read_u64};
 
 /// How a list of callables is written down in an object.
 ///
@@ -99,12 +100,12 @@ fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
         let base = phoff
             .checked_add(index.checked_mul(phentsize).ok_or_else(bad)?)
             .ok_or_else(bad)?;
-        let ty = elf::u32_at(bytes, base + elf::phdr::TYPE).ok_or_else(bad)?;
-        let flags = elf::u32_at(bytes, base + elf::phdr::FLAGS).ok_or_else(bad)?;
-        let off = elf::u64_at(bytes, base + elf::phdr::OFFSET).ok_or_else(bad)?;
-        let vaddr = elf::u64_at(bytes, base + elf::phdr::VADDR).ok_or_else(bad)?;
-        let filesz = elf::u64_at(bytes, base + elf::phdr::FILESZ).ok_or_else(bad)?;
-        let memsz = elf::u64_at(bytes, base + elf::phdr::MEMSZ).ok_or_else(bad)?;
+        let ty = read_u32(bytes, base + elf::phdr::TYPE).ok_or_else(bad)?;
+        let flags = read_u32(bytes, base + elf::phdr::FLAGS).ok_or_else(bad)?;
+        let off = read_u64(bytes, base + elf::phdr::OFFSET).ok_or_else(bad)?;
+        let vaddr = read_u64(bytes, base + elf::phdr::VADDR).ok_or_else(bad)?;
+        let filesz = read_u64(bytes, base + elf::phdr::FILESZ).ok_or_else(bad)?;
+        let memsz = read_u64(bytes, base + elf::phdr::MEMSZ).ok_or_else(bad)?;
         if ty == elf::PT_LOAD {
             let end = vaddr
                 .checked_add(memsz)

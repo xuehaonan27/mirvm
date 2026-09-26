@@ -21,7 +21,6 @@
 //! index, [`read`] and [`write`] the two directions, and [`native`] the store side of a package's
 //! libraries.
 
-mod fields;
 mod format;
 mod funcs;
 mod meta;
@@ -129,6 +128,15 @@ impl Error {
             detail: detail.into(),
             source,
         }
+    }
+
+    /// The refusal for an artifact that ends inside a field.
+    ///
+    /// A truncated package has to say *which* field was cut, because that sentence is all the user
+    /// gets; the byte readers that hit the end keep no such policy and answer `Option`, so the
+    /// sentence belongs to the format that owns the field names rather than to them.
+    fn truncated(what: &str) -> Self {
+        Error::corrupt(format!("package truncated while reading {what}"))
     }
 }
 

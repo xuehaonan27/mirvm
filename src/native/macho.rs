@@ -18,6 +18,7 @@
 //! `nm` and `dladdr` read, and the export trie, which is the only one `dlsym` consults.
 
 use super::lifecycle::CallableList;
+use crate::utils::bytes::{read_u32, read_u64};
 
 /// The 64-bit Mach-O magic, little-endian on disk.
 const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -882,16 +883,6 @@ fn load_command(bytes: &[u8], cursor: usize) -> Result<(u32, u32), String> {
         read_u32(bytes, cursor).ok_or_else(short)?,
         read_u32(bytes, cursor + 4).ok_or_else(short)?,
     ))
-}
-
-fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    let slice = bytes.get(at..at + 4)?;
-    Some(u32::from_le_bytes(slice.try_into().ok()?))
-}
-
-fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
-    let slice = bytes.get(at..at + 8)?;
-    Some(u64::from_le_bytes(slice.try_into().ok()?))
 }
 
 #[cfg(test)]

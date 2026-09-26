@@ -4,9 +4,9 @@
 use crate::vm::ir::{FuncBlob, FuncTable};
 
 use super::Error;
-use super::fields;
 use super::format::{check_hash, hash128};
 use super::meta::postcard_bytes;
+use crate::utils::bytes::{take_u32, take_u64, take_u128};
 
 /// One index entry: offset, length, digest.
 pub(super) const FUNC_ENTRY_LEN: usize = 32;
@@ -55,8 +55,9 @@ pub(super) fn parse_function_section(
     mapped_offset: usize,
 ) -> Result<Vec<FuncBlob>, Error> {
     let mut rest = section;
-    let count = usize::try_from(fields::u32(&mut rest, "function count")?)
-        .map_err(|_| Error::corrupt("package function count does not fit this host"))?;
+    let count =
+        usize::try_from(take_u32(&mut rest).ok_or_else(|| Error::truncated("function count"))?)
+            .map_err(|_| Error::corrupt("package function count does not fit this host"))?;
     let table_end = count
         .checked_mul(FUNC_ENTRY_LEN)
         .and_then(|len| len.checked_add(4))
@@ -71,13 +72,16 @@ pub(super) fn parse_function_section(
         .try_reserve_exact(count)
         .map_err(|_| Error::corrupt("package function index is too large for available memory"))?;
     for index in 0..count {
-        let start = usize::try_from(fields::u64(&mut rest, "function offset")?).map_err(|_| {
-            Error::corrupt(format!("function {index} offset does not fit this host"))
-        })?;
-        let len = usize::try_from(fields::u64(&mut rest, "function length")?).map_err(|_| {
-            Error::corrupt(format!("function {index} length does not fit this host"))
-        })?;
-        let expected_hash = fields::u128(&mut rest, "function hash")?;
+        let start = usize::try_from(
+            take_u64(&mut rest).ok_or_else(|| Error::truncated("function offset"))?,
+        )
+        .map_err(|_| Error::corrupt(format!("function {index} offset does not fit this host")))?;
+        let len = usize::try_from(
+            take_u64(&mut rest).ok_or_else(|| Error::truncated("function length"))?,
+        )
+        .map_err(|_| Error::corrupt(format!("function {index} length does not fit this host")))?;
+        let expected_hash =
+            take_u128(&mut rest).ok_or_else(|| Error::truncated("function hash"))?;
         let end = start
             .checked_add(len)
             .ok_or_else(|| Error::corrupt(format!("function {index} range overflow")))?;

@@ -12,6 +12,7 @@
 
 use crate::arch::asmstub::INERT_SLOT;
 use crate::native::elf;
+use crate::utils::bytes::{write_u16, write_u32, write_u64};
 
 fn align(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
@@ -107,33 +108,33 @@ fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     out[5] = elf::ELFDATA2LSB;
     out[6] = 1; // EI_VERSION, the only value this format defines
 
-    elf::put_u16(&mut out, elf::ehdr::TYPE, elf::ET_DYN);
-    elf::put_u16(&mut out, elf::ehdr::MACHINE, crate::arch::ELF_MACHINE);
-    elf::put_u32(&mut out, elf::ehdr::VERSION, 1);
-    elf::put_u64(&mut out, elf::ehdr::PHOFF, EHDR as u64);
-    elf::put_u64(&mut out, elf::ehdr::SHOFF, shoff as u64);
-    elf::put_u16(&mut out, elf::ehdr::EHSIZE, EHDR as u16);
-    elf::put_u16(&mut out, elf::ehdr::PHENTSIZE, PHDR as u16);
-    elf::put_u16(&mut out, elf::ehdr::PHNUM, PHNUM as u16);
-    elf::put_u16(&mut out, elf::ehdr::SHENTSIZE, SHDR as u16);
-    elf::put_u16(&mut out, elf::ehdr::SHNUM, SHNUM as u16);
-    elf::put_u16(&mut out, elf::ehdr::SHSTRNDX, SHSTRTAB_INDEX as u16);
+    write_u16(&mut out, elf::ehdr::TYPE, elf::ET_DYN);
+    write_u16(&mut out, elf::ehdr::MACHINE, crate::arch::ELF_MACHINE);
+    write_u32(&mut out, elf::ehdr::VERSION, 1);
+    write_u64(&mut out, elf::ehdr::PHOFF, EHDR as u64);
+    write_u64(&mut out, elf::ehdr::SHOFF, shoff as u64);
+    write_u16(&mut out, elf::ehdr::EHSIZE, EHDR as u16);
+    write_u16(&mut out, elf::ehdr::PHENTSIZE, PHDR as u16);
+    write_u16(&mut out, elf::ehdr::PHNUM, PHNUM as u16);
+    write_u16(&mut out, elf::ehdr::SHENTSIZE, SHDR as u16);
+    write_u16(&mut out, elf::ehdr::SHNUM, SHNUM as u16);
+    write_u16(&mut out, elf::ehdr::SHSTRNDX, SHSTRTAB_INDEX as u16);
 
     // One read/execute load segment covering the whole file, plus the dynamic table it contains.
-    elf::put_u32(&mut out, EHDR + elf::phdr::TYPE, elf::PT_LOAD);
-    elf::put_u32(&mut out, EHDR + elf::phdr::FLAGS, elf::PF_R | elf::PF_X);
-    elf::put_u64(&mut out, EHDR + elf::phdr::FILESZ, file_len as u64);
-    elf::put_u64(&mut out, EHDR + elf::phdr::MEMSZ, file_len as u64);
-    elf::put_u64(&mut out, EHDR + elf::phdr::ALIGN, PAGE);
+    write_u32(&mut out, EHDR + elf::phdr::TYPE, elf::PT_LOAD);
+    write_u32(&mut out, EHDR + elf::phdr::FLAGS, elf::PF_R | elf::PF_X);
+    write_u64(&mut out, EHDR + elf::phdr::FILESZ, file_len as u64);
+    write_u64(&mut out, EHDR + elf::phdr::MEMSZ, file_len as u64);
+    write_u64(&mut out, EHDR + elf::phdr::ALIGN, PAGE);
     let dynamic_ph = EHDR + PHDR;
-    elf::put_u32(&mut out, dynamic_ph + elf::phdr::TYPE, elf::PT_DYNAMIC);
-    elf::put_u32(&mut out, dynamic_ph + elf::phdr::FLAGS, elf::PF_R);
-    elf::put_u64(&mut out, dynamic_ph + elf::phdr::OFFSET, dynamic_off as u64);
-    elf::put_u64(&mut out, dynamic_ph + elf::phdr::VADDR, dynamic_off as u64);
-    elf::put_u64(&mut out, dynamic_ph + elf::phdr::PADDR, dynamic_off as u64);
-    elf::put_u64(&mut out, dynamic_ph + elf::phdr::FILESZ, dynamic_len as u64);
-    elf::put_u64(&mut out, dynamic_ph + elf::phdr::MEMSZ, dynamic_len as u64);
-    elf::put_u64(&mut out, dynamic_ph + elf::phdr::ALIGN, 8);
+    write_u32(&mut out, dynamic_ph + elf::phdr::TYPE, elf::PT_DYNAMIC);
+    write_u32(&mut out, dynamic_ph + elf::phdr::FLAGS, elf::PF_R);
+    write_u64(&mut out, dynamic_ph + elf::phdr::OFFSET, dynamic_off as u64);
+    write_u64(&mut out, dynamic_ph + elf::phdr::VADDR, dynamic_off as u64);
+    write_u64(&mut out, dynamic_ph + elf::phdr::PADDR, dynamic_off as u64);
+    write_u64(&mut out, dynamic_ph + elf::phdr::FILESZ, dynamic_len as u64);
+    write_u64(&mut out, dynamic_ph + elf::phdr::MEMSZ, dynamic_len as u64);
+    write_u64(&mut out, dynamic_ph + elf::phdr::ALIGN, 8);
 
     for index in 0..names.len() {
         let slot = text_off + index * SLOT;
@@ -145,31 +146,31 @@ fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
 
     for (index, &name) in name_offsets.iter().enumerate() {
         let write_symbol = |out: &mut [u8], base: usize| {
-            elf::put_u32(out, base + elf::sym::NAME, name);
+            write_u32(out, base + elf::sym::NAME, name);
             out[base + elf::sym::INFO] = (elf::STB_GLOBAL << 4) | elf::STT_FUNC;
-            elf::put_u16(out, base + elf::sym::SHNDX, TEXT_SECTION_INDEX);
-            elf::put_u64(
+            write_u16(out, base + elf::sym::SHNDX, TEXT_SECTION_INDEX);
+            write_u64(
                 out,
                 base + elf::sym::VALUE,
                 (text_off + index * SLOT) as u64,
             );
-            elf::put_u64(out, base + elf::sym::SIZE, SLOT as u64);
+            write_u64(out, base + elf::sym::SIZE, SLOT as u64);
         };
         write_symbol(&mut out, dynsym_off + (index + 1) * elf::SYM_ENTRY_SIZE);
         write_symbol(&mut out, symtab_off + (index + 1) * elf::SYM_ENTRY_SIZE);
     }
 
     // SysV hash: one bucket, every symbol in a single chain.
-    elf::put_u32(&mut out, hash_off, 1);
-    elf::put_u32(&mut out, hash_off + 4, (names.len() + 1) as u32);
-    elf::put_u32(&mut out, hash_off + 8, u32::from(!names.is_empty()));
+    write_u32(&mut out, hash_off, 1);
+    write_u32(&mut out, hash_off + 4, (names.len() + 1) as u32);
+    write_u32(&mut out, hash_off + 8, u32::from(!names.is_empty()));
     for index in 1..=names.len() {
         let next = if index == names.len() {
             0
         } else {
             (index + 1) as u32
         };
-        elf::put_u32(&mut out, hash_off + 12 + index * 4, next);
+        write_u32(&mut out, hash_off + 12 + index * 4, next);
     }
 
     for (index, (tag, value)) in [
@@ -183,12 +184,12 @@ fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     .into_iter()
     .enumerate()
     {
-        elf::put_u64(
+        write_u64(
             &mut out,
             dynamic_off + index * elf::DYN_ENTRY_SIZE + elf::dynamic::TAG,
             tag,
         );
-        elf::put_u64(
+        write_u64(
             &mut out,
             dynamic_off + index * elf::DYN_ENTRY_SIZE + elf::dynamic::VALUE,
             value,
@@ -206,16 +207,16 @@ fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
                        alignment: u64,
                        entsize: u64| {
         let base = shoff + index * SHDR;
-        elf::put_u32(&mut out, base + elf::shdr::NAME, name);
-        elf::put_u32(&mut out, base + elf::shdr::TYPE, kind);
-        elf::put_u64(&mut out, base + elf::shdr::FLAGS, flags);
-        elf::put_u64(&mut out, base + elf::shdr::ADDR, offset as u64);
-        elf::put_u64(&mut out, base + elf::shdr::OFFSET, offset as u64);
-        elf::put_u64(&mut out, base + elf::shdr::SIZE, len as u64);
-        elf::put_u32(&mut out, base + elf::shdr::LINK, link);
-        elf::put_u32(&mut out, base + elf::shdr::INFO, info);
-        elf::put_u64(&mut out, base + elf::shdr::ADDRALIGN, alignment);
-        elf::put_u64(&mut out, base + elf::shdr::ENTSIZE, entsize);
+        write_u32(&mut out, base + elf::shdr::NAME, name);
+        write_u32(&mut out, base + elf::shdr::TYPE, kind);
+        write_u64(&mut out, base + elf::shdr::FLAGS, flags);
+        write_u64(&mut out, base + elf::shdr::ADDR, offset as u64);
+        write_u64(&mut out, base + elf::shdr::OFFSET, offset as u64);
+        write_u64(&mut out, base + elf::shdr::SIZE, len as u64);
+        write_u32(&mut out, base + elf::shdr::LINK, link);
+        write_u32(&mut out, base + elf::shdr::INFO, info);
+        write_u64(&mut out, base + elf::shdr::ADDRALIGN, alignment);
+        write_u64(&mut out, base + elf::shdr::ENTSIZE, entsize);
     };
     section(
         1,

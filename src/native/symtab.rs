@@ -68,6 +68,7 @@ use std::collections::HashMap;
 
 use super::ar;
 use super::elf::{self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK};
+use crate::utils::bytes::{read_u16, read_u32, read_u64};
 
 /// One `.symtab`/`.dynsym` entry, resolved against its string table.
 ///
@@ -96,10 +97,10 @@ fn symbol_at<'a>(
     let base = usize::try_from(table.offset)
         .ok()?
         .checked_add(index.checked_mul(usize::try_from(table.entsize).ok()?)?)?;
-    let name_offset = elf::u32_at(bytes, base + elf::sym::NAME)?;
+    let name_offset = read_u32(bytes, base + elf::sym::NAME)?;
     let binding = bytes.get(base + elf::sym::INFO).copied()? >> 4;
-    let section_index = elf::u16_at(bytes, base + elf::sym::SHNDX)?;
-    let value = elf::u64_at(bytes, base + elf::sym::VALUE)?;
+    let section_index = read_u16(bytes, base + elf::sym::SHNDX)?;
+    let value = read_u64(bytes, base + elf::sym::VALUE)?;
     let name_start = usize::try_from(strtab.offset)
         .ok()?
         .checked_add(usize::try_from(name_offset).ok()?)?;
