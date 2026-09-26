@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use super::Error;
-use super::fields;
+use crate::utils::bytes::{take_bytes, take_u32, take_u64, take_u128};
 
 /// Container magic: eight bytes, and the sniffer's whole criterion.
 pub(super) const MAGIC: &[u8; 8] = b"MIRVMAR\0";
@@ -133,24 +133,28 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
     )?;
 
     let mut rest = &body[MAGIC.len()..];
-    let package_ver = fields::u32(&mut rest, "format version")?;
+    let package_ver = take_u32(&mut rest).ok_or_else(|| Error::truncated("format version"))?;
     if package_ver != FMT_VER {
         return Err(Error::incompatible(format!(
             "wrong package format version (package={package_ver}, mirvm={FMT_VER})"
         )));
     }
-    let bid_len = usize::try_from(fields::u32(&mut rest, "build_id length")?)
-        .map_err(|_| Error::corrupt("package build_id length does not fit this host"))?;
-    let bid = std::str::from_utf8(fields::take(&mut rest, bid_len, "build_id")?)
-        .map_err(|e| Error::corrupt(format!("invalid package build_id: {e}")))?;
+    let bid_len =
+        usize::try_from(take_u32(&mut rest).ok_or_else(|| Error::truncated("build_id length"))?)
+            .map_err(|_| Error::corrupt("package build_id length does not fit this host"))?;
+    let bid = std::str::from_utf8(
+        take_bytes(&mut rest, bid_len).ok_or_else(|| Error::truncated("build_id"))?,
+    )
+    .map_err(|e| Error::corrupt(format!("invalid package build_id: {e}")))?;
     if bid != crate::options::build::BUILD_ID {
         return Err(Error::incompatible(
             "package build_id mismatch with current mirvm",
         ));
     }
 
-    let count = usize::try_from(fields::u32(&mut rest, "section count")?)
-        .map_err(|_| Error::corrupt("package section count does not fit this host"))?;
+    let count =
+        usize::try_from(take_u32(&mut rest).ok_or_else(|| Error::truncated("section count"))?)
+            .map_err(|_| Error::corrupt("package section count does not fit this host"))?;
     let table_len = count
         .checked_mul(SECTION_ENTRY_LEN)
         .ok_or_else(|| Error::corrupt("package section table length overflow"))?;
@@ -171,23 +175,27 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
         Error::corrupt("package section tag table is too large for available memory")
     })?;
     for index in 0..count {
-        let tag = fields::u32(&mut rest, "section tag")?;
+        let tag = take_u32(&mut rest).ok_or_else(|| Error::truncated("section tag"))?;
         if !tags.insert(tag) {
             return Err(Error::corrupt(format!(
                 "package has duplicate section tag={tag}"
             )));
         }
-        let off = usize::try_from(fields::u64(&mut rest, "section offset")?).map_err(|_| {
-            Error::corrupt(format!(
-                "package section {index} offset does not fit this host"
-            ))
-        })?;
-        let len = usize::try_from(fields::u64(&mut rest, "section length")?).map_err(|_| {
-            Error::corrupt(format!(
-                "package section {index} length does not fit this host"
-            ))
-        })?;
-        let expected_hash = fields::u128(&mut rest, "section hash")?;
+        let off =
+            usize::try_from(take_u64(&mut rest).ok_or_else(|| Error::truncated("section offset"))?)
+                .map_err(|_| {
+                    Error::corrupt(format!(
+                        "package section {index} offset does not fit this host"
+                    ))
+                })?;
+        let len =
+            usize::try_from(take_u64(&mut rest).ok_or_else(|| Error::truncated("section length"))?)
+                .map_err(|_| {
+                    Error::corrupt(format!(
+                        "package section {index} length does not fit this host"
+                    ))
+                })?;
+        let expected_hash = take_u128(&mut rest).ok_or_else(|| Error::truncated("section hash"))?;
         let end = off.checked_add(len).ok_or_else(|| {
             Error::corrupt(format!("package section with tag={tag} range overflow"))
         })?;

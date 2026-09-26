@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use crate::native::elf;
+use crate::utils::bytes::{read_u16, read_u32, read_u64};
 
 use super::bad;
 use super::dynamic::Dynamic;
@@ -114,10 +115,10 @@ impl<'a> Symbols<'a> {
         let base =
             (self.dynsym.offset as usize).checked_add(index.checked_mul(self.dynsym_entry)?)?;
         Some(RawSymbol {
-            name: elf::u32_at(self.bytes, base + elf::sym::NAME)?,
+            name: read_u32(self.bytes, base + elf::sym::NAME)?,
             info: *self.bytes.get(base + elf::sym::INFO)?,
-            shndx: elf::u16_at(self.bytes, base + elf::sym::SHNDX)?,
-            value: elf::u64_at(self.bytes, base + elf::sym::VALUE)?,
+            shndx: read_u16(self.bytes, base + elf::sym::SHNDX)?,
+            value: read_u64(self.bytes, base + elf::sym::VALUE)?,
         })
     }
 
@@ -141,10 +142,10 @@ impl<'a> Symbols<'a> {
     fn static_symbol(&self, index: usize, entry_size: usize) -> Option<RawSymbol> {
         let base = (self.symtab.offset as usize).checked_add(index.checked_mul(entry_size)?)?;
         Some(RawSymbol {
-            name: elf::u32_at(self.bytes, base + elf::sym::NAME)?,
+            name: read_u32(self.bytes, base + elf::sym::NAME)?,
             info: *self.bytes.get(base + elf::sym::INFO)?,
-            shndx: elf::u16_at(self.bytes, base + elf::sym::SHNDX)?,
-            value: elf::u64_at(self.bytes, base + elf::sym::VALUE)?,
+            shndx: read_u16(self.bytes, base + elf::sym::SHNDX)?,
+            value: read_u64(self.bytes, base + elf::sym::VALUE)?,
         })
     }
 

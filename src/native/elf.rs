@@ -6,6 +6,8 @@
 //! module's. Which machine an image is for is the CPU's (`arch::ELF_MACHINE`); which format a
 //! host's loader accepts, and everything the loader does with the bytes, is `os`'s.
 
+use crate::utils::bytes::{read_u16, read_u32, read_u64};
+
 /// The four bytes every ELF image begins with.
 pub const IDENT: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 /// `EI_CLASS` for 64-bit.
@@ -181,39 +183,6 @@ pub mod rela {
     pub const ADDEND: usize = 16;
 }
 
-/// Little-endian readers. `None` when the field runs past the end of `bytes`.
-pub fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        bytes.get(offset..offset + 2)?.try_into().ok()?,
-    ))
-}
-
-pub fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(offset..offset + 4)?.try_into().ok()?,
-    ))
-}
-
-pub fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(
-        bytes.get(offset..offset + 8)?.try_into().ok()?,
-    ))
-}
-
-/// Little-endian writers. The caller owns the layout it is assembling, so an offset it computed
-/// out of range is a bug in that layout and panics here rather than being silently dropped.
-pub fn put_u16(out: &mut [u8], offset: usize, value: u16) {
-    out[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-}
-
-pub fn put_u32(out: &mut [u8], offset: usize, value: u32) {
-    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-pub fn put_u64(out: &mut [u8], offset: usize, value: u64) {
-    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
 /// Whether `bytes` is an ELF64 little-endian image. The header past these first six bytes may still
 /// be truncated, which [`FileHeader::parse`] rejects.
 pub fn is_elf64_le(bytes: &[u8]) -> bool {
@@ -246,15 +215,15 @@ impl FileHeader {
             return None;
         }
         Some(FileHeader {
-            kind: u16_at(bytes, ehdr::TYPE)?,
-            machine: u16_at(bytes, ehdr::MACHINE)?,
-            phoff: u64_at(bytes, ehdr::PHOFF)?,
-            shoff: u64_at(bytes, ehdr::SHOFF)?,
-            phentsize: u16_at(bytes, ehdr::PHENTSIZE)?,
-            phnum: u16_at(bytes, ehdr::PHNUM)?,
-            shentsize: u16_at(bytes, ehdr::SHENTSIZE)?,
-            shnum: u16_at(bytes, ehdr::SHNUM)?,
-            shstrndx: u16_at(bytes, ehdr::SHSTRNDX)?,
+            kind: read_u16(bytes, ehdr::TYPE)?,
+            machine: read_u16(bytes, ehdr::MACHINE)?,
+            phoff: read_u64(bytes, ehdr::PHOFF)?,
+            shoff: read_u64(bytes, ehdr::SHOFF)?,
+            phentsize: read_u16(bytes, ehdr::PHENTSIZE)?,
+            phnum: read_u16(bytes, ehdr::PHNUM)?,
+            shentsize: read_u16(bytes, ehdr::SHENTSIZE)?,
+            shnum: read_u16(bytes, ehdr::SHNUM)?,
+            shstrndx: read_u16(bytes, ehdr::SHSTRNDX)?,
         })
     }
 }
@@ -310,12 +279,12 @@ fn section_at(bytes: &[u8], header: &FileHeader, index: usize) -> Option<Section
         .ok()?
         .checked_add(index.checked_mul(usize::from(header.shentsize))?)?;
     Some(Section {
-        name: u32_at(bytes, base + shdr::NAME)?,
-        ty: u32_at(bytes, base + shdr::TYPE)?,
-        addr: u64_at(bytes, base + shdr::ADDR)?,
-        offset: u64_at(bytes, base + shdr::OFFSET)?,
-        size: u64_at(bytes, base + shdr::SIZE)?,
-        link: u32_at(bytes, base + shdr::LINK)?,
-        entsize: u64_at(bytes, base + shdr::ENTSIZE)?,
+        name: read_u32(bytes, base + shdr::NAME)?,
+        ty: read_u32(bytes, base + shdr::TYPE)?,
+        addr: read_u64(bytes, base + shdr::ADDR)?,
+        offset: read_u64(bytes, base + shdr::OFFSET)?,
+        size: read_u64(bytes, base + shdr::SIZE)?,
+        link: read_u32(bytes, base + shdr::LINK)?,
+        entsize: read_u64(bytes, base + shdr::ENTSIZE)?,
     })
 }

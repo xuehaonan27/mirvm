@@ -6,6 +6,7 @@
 //! magic, an entry size or a field past the end of the bytes.
 
 use crate::native::elf;
+use crate::utils::bytes::{read_u32, read_u64};
 
 use super::bad;
 
@@ -133,12 +134,12 @@ fn program_header_at(
 ) -> Option<ProgramHeader> {
     let base = phoff.checked_add(index.checked_mul(phentsize)?)?;
     Some(ProgramHeader {
-        ty: elf::u32_at(bytes, base + elf::phdr::TYPE)?,
-        flags: elf::u32_at(bytes, base + elf::phdr::FLAGS)?,
-        offset: elf::u64_at(bytes, base + elf::phdr::OFFSET)?,
-        vaddr: elf::u64_at(bytes, base + elf::phdr::VADDR)?,
-        filesz: elf::u64_at(bytes, base + elf::phdr::FILESZ)?,
-        memsz: elf::u64_at(bytes, base + elf::phdr::MEMSZ)?,
-        align: elf::u64_at(bytes, base + elf::phdr::ALIGN)?,
+        ty: read_u32(bytes, base + elf::phdr::TYPE)?,
+        flags: read_u32(bytes, base + elf::phdr::FLAGS)?,
+        offset: read_u64(bytes, base + elf::phdr::OFFSET)?,
+        vaddr: read_u64(bytes, base + elf::phdr::VADDR)?,
+        filesz: read_u64(bytes, base + elf::phdr::FILESZ)?,
+        memsz: read_u64(bytes, base + elf::phdr::MEMSZ)?,
+        align: read_u64(bytes, base + elf::phdr::ALIGN)?,
     })
 }
