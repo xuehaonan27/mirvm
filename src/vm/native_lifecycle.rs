@@ -8,7 +8,7 @@
 //! per instance.
 //!
 //! Where those addresses are in the object is the object format's, so reading them -- and taking
-//! the loader's hands off them -- is [`crate::native::lifecycle`]. What is left here is what the
+//! the loader's hands off them -- is [`crate::native::symbol::lifecycle`]. What is left here is what the
 //! addresses mean once the image is mapped and slid, which the loader does not spell.
 //!
 //! How the object got mapped is not this module's business either: `native_instance` goes through
@@ -18,7 +18,7 @@
 use std::ffi::{CString, c_char, c_int};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::native::lifecycle::{CallableList, Layout};
+use crate::native::symbol::lifecycle::{CallableList, Layout};
 
 /// Constructor and destructor addresses after relocation. Images deliberately
 /// remain mapped for the process, but their language lifecycle still runs once

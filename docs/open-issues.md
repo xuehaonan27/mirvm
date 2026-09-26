@@ -309,7 +309,7 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   corpus into a universal gate.
 - **G8** `UNSCHEDULED`: milestone labels remain in user-visible text — `src/cli.rs` `USAGE` (`mode B
   slice 2`, `M5.3-M5.5`, `D15 ... P4 default flip`, `M4 precursor spikes`, a git-history spike path),
-  two error strings in `src/native/archive.rs` containing `M5.1`, panic strings in
+  two error strings in `src/native/artifact/archive.rs` containing `M5.1`, panic strings in
   `src/lower/linker/{mod,entries}.rs` containing `A2` and `M4.4`, and one error string in
   `src/cargoless/driver.rs` saying `(P5 boundary)`. Wording-only.
 - **G9** `UNSCHEDULED`: compiler-required deletion candidates — module-level `#![allow(dead_code)]` in

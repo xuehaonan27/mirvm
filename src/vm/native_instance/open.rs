@@ -61,7 +61,8 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
     // Read the lifecycle addresses out, and take the loader's hands off them, before anything is
     // mapped: the rewrite invalidates the image's signature, so the platform's signer has to see
     // the file again before its loader will.
-    let tags = crate::native::lifecycle::read_and_suppress(path, crate::os::dll::OBJECT_FORMAT)?;
+    let tags =
+        crate::native::symbol::lifecycle::read_and_suppress(path, crate::os::dll::OBJECT_FORMAT)?;
     crate::os::dll::reseal(path).map_err(|error| error.to_string())?;
     let cpath = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| format!("per-Engine native path contains NUL: {}", path.display()))?;
@@ -82,7 +83,7 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
     crate::lower::asm::refill_syscall_slot(handle);
     let bias = crate::os::dll::load_bias(handle, &cpath)
         .ok_or_else(|| format!("fail to find load base for `{}`", path.display()))?;
-    let hidden_symbols = crate::native::symtab::hidden_symtab_values(
+    let hidden_symbols = crate::native::symbol::symtab::hidden_symtab_values(
         &path.to_string_lossy(),
         crate::os::dll::OBJECT_FORMAT,
     )

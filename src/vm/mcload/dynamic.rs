@@ -4,7 +4,7 @@
 //! Every value is an ELF virtual address until a caller turns it into a real one, and the tags
 //! this loader refuses are named so the refusal reports the tag rather than a number.
 
-use crate::native::elf;
+use crate::native::object::elf;
 
 use super::bad;
 use super::map::Mapping;

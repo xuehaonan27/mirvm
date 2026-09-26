@@ -129,7 +129,7 @@ mod tests {
     // run where such an image can be produced; the rest of the module is platform-neutral.
     use super::*;
     #[cfg(target_os = "linux")]
-    use crate::native::elf;
+    use crate::native::object::elf;
     #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -10,13 +10,13 @@
 //! - the *instructions* are the pair's ([`entry_asm`]), because they are this CPU's sequence with
 //!   the operands this object format spells;
 //! - how a symbol is declared, made private and given a region is the object format's
-//!   ([`crate::native::asmtext`]).
+//!   ([`crate::native::artifact::asmtext`]).
 //!
 //! None of the three is derivable from the others, which is why the text is composed here rather
 //! than written out per pair: a pair that wrote its own would restate the call list, and a call
 //! added to `vm::interpose` would then be a call the bridge silently stopped covering.
 
-use crate::native::asmtext::{Region, Visibility, Vocabulary};
+use crate::native::artifact::asmtext::{Region, Visibility, Vocabulary};
 use crate::os::linker;
 use crate::vm::interpose::{INTERPOSED_CALLS, owner_slot, target_slot};
 

@@ -18,9 +18,10 @@
 //! and the mapping from the zero handle to it is the platform half's.
 //!
 //! Two more items are the platform's, and neither is knowable from here: which object format this
-//! platform's toolchain writes and its loader accepts (`OBJECT_FORMAT`), and the sequence that gets
-//! bytes to the loader at all (`load_private_image`). The bytes and their layout are
-//! `crate::native`'s, which writes one without knowing which platform is asking.
+//! platform's toolchain writes and its loader accepts (`OBJECT_FORMAT`, one of the names
+//! `crate::native::object` gives the layouts), and the sequence that gets bytes to the loader at all
+//! (`load_private_image`). The bytes and their layout are `crate::native`'s, which writes one
+//! without knowing which platform is asking.
 //!
 //! A third is `reseal`: whether this loader accepts a file whose bytes were rewritten after it was
 //! last published. A platform whose loader checks nothing answers by doing nothing; one that
@@ -34,24 +35,6 @@
 pub enum Mode {
     Now,
     Lazy,
-}
-
-/// An object format. Which one a build meets is the platform's answer either way round: it is what
-/// its toolchain writes and what its loader reads back.
-///
-/// A byte layout does not vary with the platform, which is why the readers and writers for both of
-/// these live in `crate::native`; what varies is which one this platform deals in, and that is one
-/// `OBJECT_FORMAT` per platform.
-///
-/// Both variants therefore exist in every build. The one this platform does not name is still what
-/// the shared dispatch matches on, so it is unreachable by construction rather than unused.
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ObjectFormat {
-    /// An ELF shared object.
-    Elf,
-    /// A Mach-O dylib.
-    MachO,
 }
 
 /// An object this process published and then loaded: the handle that releases it again, and the

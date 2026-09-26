@@ -9,7 +9,7 @@
 //! define.
 
 use crate::arch::reloc;
-use crate::native::elf;
+use crate::native::object::elf;
 use crate::os_arch::reloc::classify;
 
 use super::bad;

@@ -21,7 +21,8 @@
 //! is short by exactly that. That is read out of the loaded image's own load commands, which is the
 //! same object layout `reloc` and the loader read.
 
-use crate::os::dll::{Mode, ObjectFormat, PrivateImage};
+use crate::native::object::ObjectFormat;
+use crate::os::dll::{Mode, PrivateImage};
 use std::ffi::{CStr, CString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};

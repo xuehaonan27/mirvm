@@ -52,7 +52,7 @@ fn lifecycle_callback_library(link_addr: LinkAddr, attribute: &str) -> (NativeFi
 /// one way per format that types the section as a list the loader runs, because that type is what
 /// the engine reads and then takes away.
 fn bridge_asm(link_addr: LinkAddr, terminator: bool) -> String {
-    use crate::native::asmtext::{Region, Visibility, Vocabulary};
+    use crate::native::artifact::asmtext::{Region, Visibility, Vocabulary};
     let format = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     let slot = super::super::ir::native_entry_slot_name(link_addr);
     let mut asm = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
@@ -122,9 +122,11 @@ __attribute__((constructor)) static void lifecycle(void) { callback(); }
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let library =
-        crate::native::archive::materialize_in(&archive, &directory.path().join("materialized"))
-            .unwrap();
+    let library = crate::native::artifact::archive::materialize_in(
+        &archive,
+        &directory.path().join("materialized"),
+    )
+    .unwrap();
     (directory, library)
 }
 

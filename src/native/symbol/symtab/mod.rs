@@ -18,16 +18,17 @@
 //! materialization time, and dlsym semantics such as IFUNC only hold on the dynamic surface).
 //!
 //! Only used for archives mirvm materializes itself (required_native_libs): their format comes
-//! from `native::archive`'s constrained link (ELF64 LE x86_64, not stripped). System libraries
-//! always have a normal .dynsym and never take this path.
+//! from `native::artifact::archive`'s constrained link (ELF64 LE x86_64, not stripped). System
+//! libraries always have a normal .dynsym and never take this path.
 //!
 //! The dlopen handle -> load base mapping (dlinfo) lives in `os::dll::load_bias`.
 
 /// Why an object's symbol table could not be read.
 ///
-/// The enum lives in this file rather than in the tree root because this is the one file of the
-/// native layer the TSan harness compiles: the rest of the tree needs the lowering layer, which the
-/// harness stubs. `Malformed` is the shape (or truncation), `Io` is the read.
+/// The enum lives with the readers rather than at the tree root: it is what they raise, and the
+/// TSan harness compiles this module tree directly rather than the whole native layer, which needs
+/// the lowering layer the harness stubs. `Malformed` is the shape (or truncation), `Io` is the
+/// read.
 #[derive(Debug, thiserror::Error, serde::Serialize)]
 pub(crate) enum Error {
     #[error("{detail}")]
@@ -66,58 +67,11 @@ impl Error {
 
 use std::collections::HashMap;
 
-use super::ar;
-use super::elf::{self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK};
-use crate::utils::bytes::{read_u16, read_u32, read_u64};
+use crate::native::object::ar;
+use crate::native::object::elf::{SHT_DYNSYM, SHT_SYMTAB};
 
-/// One `.symtab`/`.dynsym` entry, resolved against its string table.
-///
-/// `name_offset` is the raw `st_name` and travels with the entry because offset 0 is the string
-/// table's empty name: an entry pointing there names nothing and is not a symbol, which is a
-/// different question from whether the resolved string is empty.
-struct Symbol<'a> {
-    name: &'a str,
-    name_offset: u32,
-    value: u64,
-    section_index: u16,
-    binding: u8,
-}
-
-/// Read entry `index` of `table` (a symbol table section) against `strtab`.
-///
-/// `str_end` is the string table's end offset, computed once by the caller. `None` means the entry
-/// or the name it points at lies outside the image.
-fn symbol_at<'a>(
-    bytes: &'a [u8],
-    table: &elf::Section,
-    strtab: &elf::Section,
-    str_end: usize,
-    index: usize,
-) -> Option<Symbol<'a>> {
-    let base = usize::try_from(table.offset)
-        .ok()?
-        .checked_add(index.checked_mul(usize::try_from(table.entsize).ok()?)?)?;
-    let name_offset = read_u32(bytes, base + elf::sym::NAME)?;
-    let binding = bytes.get(base + elf::sym::INFO).copied()? >> 4;
-    let section_index = read_u16(bytes, base + elf::sym::SHNDX)?;
-    let value = read_u64(bytes, base + elf::sym::VALUE)?;
-    let name_start = usize::try_from(strtab.offset)
-        .ok()?
-        .checked_add(usize::try_from(name_offset).ok()?)?;
-    let name_end = name_start
-        + bytes
-            .get(name_start..str_end.min(bytes.len()))?
-            .iter()
-            .position(|&b| b == 0)?;
-    let name = std::str::from_utf8(bytes.get(name_start..name_end)?).ok()?;
-    Some(Symbol {
-        name,
-        name_offset,
-        value,
-        section_index,
-        binding,
-    })
-}
+pub(crate) mod elf;
+pub(crate) mod macho;
 
 /// The hidden-symbol fallback table: the symbols an object defines that its loader cannot reach by
 /// name.
@@ -133,67 +87,24 @@ fn symbol_at<'a>(
 /// caller degrades to no table.
 pub fn hidden_symtab_values(
     so_path: &str,
-    format: crate::os::dll::ObjectFormat,
+    format: crate::native::object::ObjectFormat,
 ) -> Result<HashMap<Box<str>, u64>, Error> {
     match format {
-        crate::os::dll::ObjectFormat::Elf => {
-            let mut syms = symbol_table_values(so_path, SHT_SYMTAB)?;
-            for name in symbol_table_values(so_path, SHT_DYNSYM)?.keys() {
+        crate::native::object::ObjectFormat::Elf => {
+            let mut syms = elf::symbol_table_values(so_path, SHT_SYMTAB)?;
+            for name in elf::symbol_table_values(so_path, SHT_DYNSYM)?.keys() {
                 syms.remove(&**name);
             }
             Ok(syms)
         }
-        crate::os::dll::ObjectFormat::MachO => {
+        crate::native::object::ObjectFormat::MachO => {
             let bytes = std::fs::read(so_path)
                 .map_err(|e| Error::io(format!("cannot read the shared library `{so_path}`"), e))?;
-            super::macho::hidden_symbols(&bytes)
+            macho::hidden_symbols(&bytes)
                 .map(|symbols| symbols.into_iter().collect())
                 .map_err(|why| Error::malformed(format!("`{so_path}`: {why}")))
         }
     }
-}
-
-/// Resolve the given symbol table section (SHT_SYMTAB / SHT_DYNSYM; entries have the same
-/// format): defined symbol name -> st_value (file virtual address, relative to the load base).
-fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>, u64>, Error> {
-    let bytes = std::fs::read(so_path)
-        .map_err(|e| Error::io(format!("cannot read the shared library `{so_path}`"), e))?;
-    let bad = || {
-        Error::malformed(format!(
-            "archive shared library `{so_path}` is not the expected ELF64 LE (or is corrupted)"
-        ))
-    };
-    let header = elf::FileHeader::parse(&bytes).ok_or_else(bad)?;
-    let sections = elf::sections(&bytes, &header).ok_or_else(bad)?;
-    for section in &sections {
-        if section.ty != want_sht {
-            continue;
-        }
-        if section.entsize < elf::SYM_ENTRY_SIZE as u64 {
-            return Err(bad());
-        }
-        let strtab = sections
-            .get(usize::try_from(section.link).map_err(|_| bad())?)
-            .ok_or_else(bad)?;
-        let str_end = usize::try_from(strtab.offset + strtab.size).map_err(|_| bad())?;
-        let count = usize::try_from(section.size / section.entsize.max(1)).map_err(|_| bad())?;
-        let mut out = HashMap::new();
-        for index in 0..count {
-            let symbol = symbol_at(&bytes, section, strtab, str_end, index).ok_or_else(bad)?;
-            // Skip SHN_UNDEF (0) and reserved section indices (0xff00+)
-            if symbol.name_offset == 0
-                || symbol.section_index == SHN_UNDEF
-                || symbol.section_index >= SHN_RESERVED
-            {
-                continue;
-            }
-            out.insert(Box::from(symbol.name), symbol.value);
-        }
-        return Ok(out);
-    }
-    // No requested symbol table section (should not happen for a materialized artifact,
-    // stripped or not, but harmless): treat as empty
-    Ok(HashMap::new())
 }
 
 // ===== ar archive SHN_UNDEF static enumeration (the "symbol is in the rlib" criterion for
@@ -205,7 +116,7 @@ fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>,
 /// (the same structural walk as `symbol_table_values`) and never parses tool text output.
 pub fn archive_undefined_symbols(
     archive_path: &str,
-    format: crate::os::dll::ObjectFormat,
+    format: crate::native::object::ObjectFormat,
 ) -> Result<Vec<Box<str>>, Error> {
     let bytes = std::fs::read(archive_path).map_err(|e| {
         Error::io(
@@ -228,17 +139,21 @@ pub fn archive_undefined_symbols(
 /// platform's, because the toolchain that produced the archive is what decided it.
 fn archive_undefined_symbols_in(
     bytes: &[u8],
-    format: crate::os::dll::ObjectFormat,
+    format: crate::native::object::ObjectFormat,
 ) -> Result<Vec<Box<str>>, Error> {
     let members = ar::members(bytes).map_err(|why| Error::malformed(why.to_string()))?;
     let mut out: Vec<Box<str>> = Vec::new();
     for member in members {
         let names: Vec<Box<str>> = match format {
-            crate::os::dll::ObjectFormat::Elf if elf::is_elf64_le(member) => {
-                elf_undefined_symbols(member)?
+            crate::native::object::ObjectFormat::Elf
+                if crate::native::object::elf::is_elf64_le(member) =>
+            {
+                elf::elf_undefined_symbols(member)?
             }
-            crate::os::dll::ObjectFormat::MachO if super::macho::is_image(member) => {
-                super::macho::undefined_symbols(member).map_err(Error::malformed)?
+            crate::native::object::ObjectFormat::MachO
+                if crate::native::object::macho::is_image(member) =>
+            {
+                macho::undefined_symbols(member).map_err(Error::malformed)?
             }
             // A member that is not an object of this format (a text listing, or the archive's own
             // symbol index) carries no symbols to enumerate.
@@ -253,42 +168,6 @@ fn archive_undefined_symbols_in(
     Ok(out)
 }
 
-/// SHN_UNDEF enumeration over a single ELF64 LE byte slice (GLOBAL/WEAK bindings; the same
-/// structural walk as symbol_table_values, but selecting shndx == 0 with no filtering).
-fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
-    let bad = || Error::malformed("not the expected ELF64 LE (or corrupted)");
-    let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
-    let sections = elf::sections(bytes, &header).ok_or_else(bad)?;
-    for section in &sections {
-        if section.ty != SHT_SYMTAB {
-            continue;
-        }
-        if section.entsize < elf::SYM_ENTRY_SIZE as u64 {
-            return Err(bad());
-        }
-        let strtab = sections
-            .get(usize::try_from(section.link).map_err(|_| bad())?)
-            .ok_or_else(bad)?;
-        let str_end = usize::try_from(strtab.offset + strtab.size).map_err(|_| bad())?;
-        let count = usize::try_from(section.size / section.entsize.max(1)).map_err(|_| bad())?;
-        let mut out = Vec::new();
-        for index in 0..count {
-            let symbol = symbol_at(bytes, section, strtab, str_end, index).ok_or_else(bad)?;
-            // Take only undefined (SHN_UNDEF) global/weak bindings (LOCAL is the member's
-            // internal business)
-            if symbol.name_offset == 0
-                || symbol.section_index != SHN_UNDEF
-                || (symbol.binding != STB_GLOBAL && symbol.binding != STB_WEAK)
-            {
-                continue;
-            }
-            out.push(Box::from(symbol.name));
-        }
-        return Ok(out);
-    }
-    Ok(Vec::new())
-}
-
 /// The names a shared object leaves to its loader, in the format its platform's toolchain writes.
 ///
 /// Which names matter is the caller's question — it compares them against the symbols the guest
@@ -296,14 +175,14 @@ fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
 /// it is the platform's: the linker that produced the object is what decided it.
 pub(crate) fn object_undefined_symbols(
     path: &str,
-    format: crate::os::dll::ObjectFormat,
+    format: crate::native::object::ObjectFormat,
 ) -> Result<Vec<Box<str>>, Error> {
     let bytes =
         std::fs::read(path).map_err(|error| Error::io(format!("cannot read `{path}`"), error))?;
     match format {
-        crate::os::dll::ObjectFormat::Elf => elf_undefined_symbols(&bytes),
-        crate::os::dll::ObjectFormat::MachO => {
-            super::macho::undefined_symbols(&bytes).map_err(Error::malformed)
+        crate::native::object::ObjectFormat::Elf => elf::elf_undefined_symbols(&bytes),
+        crate::native::object::ObjectFormat::MachO => {
+            macho::undefined_symbols(&bytes).map_err(Error::malformed)
         }
     }
 }
@@ -324,13 +203,13 @@ pub(crate) struct Export {
 /// because resolution order puts the image's own definition first whatever else the process holds.
 pub(crate) fn object_exports(
     path: &str,
-    format: crate::os::dll::ObjectFormat,
+    format: crate::native::object::ObjectFormat,
 ) -> Result<Vec<Export>, Error> {
     let bytes =
         std::fs::read(path).map_err(|error| Error::io(format!("cannot read `{path}`"), error))?;
     match format {
-        crate::os::dll::ObjectFormat::Elf => elf_exports(&bytes, path),
-        crate::os::dll::ObjectFormat::MachO => Ok(super::macho::symbols(&bytes)
+        crate::native::object::ObjectFormat::Elf => elf::elf_exports(&bytes, path),
+        crate::native::object::ObjectFormat::MachO => Ok(macho::symbols(&bytes)
             .map_err(Error::malformed)?
             .into_iter()
             .filter(|symbol| symbol.exported)
@@ -340,48 +219,6 @@ pub(crate) fn object_exports(
             })
             .collect()),
     }
-}
-
-/// The dynamic table's defined entries: `.dynsym`, which is the surface other images bind to.
-fn elf_exports(bytes: &[u8], path: &str) -> Result<Vec<Export>, Error> {
-    let bad = || {
-        Error::malformed(format!(
-            "archive shared library `{path}` is not the expected ELF64 LE (or is corrupted)"
-        ))
-    };
-    let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
-    let sections = elf::sections(bytes, &header).ok_or_else(bad)?;
-    for section in &sections {
-        if section.ty != SHT_DYNSYM {
-            continue;
-        }
-        if section.entsize < elf::SYM_ENTRY_SIZE as u64 {
-            return Err(bad());
-        }
-        let strtab = sections
-            .get(usize::try_from(section.link).map_err(|_| bad())?)
-            .ok_or_else(bad)?;
-        let str_end = usize::try_from(strtab.offset + strtab.size).map_err(|_| bad())?;
-        let count = usize::try_from(section.size / section.entsize.max(1)).map_err(|_| bad())?;
-        let mut out = Vec::new();
-        for index in 0..count {
-            let symbol = symbol_at(bytes, section, strtab, str_end, index).ok_or_else(bad)?;
-            if symbol.name_offset == 0
-                || symbol.section_index == SHN_UNDEF
-                || symbol.section_index >= SHN_RESERVED
-            {
-                continue;
-            }
-            out.push(Export {
-                name: Box::from(symbol.name),
-                // A unique is merged by the loader rather than chosen between, so it is not a
-                // definition two images can conflict over.
-                weak: symbol.binding == STB_WEAK || symbol.binding == elf::STB_GNU_UNIQUE,
-            });
-        }
-        return Ok(out);
-    }
-    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -468,13 +305,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Link an archive with -fvisibility=hidden using `native::archive`'s parameters: its symbols
+    /// Link an archive with -fvisibility=hidden using `native::artifact::archive`'s parameters: its symbols
     /// do not enter .dynsym, but the .symtab fallback must resolve the same address that a
     /// direct dlsym returns.
     /// The subject is ELF's two tables: a definition the image does not export is absent from
     /// `.dynsym` and present in `.symtab`, and the fallback table is the difference. This format
     /// keeps one table and says "do not offer this" with a bit instead, which is what
-    /// `native::macho`'s own test covers.
+    /// `native::symbol::symtab::macho`'s own test covers.
     #[cfg(target_os = "linux")]
     #[test]
     fn hidden_symbols_resolve_via_symtab_with_same_address_as_dlsym() {
@@ -535,7 +372,8 @@ mod tests {
         // .symtab fallback: the hidden symbol resolves and the call returns the right value
         // The raw `.symtab` view, read through what `hidden_symtab_values` filters: this test
         // exists to compare the two.
-        let syms = super::symbol_table_values(so.to_str().unwrap(), super::SHT_SYMTAB).unwrap();
+        let syms =
+            super::elf::symbol_table_values(so.to_str().unwrap(), super::SHT_SYMTAB).unwrap();
         let bias = crate::os::dll::load_bias(handle, &c_so).expect("load_bias") as u64;
         let hidden_addr = *syms
             .get("mirvm_hidden_probe")
@@ -553,9 +391,11 @@ mod tests {
         // priority), visible is out (keeping global dlsym resolution, paired with
         // reject_symbol_ambiguity)
         // The probe this test builds is an ELF object whatever the host is, so it asks as one.
-        let hidden_only =
-            super::hidden_symtab_values(so.to_str().unwrap(), crate::os::dll::ObjectFormat::Elf)
-                .unwrap();
+        let hidden_only = super::hidden_symtab_values(
+            so.to_str().unwrap(),
+            crate::native::object::ObjectFormat::Elf,
+        )
+        .unwrap();
         assert_eq!(
             hidden_only.get("mirvm_hidden_probe"),
             syms.get("mirvm_hidden_probe"),

@@ -202,7 +202,7 @@ mod tests {
             let cpath =
                 std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("a path");
             let bias = crate::os::dll::load_bias(*handle, &cpath).expect("a load base") as u64;
-            let symbols = crate::native::symtab::hidden_symtab_values(
+            let symbols = crate::native::symbol::symtab::hidden_symtab_values(
                 &path.to_string_lossy(),
                 crate::os::dll::OBJECT_FORMAT,
             )

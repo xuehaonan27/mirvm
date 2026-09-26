@@ -72,7 +72,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
 
         // MIR operands -> wrapper constraints (super::asm; only the reg constraint and role are needed, not values/destinations).
-        let fmt = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+        let fmt = crate::native::artifact::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
         let mut gen_ops: Vec<crate::lower::asm::AsmOperand> = Vec::with_capacity(operands.len());
         for op in operands {
             match op {

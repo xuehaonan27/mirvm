@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::archive::{materialize_for_target_in, materialize_in, reject_symbol_ambiguity};
+use crate::native::artifact::archive::{
+    materialize_for_target_in, materialize_in, reject_symbol_ambiguity,
+};
 
 use crate::diag::Diagnostic as _;
 
@@ -204,7 +206,7 @@ fn native_signal_calls_receive_the_engine_owner() {
     // The slots are reached the two ways the engine reaches them, because the platform decides
     // whether the bridge exports them: through the loader, which searches an image's whole load
     // closure, and through the image's own table where they are not exported.
-    let hidden = crate::native::symtab::hidden_symtab_values(
+    let hidden = crate::native::symbol::symtab::hidden_symtab_values(
         so.to_str().unwrap(),
         crate::os::dll::OBJECT_FORMAT,
     )

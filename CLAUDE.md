@@ -133,7 +133,7 @@ modifications.
   `src/os_arch/<os>_<arch>/` is the two at once (signal frames and restorers, raw syscall sequences,
   the fixed-address layout, kernel TLS). An object-file byte layout is none of them — it does not vary
   with either axis — so it belongs to the layer that produces and parses those objects
-  (`src/native/{elf,ar}.rs`), with `e_machine` in `arch` and the loader's half in `os`. Each axis
+  (`src/native/object/{elf,ar}.rs`), with `e_machine` in `arch` and the loader's half in `os`. Each axis
   declares its surface and dispatches through `#[cfg]` ladders, so a call site names one path on
   every target: `mod.rs` names the subsystems and dispatches the ones that are wholly one
   platform's, and a subsystem carrying vocabulary every platform shares — a relocation meaning, a

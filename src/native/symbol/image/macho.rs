@@ -1,4 +1,4 @@
-//! An arm64 Mach-O dylib whose only content is a symbol per guest function.
+//! The Mach-O dylib whose only content is a symbol per guest function.
 //!
 //! A process symbolizer discovers the images a process has loaded and reads their own symbol
 //! tables, so the way to make a synthetic instruction-pointer token resolvable is to hand it a
@@ -17,11 +17,11 @@
 //! leading underscore, because a loader looks a C name up with one applied: the symbol table, which
 //! `nm` and `dladdr` read, and the export trie, which is the only one `dlsym` consults.
 
-use super::lifecycle::CallableList;
-use crate::utils::bytes::{read_u32, read_u64};
+use crate::native::object::macho::{
+    HEADER_SIZE, LC_SEGMENT_64, LC_SYMTAB, MH_MAGIC_64, N_EXT, N_SECT, NLIST_SIZE, SECTION_SIZE,
+    SEGMENT_COMMAND_SIZE,
+};
 
-/// The 64-bit Mach-O magic, little-endian on disk.
-const MH_MAGIC_64: u32 = 0xfeed_facf;
 /// `cputype` for arm64, and the subtype meaning "all arm64".
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 const CPU_SUBTYPE_ARM64_ALL: u32 = 0;
@@ -31,13 +31,6 @@ const MH_DYLIB: u32 = 6;
 /// dependency list carries all four, and they let the tools that walk an image's load commands
 /// treat it as a linkable library rather than a bundle.
 const MH_FLAGS: u32 = 0x1 | 0x4 | 0x80 | 0x0020_0000;
-
-/// `mach_header_64`, fixed part.
-const HEADER_SIZE: usize = 32;
-/// `segment_command_64`, without its section headers.
-const SEGMENT_COMMAND_SIZE: usize = 72;
-/// `section_64`.
-const SECTION_SIZE: usize = 80;
 /// `LC_UUID`'s command and 16 UUID bytes.
 const UUID_COMMAND_SIZE: usize = 24;
 /// `symtab_command`.
@@ -51,67 +44,34 @@ const DYLD_INFO_COMMAND_SIZE: usize = 48;
 const LINKEDIT_ALIGN: usize = 8;
 /// `dylib_command` without its name.
 const DYLIB_COMMAND_SIZE: usize = 24;
-/// One `nlist_64`.
-const NLIST_SIZE: usize = 16;
-
-/// The load command that carries `__TEXT` and its `__text` section.
-const LC_SEGMENT_64: u32 = 0x19;
-/// The load command carrying the singular constructor address in 64-bit images.
-const LC_ROUTINES_64: u32 = 0x1a;
 /// The load command naming this image, and the one dyld needs to tell two loads of it apart.
 const LC_ID_DYLIB: u32 = 0x0d;
 const LC_UUID: u32 = 0x1b;
-/// The two symbol-table commands, and the one that carries the export trie.
-const LC_SYMTAB: u32 = 0x02;
+/// The load command listing the symbol table's local and undefined ranges.
 const LC_DYSYMTAB: u32 = 0x0b;
+/// The load command carrying the export trie's offset and size.
 const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
-
 /// The flags word of an export trie terminal: no flags, which is how an ordinary name is marked.
 const EXPORT_SYMBOL_FLAGS_REGULAR: u64 = 0;
-
 /// `__TEXT`'s permissions (read and execute) and `__LINKEDIT`'s (read only).
 const PROT_READ: u32 = 1;
 const PROT_EXECUTE: u32 = 4;
-
-/// `n_type` for a symbol defined at a section offset and visible to other images.
-const N_SECT: u8 = 0x0e;
-const N_EXT: u8 = 0x01;
-/// `n_desc`'s bit for a weak definition.
-const N_WEAK_DEF: u16 = 0x0080;
-
-/// The low byte of `section_64.flags`, which is the section's type. The two types a pointer array
-/// of functions can have, the type a modern ld64 gives the initializer list instead of one of
-/// those, and the plain type that is none of them: a loader runs the lists it sees typed, so a
-/// section whose type stops saying "a list of initializers" is one it leaves alone.
-const SECTION_TYPE_MASK: u32 = 0xff;
-const S_MOD_INIT_FUNC_POINTERS: u32 = 0x9;
-const S_MOD_TERM_FUNC_POINTERS: u32 = 0xa;
-const S_INIT_FUNC_OFFSETS: u32 = 0x16;
-const S_REGULAR: u32 = 0x0;
-
-/// `VM_PROT_EXECUTE`, as `segment_command_64.initprot` reports it.
-const VM_PROT_EXECUTE: u32 = 0x4;
-
 /// `S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS` on the `__text` section.
 const TEXT_SECTION_FLAGS: u32 = 0x8000_0400;
 /// The `__text` section is 2^4 bytes aligned, which is what a `SLOT`-byte stride needs.
 const SLOT_ALIGN_LOG2: u32 = 4;
-
 /// The section index of `__text` within `__TEXT`, which is the only section in the image.
 const TEXT_SECTION_INDEX: u8 = 1;
 /// `__TEXT` starts at file offset zero and virtual address zero, so the two coincide and any
 /// offset into the image is also the address the image maps it at.
 const TEXT_SEGMENT_FILE_OFFSET: u64 = 0;
 const TEXT_SEGMENT_VM_ADDR: u64 = 0;
-
 /// The install name recorded in `LC_ID_DYLIB`. Nothing loads this image by name: a caller
 /// `dlopen`s it by path, so the name only has to be a valid absolute path.
 const INSTALL_NAME: &str = "/usr/lib/libmirvm_syms.dylib";
-
 /// macOS on arm64 maps 16 KiB pages, and every segment offset and size here is a multiple of the
 /// page size so that `codesign` can cover the segments and dyld can map them.
 const PAGE: usize = 0x4000;
-
 /// One function's slot, which is this architecture's inert slot: a decodable instruction followed
 /// by padding, so no address is ever mid-instruction and nothing after the return is reached.
 const SLOT: usize = crate::arch::asmstub::INERT_SLOT.len();
@@ -581,313 +541,18 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     Ok((out.out, text_off))
 }
 
-// ===== reading an image back =====
-
-/// One symbol of an image's table.
-pub(crate) struct ImageSymbol {
-    /// The name as the rest of mirvm spells it: this format's leading underscore is dropped, so a
-    /// caller compares the same string it would use anywhere else.
-    pub(crate) name: Box<str>,
-    /// The address the symbol is defined at in the image, or zero for one the loader resolves.
-    pub(crate) value: u64,
-    /// Whether the loader has to resolve it rather than the image defining it.
-    pub(crate) undefined: bool,
-    /// Whether the image marks it private, which is how this format says the loader cannot reach
-    /// it by name even though the image defines it.
-    pub(crate) private_extern: bool,
-    /// Whether the image defines it and offers it to other images.
-    pub(crate) exported: bool,
-    /// Whether the image marks it a weak definition, which is how this format says two images may
-    /// define one name and the linker picks either.
-    pub(crate) weak: bool,
-}
-
-/// `n_type`'s type field, the value meaning "defined nowhere in this image", and the bit marking a
-/// symbol the image defines but does not export.
-const N_TYPE: u8 = 0x0e;
-const N_UNDF: u8 = 0x00;
-const N_PEXT: u8 = 0x10;
-
-/// The symbols of a Mach-O image, in the order its table lists them.
-pub(crate) fn symbols(bytes: &[u8]) -> Result<Vec<ImageSymbol>, String> {
-    let (commands, _) = header(bytes)?;
-    let mut cursor = HEADER_SIZE;
-    for _ in 0..commands {
-        let (command, size) = load_command(bytes, cursor)?;
-        if command == LC_SYMTAB {
-            return symbol_table(bytes, symtab_at(bytes, cursor)?);
-        }
-        cursor = cursor
-            .checked_add(size as usize)
-            .ok_or_else(|| "the load commands overrun the image".to_string())?;
-    }
-    Err("the image carries no symbol table".to_string())
-}
-
-/// The names of the symbols the loader has to resolve, which is what an image's own undefined
-/// range is: the external symbols its table defines nowhere.
-pub(crate) fn undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
-    Ok(symbols(bytes)?
-        .into_iter()
-        .filter(|symbol| symbol.undefined)
-        .map(|symbol| symbol.name)
-        .collect())
-}
-
-/// The symbols the image defines but does not export, by name and address.
-///
-/// An image exports every external symbol it does not mark private, so this is the set a caller
-/// cannot reach by name through the loader however the image is loaded.
-pub(crate) fn hidden_symbols(bytes: &[u8]) -> Result<Vec<(Box<str>, u64)>, String> {
-    Ok(symbols(bytes)?
-        .into_iter()
-        .filter(|symbol| !symbol.undefined && symbol.private_extern)
-        .map(|symbol| (symbol.name, symbol.value))
-        .collect())
-}
-
-/// One `LC_SEGMENT_64`: the virtual range it maps, how it is protected, and the sections it holds.
-pub(crate) struct Segment {
-    pub(crate) vmaddr: u64,
-    pub(crate) vmsize: u64,
-    pub(crate) initprot: u32,
-    pub(crate) sections: Vec<Section>,
-}
-
-/// One `section_64`: the two names a caller matches it by, its virtual range, and its type.
-pub(crate) struct Section {
-    pub(crate) segname: String,
-    pub(crate) sectname: String,
-    pub(crate) addr: u64,
-    pub(crate) size: u64,
-    pub(crate) section_type: u32,
-    /// Where the type lives in the load commands, which is where clearing it is written.
-    flags_at: usize,
-}
-
-impl Section {
-    /// The kind of callable list this section is, when it is one a loader runs.
-    ///
-    /// The pointer form is the one an old linker wrote for both lists; a modern one writes the
-    /// initializer list as 32-bit offsets instead, which is why the offsets type answers for
-    /// initializers alone.
-    pub(crate) fn callable_list(&self) -> Option<CallableList> {
-        match self.section_type {
-            S_MOD_INIT_FUNC_POINTERS | S_MOD_TERM_FUNC_POINTERS => Some(CallableList::Pointers),
-            S_INIT_FUNC_OFFSETS => Some(CallableList::Offsets),
-            _ => None,
-        }
-    }
-
-    /// Stop the loader running this section as a list of callables, leaving the list and everything
-    /// else about the image where they are.
-    ///
-    /// Clearing the type rather than the contents is what the two measured hazards force: a loader
-    /// rebases these slots, so a zeroed one arrives as the slide and is called, and pointing the
-    /// section at nothing would move everything laid out after it. Only the type is load-bearing for
-    /// the loader, and this file's caller signs the image again afterwards.
-    pub(crate) fn detach(&self, bytes: &mut [u8]) -> Result<(), String> {
-        let short = || "a section header lies outside the image".to_string();
-        let attributes = read_u32(bytes, self.flags_at).ok_or_else(short)? & !SECTION_TYPE_MASK;
-        let field = bytes
-            .get_mut(self.flags_at..self.flags_at + 4)
-            .ok_or_else(short)?;
-        field.copy_from_slice(&(S_REGULAR | attributes).to_le_bytes());
-        Ok(())
-    }
-}
-
-impl Segment {
-    /// Whether this segment maps executable code, which is what a caller attributes instruction
-    /// addresses to.
-    pub(crate) fn is_executable(&self) -> bool {
-        self.initprot & VM_PROT_EXECUTE != 0
-    }
-}
-
-/// What walking an image's load commands yields a caller.
-pub(crate) struct Image {
-    pub(crate) segments: Vec<Segment>,
-    /// The singular constructor address an `LC_ROUTINES_64` carries, which this linker does not
-    /// emit but an older image may have.
-    pub(crate) routines_init: Option<u64>,
-}
-
-/// The image's `LC_SEGMENT_64` commands, in the order the header lists them.
-pub(crate) fn image(bytes: &[u8]) -> Result<Image, String> {
-    let (ncmds, sizeofcmds) = header(bytes)?;
-    let commands_end = HEADER_SIZE
-        .checked_add(sizeofcmds as usize)
-        .ok_or_else(|| "the image's load commands are too long".to_string())?;
-    if commands_end > bytes.len() {
-        return Err("the image ends inside its load commands".to_string());
-    }
-    let mut segments = Vec::new();
-    let mut routines_init = None;
-    let mut cursor = HEADER_SIZE;
-    for _ in 0..ncmds {
-        let (command, cmdsize) = load_command(bytes, cursor)?;
-        let size = cmdsize as usize;
-        // Every command is at least its own header and the header's count and total size are the
-        // only bounds on the run.
-        if size < 8 || cursor + size > commands_end {
-            return Err("a load command has an implausible size".to_string());
-        }
-        if command == LC_SEGMENT_64 {
-            segments.push(segment(bytes, cursor, size)?);
-        } else if command == LC_ROUTINES_64 {
-            if size < 16 {
-                return Err("an LC_ROUTINES_64 is truncated".to_string());
-            }
-            routines_init = read_u64(bytes, cursor + 8);
-        }
-        cursor += size;
-    }
-    Ok(Image {
-        segments,
-        routines_init,
-    })
-}
-
-fn segment(bytes: &[u8], cursor: usize, cmdsize: usize) -> Result<Segment, String> {
-    let short = || "a segment command is truncated".to_string();
-    if cmdsize < SEGMENT_COMMAND_SIZE {
-        return Err(short());
-    }
-    let vmaddr = read_u64(bytes, cursor + 24).ok_or_else(short)?;
-    let vmsize = read_u64(bytes, cursor + 32).ok_or_else(short)?;
-    let initprot = read_u32(bytes, cursor + 60).ok_or_else(short)?;
-    let nsects = read_u32(bytes, cursor + 64).ok_or_else(short)? as usize;
-    let sections_start = cursor + SEGMENT_COMMAND_SIZE;
-    let sections_size = nsects
-        .checked_mul(SECTION_SIZE)
-        .ok_or_else(|| "a segment declares too many sections".to_string())?;
-    if sections_start + sections_size > cursor + cmdsize {
-        return Err(short());
-    }
-    let mut sections = Vec::with_capacity(nsects);
-    for index in 0..nsects {
-        sections.push(section(bytes, sections_start + index * SECTION_SIZE)?);
-    }
-    Ok(Segment {
-        vmaddr,
-        vmsize,
-        initprot,
-        sections,
-    })
-}
-
-fn section(bytes: &[u8], at: usize) -> Result<Section, String> {
-    let short = || "a section header is truncated".to_string();
-    Ok(Section {
-        sectname: fixed_name(bytes, at).ok_or_else(short)?,
-        segname: fixed_name(bytes, at + 16).ok_or_else(short)?,
-        addr: read_u64(bytes, at + 32).ok_or_else(short)?,
-        size: read_u64(bytes, at + 40).ok_or_else(short)?,
-        section_type: read_u32(bytes, at + 64).ok_or_else(short)? & SECTION_TYPE_MASK,
-        flags_at: at + 64,
-    })
-}
-
-/// A `section_64`'s 16-byte name field, NUL-padded, as a string.
-fn fixed_name(bytes: &[u8], at: usize) -> Option<String> {
-    let field = bytes.get(at..at + 16)?;
-    let end = field
-        .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(field.len());
-    Some(String::from_utf8_lossy(&field[..end]).into_owned())
-}
-
-/// The `LC_SYMTAB` fields at `cursor`: `symoff`, `nsyms`, `stroff` and `strsize`.
-fn symtab_at(bytes: &[u8], cursor: usize) -> Result<[usize; 4], String> {
-    let short = || "the image ends inside a load command".to_string();
-    let mut fields = [0_usize; 4];
-    for (index, field) in fields.iter_mut().enumerate() {
-        let at = cursor + 8 + index * 4;
-        *field = read_u32(bytes, at).ok_or_else(short)? as usize;
-    }
-    Ok(fields)
-}
-
-/// Walks `[symoff, nsyms, stroff, strsize]` into the symbols they name.
-fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, String> {
-    let [symoff, nsyms, stroff, strsize] = fields;
-    let strings = bytes
-        .get(stroff..stroff + strsize)
-        .ok_or_else(|| "the string table lies outside the image".to_string())?;
-    let mut out = Vec::with_capacity(nsyms);
-    for index in 0..nsyms {
-        let at = symoff + index * NLIST_SIZE;
-        let entry = bytes
-            .get(at..at + NLIST_SIZE)
-            .ok_or_else(|| "the symbol table lies outside the image".to_string())?;
-        // `nlist_64` is `n_strx`, `n_type`, `n_sect`, `n_desc`, `n_value`.
-        let name = name_of(
-            strings,
-            read_u32(bytes, at)
-                .ok_or_else(|| "the symbol table lies outside the image".to_string())?
-                as usize,
-        )?;
-        out.push(ImageSymbol {
-            name,
-            value: read_u64(entry, 8).ok_or_else(|| "a symbol entry is truncated".to_string())?,
-            undefined: entry[4] & N_TYPE == N_UNDF && entry[4] & N_EXT != 0,
-            private_extern: entry[4] & N_PEXT != 0,
-            exported: entry[4] & N_TYPE != N_UNDF
-                && entry[4] & N_EXT != 0
-                && entry[4] & N_PEXT == 0,
-            weak: u16::from_le_bytes([entry[6], entry[7]]) & N_WEAK_DEF != 0,
-        });
-    }
-    Ok(out)
-}
-
-/// The symbol name at `offset` in the string table, without this format's leading underscore.
-fn name_of(strings: &[u8], offset: usize) -> Result<Box<str>, String> {
-    let tail = strings
-        .get(offset..)
-        .ok_or_else(|| "a symbol name lies outside the string table".to_string())?;
-    let end = tail
-        .iter()
-        .position(|&byte| byte == 0)
-        .ok_or_else(|| "a symbol name is not terminated".to_string())?;
-    let name =
-        std::str::from_utf8(&tail[..end]).map_err(|_| "a symbol name is not UTF-8".to_string())?;
-    Ok(Box::from(name.strip_prefix('_').unwrap_or(name)))
-}
-
-/// Whether `bytes` is a 64-bit Mach-O image at all, which is what a caller holding a member of an
-/// archive asks before reading symbols out of it.
-pub(crate) fn is_image(bytes: &[u8]) -> bool {
-    read_u32(bytes, 0) == Some(MH_MAGIC_64)
-}
-
-/// The image's `ncmds` and `sizeofcmds`.
-fn header(bytes: &[u8]) -> Result<(u32, u32), String> {
-    match read_u32(bytes, 0) {
-        Some(MH_MAGIC_64) => {}
-        _ => return Err("not a 64-bit Mach-O image".to_string()),
-    }
-    let short = || "the image ends inside its header".to_string();
-    Ok((
-        read_u32(bytes, 16).ok_or_else(short)?,
-        read_u32(bytes, 20).ok_or_else(short)?,
-    ))
-}
-
-/// A load command's `cmd` and `cmdsize`.
-fn load_command(bytes: &[u8], cursor: usize) -> Result<(u32, u32), String> {
-    let short = || "the image ends inside a load command".to_string();
-    Ok((
-        read_u32(bytes, cursor).ok_or_else(short)?,
-        read_u32(bytes, cursor + 4).ok_or_else(short)?,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::native::object::macho::N_PEXT;
+    use crate::native::symbol::lifecycle::callable_list;
+    use crate::utils::bytes::read_u32;
+
+    use crate::native::object::macho::{header, load_command};
+    use crate::native::symbol::symtab::macho::{
+        hidden_symbols, symbols, symtab_at, undefined_symbols,
+    };
 
     const NAMES: [&str; 3] = ["mirvm_probe_a", "mirvm_probe_b", "mirvm_probe_c"];
 
@@ -1053,7 +718,8 @@ mod tests {
     #[test]
     fn the_segment_walker_finds_what_the_writer_wrote() {
         let (bytes, text_off) = symbol_image();
-        let image = super::image(&bytes).expect("an image this module wrote");
+        let image =
+            crate::native::object::macho::image(&bytes).expect("an image this module wrote");
         let text = image
             .segments
             .iter()
@@ -1069,7 +735,7 @@ mod tests {
         assert_eq!(section.segname, "__TEXT");
         assert_eq!(section.addr as usize, text_off);
         assert_eq!(section.size as usize, SLOT * NAMES.len());
-        assert_eq!(section.callable_list(), None);
+        assert_eq!(callable_list(section), None);
         assert_eq!(image.routines_init, None);
     }
 }

@@ -4,7 +4,8 @@
 //! Business semantics like binding priority and symbol existence are left to
 //! the caller.
 
-use crate::os::dll::{Mode, ObjectFormat, PrivateImage};
+use crate::native::object::ObjectFormat;
+use crate::os::dll::{Mode, PrivateImage};
 use std::ffi::CStr;
 
 /// The format this platform's toolchain writes and its loader accepts, which is what a caller that

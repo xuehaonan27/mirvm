@@ -132,7 +132,7 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, Error> 
     // The assembler's own output ends with this note, and a linker that does not find it warns and
     // marks the stack executable. This text is generated, so it says so here; the note is empty and
     // this platform's format needs none, which is why the vocabulary decides what to write.
-    let format = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+    let format = crate::native::artifact::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     if !src.ends_with('\n') {
         src.push('\n');
     }
@@ -539,10 +539,17 @@ impl<'tcx> Gen<'_, 'tcx> {
 
     /// Follows cg_clif's `generate_asm_wrapper`: the x86_64 branch with Intel syntax.
     fn generate_asm_wrapper(&self, name: &str) -> String {
-        let fmt = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+        let fmt = crate::native::artifact::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
         let mut s = String::new();
-        fmt.open(&mut s, crate::native::asmtext::Region::Text { name });
-        fmt.define_fn(&mut s, name, crate::native::asmtext::Visibility::Exported);
+        fmt.open(
+            &mut s,
+            crate::native::artifact::asmtext::Region::Text { name },
+        );
+        fmt.define_fn(
+            &mut s,
+            name,
+            crate::native::artifact::asmtext::Visibility::Exported,
+        );
         s.push_str(crate::arch::asm_text::DIRECTIVE_INTEL);
 
         Self::prologue(&mut s);
