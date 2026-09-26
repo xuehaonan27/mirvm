@@ -132,6 +132,20 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
         .join(".mirvm-sysroot-hash")
 }
 
+/// The sysroot this process compiles against.
+///
+/// `--sysroot`/`MIRVM_SYSROOT` wins; without it the home's own `data/sysroot-<host>` is the one.
+/// Everything that names a sysroot — the compiler session, the stamp, the base image and the
+/// dependency fingerprint — has to name the same one: a base image lowered from one std and merged
+/// with a delta compiled against another puts two copies of the language runtime in a single module,
+/// which is exactly the shape `verify` refuses as two main panic boundaries.
+pub(crate) fn effective_dir() -> PathBuf {
+    crate::options::get()
+        .sysroot
+        .clone()
+        .unwrap_or_else(|| crate::store::SYSROOT.dir())
+}
+
 /// Ensure the MIR-rich sysroot exists and return its path.
 ///
 /// The fast path recomputes the content key and compares it with the stamp file; any
@@ -139,8 +153,14 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// staging + tmp directories and is published with an atomic rename, so the old sysroot
 /// stays usable until the moment it is swapped out. A crash mid-build leaves tmp/old
 /// directories behind, and the missing stamp self-heals on the next run.
+///
+/// Only the home's own sysroot is built here. A sysroot chosen with `--sysroot`/`MIRVM_SYSROOT` is
+/// the caller's to provide, and mirvm neither writes into it nor replaces it.
 pub fn ensure_sysroot() -> Result<PathBuf, Error> {
     let sysroot_dir = crate::store::SYSROOT.dir();
+    if let Some(chosen) = crate::options::get().sysroot.clone() {
+        return Ok(chosen);
+    }
     if let Some(want) = stamp_value()
         && std::fs::read_to_string(stamp_file(&sysroot_dir)).is_ok_and(|have| have == want)
     {
@@ -150,10 +170,10 @@ pub fn ensure_sysroot() -> Result<PathBuf, Error> {
     Ok(sysroot_dir)
 }
 
-/// Stamp value of the currently built sysroot (reused in the base-image key); `None` when
-/// the sysroot is not built.
+/// Stamp value of the sysroot in effect (reused in the base-image key); `None` when it is not
+/// built, or was not built by mirvm and so carries no stamp.
 pub(crate) fn current_stamp_value() -> Option<String> {
-    std::fs::read_to_string(stamp_file(&crate::store::SYSROOT.dir())).ok()
+    std::fs::read_to_string(stamp_file(&effective_dir())).ok()
 }
 
 /// Content key (the regeneration criterion): the rustc binary stat, the library/ top-level

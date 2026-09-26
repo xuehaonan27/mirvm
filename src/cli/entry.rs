@@ -450,7 +450,16 @@ pub(super) fn run_main(
             "--json" => super::note_json_output(),
             "--verbose" | "-v" => super::note_verbose(),
             "--edition" => edition = next("--edition")?,
-            "--sysroot" => sysroot = Some(next("--sysroot")?),
+            "--sysroot" => {
+                let v = next("--sysroot")?;
+                // The sysroot is not only this session's compiler argument: the base image and the
+                // dependency fingerprints are keyed by its stamp, and every mirvm process this
+                // command starts has to compile against the same std. Export it the way
+                // --stack-size and --jit are exported, so "the sysroot in effect" is one value.
+                crate::options::note_cli("sysroot");
+                crate::options::export_to_process("sysroot", &v);
+                sysroot = Some(v);
+            }
             // Backward compat for old gate scripts: --engine vm is the only engine, just consume it
             "--engine" => {
                 let e = next("--engine")?;
