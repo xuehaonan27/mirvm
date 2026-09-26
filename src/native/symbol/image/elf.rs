@@ -1,17 +1,13 @@
-//! An ELF object whose only content is a symbol per guest function.
+//! The ELF object whose only content is a symbol per guest function.
 //!
-//! A process symbolizer discovers the objects a process has loaded and reads their symbol tables
-//! itself, so the way to make a synthetic instruction-pointer token resolvable is to hand it a
-//! real, loadable ELF that defines a symbol at that address. The image is one inert byte per
-//! function -- a return instruction followed by padding, `SLOT` bytes apart, so an address is
-//! always a symbol start and never mid-instruction -- plus the section and dynamic tables a
-//! loader expects. Nothing ever executes these bytes; their addresses are opaque tokens.
-//!
-//! [`build`] returns the bytes and the file offset the functions start at, which is what a caller
-//! adds to the load bias to get each token.
+//! One inert byte per function -- a return instruction followed by padding, `SLOT` bytes apart, so
+//! an address is always a symbol start and never mid-instruction -- plus the section and dynamic
+//! tables a loader expects. Nothing ever executes these bytes; their addresses are opaque tokens.
+//! [`build_elf`] returns the bytes and the file offset the functions start at, which is what a
+//! caller adds to the load bias to get each token.
 
 use crate::arch::asmstub::INERT_SLOT;
-use crate::native::elf;
+use crate::native::object::elf;
 use crate::utils::bytes::{write_u16, write_u32, write_u64};
 
 fn align(value: usize, alignment: usize) -> usize {
@@ -28,23 +24,8 @@ fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, String> {
     Ok(offset)
 }
 
-/// The object a process symbolizer is named by, in the format `format` names.
-///
-/// Which format is worth writing is the platform's answer, because it is the platform's loader
-/// that has to accept the result; the bytes are this layer's either way, and the two writers below
-/// agree on the one thing a caller depends on, which is what the returned offset means.
-pub fn build(
-    format: crate::os::dll::ObjectFormat,
-    names: &[Box<str>],
-) -> Result<(Vec<u8>, usize), String> {
-    match format {
-        crate::os::dll::ObjectFormat::Elf => build_elf(names),
-        crate::os::dll::ObjectFormat::MachO => crate::native::macho::build(names),
-    }
-}
-
 /// The ELF layout: one dynamic symbol per function, in one load segment.
-fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
+pub(super) fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     /// The section index of `.text`, which every synthetic symbol is defined in.
     const TEXT_SECTION_INDEX: u16 = 1;
     const EHDR: usize = elf::EHDR_SIZE;

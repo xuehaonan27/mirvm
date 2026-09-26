@@ -189,7 +189,7 @@ families! {
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // `lower::global_asm` — materialized `global_asm!`/naked-fn objects; keyed by the final text.
     Cache GLOBAL_ASM      "global-asm"      keyed;
-    // `native::archive` — a PIC `.a` converted into a dlopen-able `.so`; keyed by archive + cc identity.
+    // `native::artifact::archive` — a PIC `.a` converted into a dlopen-able `.so`; keyed by archive + cc identity.
     Cache NATIVE_ARCHIVES "native-archives" keyed;
     // `pack` — native libraries carried inside a `.mirvm`; keyed by their content hash.
     Cache PACKAGE_NATIVE  "package-native"  keyed;

@@ -1,8 +1,10 @@
-//! Host native objects: turning a constrained static archive into a dlopen-able `.so`
-//! ([`archive`]), building the symbol-only object a backtrace is named by ([`symimage`]),
-//! reading the symbol tables of the objects mirvm produces ([`symtab`]), the assembler source
-//! vocabulary that produces them ([`asmtext`]), where their constructors and destructors are
-//! ([`lifecycle`]), and the two byte layouts both of them work on ([`elf`], [`ar`]).
+//! Host native objects: the toolchain's half of mirvm.
+//!
+//! An object file is what a toolchain writes and what a loader reads back, so this layer owns the
+//! two things that follow from that: the byte layouts themselves ([`object`]), and the artifacts
+//! mirvm builds with the host toolchain ([`artifact`]). What a caller then does with an object —
+//! resolving a symbol name through it, naming a synthetic instruction pointer, taking the loader's
+//! hands off an image's constructors — is [`symbol`].
 //!
 //! The converter and the reader belong together because the converter is the only producer of the
 //! objects the reader parses: an archive built with `-fvisibility=hidden` is converted with
@@ -10,22 +12,16 @@
 //! makes them callable again. `vm` reads the same tables at load time; both go through this module
 //! rather than through the documents that describe them.
 //!
-//! The two layouts are here for that reason rather than for a platform one: a byte layout does not
+//! The layouts are here for that reason rather than for a platform one: a byte layout does not
 //! change with the kernel or the CPU, so it belongs to the layer that produces and parses these
 //! objects, not to `os`. What *is* platform-dependent about an image lives on the axis it belongs
 //! to — which machine it is for is `arch::ELF_MACHINE`, and which format a host's loader accepts,
 //! plus everything the loader does with it (an in-memory file, `/proc/self/fd`, `dlopen`,
 //! self-mapping), is `os` and its callers.
 
-pub(crate) mod ar;
-pub(crate) mod archive;
-pub(crate) mod asmtext;
-pub(crate) mod bridge;
-pub(crate) mod elf;
-pub(crate) mod lifecycle;
-pub(crate) mod macho;
-pub(crate) mod symimage;
-pub(crate) mod symtab;
+pub(crate) mod artifact;
+pub(crate) mod object;
+pub(crate) mod symbol;
 
 #[cfg(test)]
 mod tests;

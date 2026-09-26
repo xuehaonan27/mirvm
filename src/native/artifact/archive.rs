@@ -32,7 +32,7 @@ pub(crate) enum Error {
 
     /// The archive's symbol table could not be read.
     #[error(transparent)]
-    Symtab(#[from] super::symtab::Error),
+    Symtab(#[from] crate::native::symbol::symtab::Error),
 
     #[error("{detail}: {source}")]
     Io {
@@ -305,12 +305,12 @@ pub(crate) fn materialize_static_libraries<'tcx>(
 /// Hidden symbols that do not enter .dynsym (carried by the .symtab fallback table) deliberately
 /// skip all collision checks: in resolution order they always precede the global scope, so
 /// collisions already resolve to the archive, leaving no ambiguity to reject.
-pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), Error> {
+pub(crate) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), Error> {
     let mut owners = HashMap::<String, (PathBuf, bool)>::new();
     for shared_object in shared_objects {
         // Read here rather than by `nm`: the tool's name, its flags and the type letters it prints
         // are each the object format's, and this build meets two of those.
-        for export in crate::native::symtab::object_exports(
+        for export in crate::native::symbol::symtab::object_exports(
             &shared_object.to_string_lossy(),
             crate::os::dll::OBJECT_FORMAT,
         )? {
@@ -352,7 +352,7 @@ fn find_archive(filename: &str, search_dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-pub(super) fn materialize_for_target_in(
+pub(crate) fn materialize_for_target_in(
     archive: &Path,
     cache_dir: &Path,
     target: &str,
@@ -418,7 +418,8 @@ pub(super) fn materialize_for_target_in(
     // The bridge is an input of this link like any other, so its content belongs in the cache key.
     // Its name *is* that content: the artifact is addressed by the hash of what it was built from.
     let native_runtime_bridge =
-        crate::native::bridge::artifact(cache_dir, cc, &cc_identity).map_err(Error::tool)?;
+        crate::native::artifact::bridge::artifact(cache_dir, cc, &cc_identity)
+            .map_err(Error::tool)?;
     let bridge_name = native_runtime_bridge
         .file_name()
         .unwrap_or_default()
@@ -533,7 +534,7 @@ fn rescue_with_rlib_symbols(
     linker: &mut crate::lower::linker::Linker<'_>,
 ) -> Result<Option<PathBuf>, Error> {
     use rustc_span::Symbol;
-    let undefs = crate::native::symtab::archive_undefined_symbols(
+    let undefs = crate::native::symbol::symtab::archive_undefined_symbols(
         &archive.display().to_string(),
         crate::os::dll::OBJECT_FORMAT,
     )?;
@@ -762,10 +763,10 @@ fn is_legacy_init(name: &str) -> bool {
 /// The sections are read here rather than by a tool, because the tool's name, its flags and the
 /// spelling it prints a section under are each the object format's, and this build meets two of
 /// those. Only one of the two has the sections at all: `.init`/`.fini` are an ELF practice, and a
-/// Mach-O object's constructors are the pointer arrays `crate::native::lifecycle` reads and
+/// Mach-O object's constructors are the pointer arrays `crate::native::symbol::lifecycle` reads and
 /// suppresses, so there is nothing of this kind to reject there.
 fn reject_legacy_init_sections(archive: &Path) -> Result<(), Error> {
-    if crate::os::dll::OBJECT_FORMAT != crate::os::dll::ObjectFormat::Elf {
+    if crate::os::dll::OBJECT_FORMAT != crate::native::object::ObjectFormat::Elf {
         return Ok(());
     }
     let bytes = std::fs::read(archive).map_err(|e| {
@@ -777,19 +778,19 @@ fn reject_legacy_init_sections(archive: &Path) -> Result<(), Error> {
             e,
         )
     })?;
-    let members = crate::native::ar::members(&bytes).map_err(|error| {
+    let members = crate::native::object::ar::members(&bytes).map_err(|error| {
         Error::malformed(format!(
             "cannot read the members of static native archive `{}`: {error:?}",
             archive.display()
         ))
     })?;
     for member in members {
-        let Some(header) = crate::native::elf::FileHeader::parse(member) else {
+        let Some(header) = crate::native::object::elf::FileHeader::parse(member) else {
             // The archive's own symbol index is not an object; a member that is not ELF has no
             // section of this kind either.
             continue;
         };
-        let Some(names) = crate::native::elf::section_names(member, &header) else {
+        let Some(names) = crate::native::object::elf::section_names(member, &header) else {
             return Err(Error::malformed(format!(
                 "Cannot read the section names of a member of static native archive `{}`",
                 archive.display()

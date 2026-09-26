@@ -49,7 +49,7 @@ pub(crate) use product_adapters::lower;
 mod utils; // content hash, pure Rust (source-shared)
 #[path = "../../../../../src/diag/mod.rs"]
 mod diag; // the diagnostic vocabulary the engine emits through: std only, so it stays shareable
-mod native; // native layer: the symbol reader and the byte layouts are pure Rust (see native.rs)
+mod native; // native layer: the symbol reader and the byte layouts are pure Rust (see native/mod.rs)
 #[path = "../../../../../src/store/mod.rs"]
 mod store; // the family register the engine reads its scratch dirs from (pure Rust, source-shared)
 #[path = "../../../../../src/options.rs"]

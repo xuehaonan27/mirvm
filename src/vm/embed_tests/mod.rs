@@ -442,9 +442,11 @@ uint64_t read_image_signal_trace(void) { return trace; }
         String::from_utf8_lossy(&ar.stdout),
         String::from_utf8_lossy(&ar.stderr)
     );
-    let library =
-        crate::native::archive::materialize_in(&archive, &directory.path().join("materialized"))
-            .unwrap();
+    let library = crate::native::artifact::archive::materialize_in(
+        &archive,
+        &directory.path().join("materialized"),
+    )
+    .unwrap();
     (directory, library)
 }
 
@@ -456,10 +458,10 @@ uint64_t read_image_signal_trace(void) { return trace; }
 /// platform: measured on the macos aarch64 host, `__attribute__((destructor))` is not emitted as a
 /// `__mod_term_func` section at all but as an `__cxa_atexit` registration from a generated
 /// initializer, which is the *process's* list rather than the image's.
-fn terminator_section(format: crate::os::dll::ObjectFormat) -> &'static str {
+fn terminator_section(format: crate::native::object::ObjectFormat) -> &'static str {
     match format {
-        crate::os::dll::ObjectFormat::Elf => ".pushsection .fini_array,\"aw\",@progbits\n",
-        crate::os::dll::ObjectFormat::MachO => {
+        crate::native::object::ObjectFormat::Elf => ".pushsection .fini_array,\"aw\",@progbits\n",
+        crate::native::object::ObjectFormat::MachO => {
             ".pushsection __DATA,__mod_term_func,mod_term_funcs\n"
         }
     }

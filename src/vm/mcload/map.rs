@@ -6,7 +6,7 @@
 //! after the last relocation has been written. A mapping that never reaches an `McImage` is
 //! unmapped by its drop, so a failed phase leaves nothing behind.
 
-use crate::native::elf;
+use crate::native::object::elf;
 
 use super::bad;
 use super::parse::Image;

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::native::elf;
+use crate::native::object::elf;
 use crate::utils::bytes::{read_u16, read_u32, read_u64};
 
 use super::bad;

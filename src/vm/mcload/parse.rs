@@ -5,7 +5,7 @@
 //! missing: a shape this format does not define is the same top-level failure whether it was the
 //! magic, an entry size or a field past the end of the bytes.
 
-use crate::native::elf;
+use crate::native::object::elf;
 use crate::utils::bytes::{read_u32, read_u64};
 
 use super::bad;

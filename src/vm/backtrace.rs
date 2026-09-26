@@ -123,8 +123,10 @@ impl Symbols {
         if module.function_names.is_empty() {
             return Ok(Self::default());
         }
-        let (bytes, text_off) =
-            crate::native::symimage::build(crate::os::dll::OBJECT_FORMAT, &module.function_names)?;
+        let (bytes, text_off) = crate::native::symbol::image::build(
+            crate::os::dll::OBJECT_FORMAT,
+            &module.function_names,
+        )?;
         let image = crate::os::dll::load_private_image(&bytes, c"mirvm-guest-symbols")
             .map_err(|error| format!("publishing the guest symbol object failed: {error}"))?;
         let bias = image.bias();

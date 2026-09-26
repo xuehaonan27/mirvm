@@ -27,8 +27,11 @@
 
 use std::path::Path;
 
-use super::{elf, macho};
-use crate::os::dll::ObjectFormat;
+use crate::native::object::macho::{
+    self, S_INIT_FUNC_OFFSETS, S_MOD_INIT_FUNC_POINTERS, S_MOD_TERM_FUNC_POINTERS, S_REGULAR,
+    SECTION_TYPE_MASK, Section,
+};
+use crate::native::object::{ObjectFormat, elf};
 use crate::utils::bytes::{read_u32, read_u64};
 
 /// How a list of callables is written down in an object.
@@ -166,6 +169,37 @@ fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
     Ok(result)
 }
 
+/// The kind of callable list `section` is, when it is one a loader runs.
+///
+/// The pointer form is the one an old linker wrote for both lists; a modern one writes the
+/// initializer list as 32-bit offsets instead, which is why the offsets type answers for
+/// initializers alone. Which section types say so is the layout's; that a loader runs what it sees
+/// typed is this layer's problem.
+pub(crate) fn callable_list(section: &Section) -> Option<CallableList> {
+    match section.section_type {
+        S_MOD_INIT_FUNC_POINTERS | S_MOD_TERM_FUNC_POINTERS => Some(CallableList::Pointers),
+        S_INIT_FUNC_OFFSETS => Some(CallableList::Offsets),
+        _ => None,
+    }
+}
+
+/// Stop the loader running `section` as a list of callables, leaving the list and everything else
+/// about the image where they are.
+///
+/// Clearing the type rather than the contents is what the two measured hazards force: a loader
+/// rebases these slots, so a zeroed one arrives as the slide and is called, and pointing the section
+/// at nothing would move everything laid out after it. Only the type is load-bearing for the loader,
+/// and the caller signs the image again afterwards.
+fn detach(section: &Section, bytes: &mut [u8]) -> Result<(), String> {
+    let short = || "a section header lies outside the image".to_string();
+    let attributes = read_u32(bytes, section.flags_at).ok_or_else(short)? & !SECTION_TYPE_MASK;
+    let field = bytes
+        .get_mut(section.flags_at..section.flags_at + 4)
+        .ok_or_else(short)?;
+    field.copy_from_slice(&(S_REGULAR | attributes).to_le_bytes());
+    Ok(())
+}
+
 /// The Mach-O half: the lists are sections the loader runs because of their type, so the read is a
 /// section walk and the suppression is that type ceasing to say so.
 fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
@@ -188,7 +222,7 @@ fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
     result.init = image.routines_init;
     for segment in &image.segments {
         for section in &segment.sections {
-            let Some(form) = section.callable_list() else {
+            let Some(form) = callable_list(section) else {
                 continue;
             };
             // The offsets form exists for the initializers alone; a name is what separates the two
@@ -208,7 +242,7 @@ fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
             if array.replace((section.addr, section.size, form)).is_some() {
                 return Err(bad(format!("two `{}` sections", section.sectname)));
             }
-            section.detach(bytes)?;
+            detach(section, bytes)?;
         }
     }
     Ok(result)
@@ -236,8 +270,8 @@ fn pair_tags(
 mod tests {
     use std::path::Path;
 
-    use super::{CallableList, ObjectFormat, read_and_suppress};
-    use crate::native::macho;
+    use super::{CallableList, ObjectFormat, callable_list, read_and_suppress};
+    use crate::native::object::macho;
 
     /// A constructor that appends to the file `PROBE_MARKER` names, an exported function, and a
     /// destructor the test does not observe because it would run at process exit.
@@ -264,7 +298,7 @@ int probe_export(int x) { return x + 1; }
     }
 
     /// Links `SOURCE` into a dylib carrying a constructor that reports itself through `marker`.
-    /// The archive step is not decoration: it is the shape `native::archive` builds.
+    /// The archive step is not decoration: it is the shape `native::artifact::archive` builds.
     ///
     /// `classic` picks which of the two initializer forms this loader will see: a linker run
     /// without fixup chains writes the pointer array, and the default one writes the offset list
@@ -357,7 +391,7 @@ int probe_export(int x) { return x + 1; }
                 .segments
                 .iter()
                 .flat_map(|segment| &segment.sections)
-                .any(|section| section.callable_list().is_some()),
+                .any(|section| callable_list(section).is_some()),
             "the list must no longer be typed as one the loader runs"
         );
 

@@ -11,14 +11,14 @@
 //!
 //! None of that varies with the kernel or the CPU, which is why it is here beside the two byte
 //! layouts rather than on an axis. The format arrives as a value from `crate::os::dll`, the same way
-//! [`super::symtab`] takes it.
+//! [`crate::native::symbol::symtab`] takes it.
 //!
 //! Two spellings deliberately stay with the call site: `.balign` and `.quad` mean the same thing to
 //! both assemblers, and the order the statements come in is what the materializer is for.
 
 use std::fmt::Write as _;
 
-use crate::os::dll::ObjectFormat;
+use crate::native::object::ObjectFormat;
 
 /// Whether a symbol an image defines is reachable from the other images the process loads.
 #[derive(Clone, Copy, PartialEq, Eq)]

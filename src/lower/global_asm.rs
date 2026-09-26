@@ -10,7 +10,7 @@
 //! than const/sym, another target than this build's, `link_section`) are rejected loudly.
 
 use crate::lower::Error;
-use crate::native::asmtext::{Region, Visibility, Vocabulary};
+use crate::native::artifact::asmtext::{Region, Visibility, Vocabulary};
 
 use std::fmt::Write as _;
 
@@ -420,7 +420,7 @@ fn render_naked<'tcx>(
 /// The object is read here rather than by a tool: the tool's name, its flags and the spelling it
 /// prints a symbol under are each the object format's, and this build writes two of those.
 fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
-    let symbols = crate::native::symtab::object_undefined_symbols(
+    let symbols = crate::native::symbol::symtab::object_undefined_symbols(
         so.to_str()?,
         crate::os::dll::OBJECT_FORMAT,
     )
@@ -493,7 +493,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     // Guest text is assembled as written, so the note the toolchain appends to output of its own
     // making is appended here: without it the link warns and the stack is marked executable. It is
     // empty, and a format that has no such note writes nothing.
-    let format = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+    let format = crate::native::artifact::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     if !asm.ends_with('\n') {
         asm.push('\n');
     }
@@ -510,7 +510,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     // or the calls in this one would keep their binding; on the other the object works either way,
     // and one shape for both keeps the two call sites from having to know which platform they are
     // on. Its name is the hash of its content, so it stands in for that content in this key.
-    let bridge = crate::native::bridge::artifact(&dir, std::path::Path::new("cc"), b"")
+    let bridge = crate::native::artifact::bridge::artifact(&dir, std::path::Path::new("cc"), b"")
         .map_err(Error::assemble)?;
     let bridge_name = bridge
         .file_name()

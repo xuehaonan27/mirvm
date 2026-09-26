@@ -425,8 +425,9 @@ fn lower_inner(
     // dlopen'd yet", so the whole module's libraries are materialized here and only here (later
     // assembly reuses the segment list without re-auditing). Failures are loud.
     let required_native_libs: Vec<Box<str>> = {
-        let mut v = crate::native::archive::materialize_static_libraries(tcx, &mut linker)
-            .unwrap_or_else(|reason| panic!("Static native library loading failed: {reason}"));
+        let mut v =
+            crate::native::artifact::archive::materialize_static_libraries(tcx, &mut linker)
+                .unwrap_or_else(|reason| panic!("Static native library loading failed: {reason}"));
         // global_asm manifests of dependency crates: `.mirasm.s` text extracted from HIR when the
         // dependency was compiled and stored beside its rlib. They are assembled and loaded through
         // the same channel, in crate-graph order, which is how symbols defined by dependency
@@ -496,7 +497,7 @@ fn lower_inner(
     // same source, since its `#[link]` attributes live in libstd.
     // Static libraries go through the archive path above; Framework/wasm kinds are not handled.
     // The collection scope is shared with the native archive link line.
-    let dylib_names = crate::native::archive::system_dylibs(tcx);
+    let dylib_names = crate::native::artifact::archive::system_dylibs(tcx);
     let dylib_candidates = soname_candidates(&dylib_names);
     // Best-effort preload: a missing library is left to the loud diagnostics at its real use site.
     // The handles live for the process lifetime.
