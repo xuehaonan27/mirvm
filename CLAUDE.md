@@ -106,8 +106,9 @@ modifications.
   `info` for lifecycle, `debug` for internals, `warn` for recoverable issues,
   `error` for unrecoverable failures. Update schemas/config/docs with contract changes.
 - Write code, comments, doc comments, user-visible messages, `README.md` and
-  everything under `docs/` in English. `DESIGN.md` is still Chinese; convert it
-  only when asked.
+  everything under `docs/` in English. The design contract is `docs/designs/`: its
+  `README.md` is the umbrella and the index, each sibling owns one topic, and
+  neither may restate what the other owns.
 - A code comment describes the code in front of it: say what it does and why the
   non-obvious parts are that way (invariants, preconditions, hazards, units,
   ownership). No milestone/slice/design-document citations, no "was X, now Y"

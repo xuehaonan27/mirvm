@@ -8,7 +8,8 @@
 
 mirvm runs whole Rust programs built for the pinned toolchain `nightly-2026-07-02` on a
 Linux/ELF/x86_64 baseline: rustc MIR is lowered into mirvm's own typed bytecode and that bytecode is
-executed in a VM. `DESIGN.md` is the contract; `docs/designs/` holds the per-topic contracts.
+executed in a VM. The design contract is [docs/designs/README.md](designs/README.md); the per-topic
+contracts are its siblings in `docs/designs/`.
 
 - **Interpreter** — a tcx-free tree walk over the typed bytecode: scalar and SIMD intrinsics, true
   stack depth, `f16`/`f128`, atomic ordering, 128-bit forms, nested DSTs, `volatile`, `dyn` tail

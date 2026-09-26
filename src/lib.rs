@@ -1,5 +1,5 @@
 //! mirvm — Rust runtime with its own execution engine.
-//! Architecture and design decisions are in DESIGN.md. The engine is the library (D10); the CLI is just a thin shell.
+//! Architecture and design decisions are in docs/designs/ (README.md is the entry point). The engine is the library (D10); the CLI is just a thin shell.
 
 #![feature(rustc_private)]
 #![feature(box_patterns)] // lower matches MIR Box fields
