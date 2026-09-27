@@ -23,7 +23,7 @@ pub(crate) mod deps;
 pub(crate) mod program;
 
 use crate::vm::instance::Instance;
-use crate::vm::ir::{FuncId, Module, TlsId};
+use crate::vm::ir::{FuncId, LinkAddr, Module, TlsId};
 
 /// Why a persisted image layer could not be produced.
 ///
@@ -77,6 +77,13 @@ pub struct BaseImage {
     pub key: String,
 }
 
+impl BaseImage {
+    /// The fn-entry links this layer owns, which a module loaded above it may reference.
+    pub fn entry_links(&self) -> impl Iterator<Item = LinkAddr> + '_ {
+        self.module.fn_entry_links.iter().map(|(addr, _)| *addr)
+    }
+}
+
 /// The base image plus a chain of dependency images.
 pub struct ImageStack {
     images: Vec<BaseImage>,
@@ -93,6 +100,8 @@ pub struct ImageStack {
     lowering_fp: (bool, bool, bool),
     /// Layered cache key chain (each image key joined by \x1f; `None` for an empty stack)
     key: Option<String>,
+    /// Union of the layers' fn-entry links (the verification context for a module loaded above them)
+    entry_links: Vec<LinkAddr>,
 }
 
 impl ImageStack {
@@ -108,6 +117,7 @@ impl ImageStack {
             total_asm: 0,
             lowering_fp: (false, false, false),
             key: None,
+            entry_links: Vec::new(),
         }
     }
 
@@ -168,6 +178,24 @@ impl ImageStack {
         self.key.as_deref()
     }
 
+    /// The stack context for a module that is about to join above these layers: the numbering they
+    /// occupy and the fn-entry links they own.
+    pub fn below(&self) -> crate::vm::verify::Below<'_> {
+        crate::vm::verify::Below {
+            prefix: crate::vm::verify::Prefix {
+                funcs: self.total_fns,
+                tls: self.total_tls,
+                asm: self.total_asm,
+            },
+            entries: self.entry_links(),
+        }
+    }
+
+    /// Every fn-entry link the layers of this stack own.
+    pub fn entry_links(&self) -> &[LinkAddr] {
+        &self.entry_links
+    }
+
     /// Append one image (an in-memory split product): incrementally updates the union
     /// lookups, cumulative offsets and key chain. The caller guarantees fp matches the stack
     /// (built in the same session, so no truncation is needed).
@@ -195,6 +223,7 @@ impl ImageStack {
         for (k, v) in &img.tls_by_sym {
             self.tls_by_sym.entry(k.clone()).or_insert(*v);
         }
+        self.entry_links.extend(img.entry_links());
         self.total_fns += img.module.funcs.len();
         self.total_tls += img.module.tls.len();
         self.total_asm += img.module.asm_sites.len();

@@ -24,16 +24,28 @@ pub struct Prefix {
     pub asm: usize,
 }
 
-pub fn module(module: &Module, instance: &Instance) -> Result<(), String> {
-    module_with_prefix(module, instance, Prefix::default())
+/// What the layers below a module provide: the numbering they occupy and the fn-entry links they
+/// own.
+///
+/// A module's own instance describes the entries it owns, but an artifact stored as one layer of a
+/// stack may also reference an entry that physically lives below it: `fn_entry_addr` reuses a
+/// base-allocated entry so that one function keeps one address identity, and the referencing frozen
+/// word then holds a base address. Such a module is valid exactly above a stack that owns those
+/// entries, so the check needs both halves. A module that starts a stack — a base image, a package,
+/// a focused test — has nothing below it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Below<'a> {
+    pub prefix: Prefix,
+    /// Entry links owned by the layers below, in any order.
+    pub entries: &'a [LinkAddr],
 }
 
-pub fn module_with_prefix(
-    module: &Module,
-    instance: &Instance,
-    prefix: Prefix,
-) -> Result<(), String> {
-    Verifier::new(module, instance, prefix)?.run()
+pub fn module(module: &Module, instance: &Instance) -> Result<(), String> {
+    module_below(module, instance, Below::default())
+}
+
+pub fn module_below(module: &Module, instance: &Instance, below: Below<'_>) -> Result<(), String> {
+    Verifier::new(module, instance, below.prefix, below.entries)?.run()
 }
 
 /// Indexed packages first verify module-level references; function bodies are decoded one by one
@@ -43,7 +55,7 @@ pub(crate) fn module_header_with_count(
     instance: &Instance,
     funcs: usize,
 ) -> Result<(), String> {
-    Verifier::new_with_count(module, instance, Prefix::default(), funcs)?.run_header()
+    Verifier::new_with_count(module, instance, Prefix::default(), &[], funcs)?.run_header()
 }
 
 pub(crate) fn function_with_count(
@@ -53,7 +65,7 @@ pub(crate) fn function_with_count(
     index: usize,
     body: &FuncBody,
 ) -> Result<(), String> {
-    let verifier = Verifier::new_with_count(module, instance, Prefix::default(), funcs)?;
+    let verifier = Verifier::new_with_count(module, instance, Prefix::default(), &[], funcs)?;
     verifier
         .body(body)
         .map_err(|error| format!("function {index} `{}`: {error}", body.name))
@@ -97,6 +109,8 @@ struct Verifier<'a> {
     module: &'a Module,
     instance: &'a Instance,
     prefix: Prefix,
+    /// Entry links owned by the layers below this module (see [`Below`]).
+    lower_entries: &'a [LinkAddr],
     funcs: usize,
     tls: usize,
     asm: usize,
@@ -111,14 +125,16 @@ impl<'a> Verifier<'a> {
         module: &'a Module,
         instance: &'a Instance,
         prefix: Prefix,
+        lower_entries: &'a [LinkAddr],
     ) -> Result<Self, String> {
-        Self::new_with_count(module, instance, prefix, module.funcs.len())
+        Self::new_with_count(module, instance, prefix, lower_entries, module.funcs.len())
     }
 
     pub(super) fn new_with_count(
         module: &'a Module,
         instance: &'a Instance,
         prefix: Prefix,
+        lower_entries: &'a [LinkAddr],
         local_funcs: usize,
     ) -> Result<Self, String> {
         let funcs = total("function", prefix.funcs, local_funcs)?;
@@ -128,6 +144,7 @@ impl<'a> Verifier<'a> {
             module,
             instance,
             prefix,
+            lower_entries,
             funcs,
             tls,
             asm,
@@ -221,7 +238,12 @@ impl<'a> Verifier<'a> {
                         .map_err(|e| format!("frozen relocation {i} target: {e}"))?;
                 }
                 FrozenRelocTarget::Entry(target) => {
-                    if !self.instance.link_fn_addrs.contains_key(&target) {
+                    // An entry this module owns, or one a layer below owns: `fn_entry_addr` reuses a
+                    // base entry rather than giving one function a second identity, so a layer can
+                    // legitimately point into the frozen area beneath it.
+                    if !self.instance.link_fn_addrs.contains_key(&target)
+                        && !self.lower_entries.contains(&target)
+                    {
                         return Err(format!(
                             "frozen relocation {i} refers to unknown entry {:#x}",
                             target.0

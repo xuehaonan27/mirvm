@@ -96,9 +96,9 @@ pub(crate) fn native_libs_present(module: &ir::Module) -> bool {
 /// file does not carry, then verify the module against the stack it is about to join (or against
 /// nothing, for the layer that starts the stack). `None` is a miss — an unverified module is never
 /// used.
-pub(crate) fn revive(module: &mut ir::Module, prefix: verify::Prefix) -> Option<Instance> {
+pub(crate) fn revive(module: &mut ir::Module, below: verify::Below<'_>) -> Option<Instance> {
     let instance = Instance::materialize(module).ok()?;
-    verify::module_with_prefix(module, &instance, prefix)
+    verify::module_below(module, &instance, below)
         .ok()
         .map(|()| instance)
 }

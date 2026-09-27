@@ -43,7 +43,26 @@ impl Artifact {
     }
 
     fn verify_prefix(&self, prefix: Prefix) -> Result<(), String> {
-        module_with_prefix(&self.module, &self.instance, prefix)
+        module_below(
+            &self.module,
+            &self.instance,
+            Below {
+                prefix,
+                entries: &[],
+            },
+        )
+    }
+
+    /// Verify as a layer above the given entry links.
+    fn verify_above(&self, entries: &[LinkAddr]) -> Result<(), String> {
+        module_below(
+            &self.module,
+            &self.instance,
+            Below {
+                prefix: Prefix::default(),
+                entries,
+            },
+        )
     }
 }
 
@@ -251,6 +270,29 @@ fn rejects_bad_external_references() {
     m.exports.insert("bad".into(), 1);
     let err = Artifact::new(m).verify().unwrap_err();
     assert!(err.contains("function id 1"), "{err}");
+}
+
+#[test]
+fn an_entry_owned_by_a_layer_below_is_a_valid_relocation_target() {
+    // `fn_entry_addr` reuses a base-allocated entry instead of giving one function a second identity,
+    // so a layer's frozen word may name an entry it does not own: valid above that layer, a miss on
+    // its own.
+    let below = LinkAddr(0x6800_0000_1000);
+    let mut m = Module::default();
+    m.funcs.push(body(Terminator::Return));
+    let mut frozen = super::super::frozen::FrozenArena::new();
+    let at = LinkAddr(frozen.alloc(8, 8));
+    m.frozen_relocs.push(FrozenReloc {
+        at,
+        target: FrozenRelocTarget::Entry(below),
+    });
+    let mut artifact = Artifact::new(m);
+    artifact.instance.frozen = Some(frozen);
+    artifact.instance.rebuild_load_map();
+
+    let err = artifact.verify().unwrap_err();
+    assert!(err.contains("unknown entry"), "{err}");
+    artifact.verify_above(&[below]).unwrap();
 }
 
 #[test]

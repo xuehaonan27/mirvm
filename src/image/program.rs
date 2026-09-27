@@ -62,7 +62,7 @@ fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>
 pub fn lookup(
     rustc_args: &[String],
     base_key: Option<&str>,
-    prefix: crate::vm::verify::Prefix,
+    below: crate::vm::verify::Below<'_>,
 ) -> Option<(ir::Module, Instance)> {
     if disabled() {
         return None;
@@ -82,7 +82,7 @@ pub fn lookup(
     // Correct shape does not guarantee index and frame range safety, so a bad cache is a miss that
     // the cold path self-heals. Materialized .so files (native archive / global_asm) that were
     // removed are a miss for the same reason.
-    let instance = crate::store::entry::revive(&mut module, prefix)?;
+    let instance = crate::store::entry::revive(&mut module, below)?;
     if !crate::store::entry::native_libs_present(&module) {
         return None;
     }
@@ -97,12 +97,12 @@ pub fn store(
     module: &ir::Module,
     instance: &Instance,
     base_key: Option<&str>,
-    prefix: crate::vm::verify::Prefix,
+    below: crate::vm::verify::Below<'_>,
 ) -> bool {
     if disabled() {
         return false;
     }
-    if crate::vm::verify::module_with_prefix(module, instance, prefix).is_err() {
+    if crate::vm::verify::module_below(module, instance, below).is_err() {
         return false;
     }
     // The frozen area must be at a fixed base (a concurrent preempt or an ASLR conflict leaves
