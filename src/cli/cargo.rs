@@ -80,25 +80,26 @@ impl GuestProcessState {
     fn from_cargo_runner() -> Self {
         let cwd = crate::options::guest_cwd();
         let caller_sysroot = crate::options::caller_sysroot();
-        let caller_had_sysroot = crate::options::caller_sysroot_present();
         let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
         for key in [
             crate::options::protocol::CARGO_SESSION,
             crate::options::protocol::GUEST_CWD,
             crate::options::protocol::CALLER_SYSROOT,
-            crate::options::protocol::CALLER_SYSROOT_PRESENT,
             "RUSTC_WRAPPER",
         ] {
             env.remove(std::ffi::OsStr::new(key));
         }
-        if caller_had_sysroot {
-            if let Some(value) = caller_sysroot {
+        // This process's own `MIRVM_SYSROOT` is the effective one the wrapper set, so the guest gets
+        // it back only when the caller had named a sysroot at all.
+        match caller_sysroot {
+            Some(value) => {
                 env.insert(crate::options::env_var_name("sysroot").into(), value);
             }
-        } else {
-            env.remove(std::ffi::OsStr::new(crate::options::env_var_name(
-                "sysroot",
-            )));
+            None => {
+                env.remove(std::ffi::OsStr::new(crate::options::env_var_name(
+                    "sysroot",
+                )));
+            }
         }
         Self {
             cwd,

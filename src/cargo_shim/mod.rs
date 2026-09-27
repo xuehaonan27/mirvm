@@ -236,15 +236,13 @@ fn cargo_project_command(
     // for config/workspace discovery, so carry the original directory to the
     // runner and apply it only when guest execution begins.
     crate::options::protocol::set_guest_cwd(&mut cmd, guest_cwd);
+    // What the caller had, carried separately from the `MIRVM_SYSROOT` set above: that variable now
+    // holds the effective sysroot whether the caller named one or not, so the runner cannot read the
+    // caller's choice out of its own environment. Clearing the protocol variable is how "the caller
+    // named none" travels.
     match crate::options::sysroot() {
-        Some(value) => {
-            crate::options::protocol::set_caller_sysroot_present(&mut cmd, true);
-            crate::options::protocol::set_caller_sysroot(&mut cmd, &value);
-        }
-        None => {
-            crate::options::protocol::set_caller_sysroot_present(&mut cmd, false);
-            crate::options::protocol::clear_caller_sysroot(&mut cmd);
-        }
+        Some(value) => crate::options::protocol::set_caller_sysroot(&mut cmd, &value),
+        None => crate::options::protocol::clear_caller_sysroot(&mut cmd),
     }
     cmd
 }
