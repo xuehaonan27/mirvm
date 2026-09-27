@@ -98,6 +98,16 @@ loader enforces it by demanding the body through the lazy table first. The choke
 independent of persistence: it is the same enumeration a T→R regime flip, arena compaction or any
 future code motion needs.
 
+The recorded site carries the *identity*, not the address, and the offset comes from the backend
+rather than from a parallel bookkeeping pass: each site is emitted as a named `global_value`, so
+cranelift records a relocation for it exactly where the immediate lands, the symbol's value is
+supplied through the module's lookup hook at compile time, and the compiler reads the finalized
+code's relocation list back into the entry's table. That is also why no site may `iconst` an
+address: a constant inside an instruction is invisible to the relocation table, and there is no
+second source of truth to keep in step with the encoding. Calls to the helper whitelist already
+work this way — they are symbol references today — so the choke point is what brings the baked
+absolutes to the same footing.
+
 ### 2.4 Artifact and store form
 
 Entries are stored in the same pack mechanism as fragments (append-only packs plus index, atomic
