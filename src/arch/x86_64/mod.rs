@@ -12,6 +12,12 @@ pub mod intrinsics;
 /// platform this architecture runs on.
 pub const ELF_MACHINE: u16 = 62;
 
+/// The architecture's Mach-O machine identity: `CPU_TYPE_X86_64`, and the subtype an image for any
+/// x86_64 variant carries. A `cputype` is assigned to the CPU rather than to an operating system, so
+/// this is the same pair on every Mach-O platform this architecture runs on.
+pub const MACHO_CPU_TYPE: u32 = 0x0100_0007;
+pub const MACHO_CPU_SUBTYPE: u32 = 3;
+
 /// The register Cranelift reserves when a module enables the pinned register, as this architecture
 /// names it. Cranelift's own register environment documents the choice (`isa/x64/inst/regs.rs`,
 /// there as matching Spidermonkey's `HeapReg`).

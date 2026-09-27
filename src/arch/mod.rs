@@ -32,7 +32,10 @@
 //! directory spells an architecture. What a name holds that does not vary with the CPU is declared
 //! here rather than repeated in every architecture directory; what does vary is the architecture's.
 //!
-//! - `ELF_MACHINE` — the architecture's `e_machine`, which every ELF platform it runs on shares.
+//! - `ELF_MACHINE` — the architecture's `e_machine`, which every ELF platform it runs on shares,
+//!   and `MACHO_CPU_TYPE`/`MACHO_CPU_SUBTYPE` — its Mach-O `cputype` and the subtype meaning all
+//!   of this CPU, which every Mach-O platform it runs on shares. Which format is worth writing is
+//!   the platform's answer; the identity a format stamps into the object is the CPU's.
 //! - `PINNED_REG` — the register Cranelift reserves when a module enables the pinned register,
 //!   which the trace domain does.
 //! - `asm_text` — the assembly vocabulary the materializer in `src/lower/` asks for: the
@@ -66,6 +69,10 @@ pub(crate) use aarch64::ELF_MACHINE;
 /// `arch::PINNED_REG`.
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::PINNED_REG;
+/// The architecture's Mach-O machine identity, named once for every caller:
+/// `arch::MACHO_CPU_TYPE` and `arch::MACHO_CPU_SUBTYPE`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) use aarch64::{MACHO_CPU_SUBTYPE, MACHO_CPU_TYPE};
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::{asm_text, asmstub};
 /// The architecture's ELF machine identity, named once for every caller: `arch::ELF_MACHINE`.
@@ -73,6 +80,10 @@ pub(crate) use aarch64::{asm_text, asmstub};
 pub(crate) use x86_64::ELF_MACHINE;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86_64::PINNED_REG;
+/// The architecture's Mach-O machine identity, named once for every caller:
+/// `arch::MACHO_CPU_TYPE` and `arch::MACHO_CPU_SUBTYPE`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) use x86_64::{MACHO_CPU_SUBTYPE, MACHO_CPU_TYPE};
 /// The architecture's assembly vocabulary and its machine-code emission, named once for every
 /// caller: `arch::asm_text::…` and `arch::asmstub::…`. The materializer in `src/lower/` asks for
 /// the syntax directive and the instruction forms through the first and supplies no
