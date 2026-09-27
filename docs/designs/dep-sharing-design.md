@@ -288,6 +288,13 @@ deleted and replaced, not phased out.
   (the fragments are shared either way). A base-owned home for them — the adaptive-base direction of
   open-issues D9 — would take them out of every unit manifest, and the same split machinery hosts
   either choice, so the decision is left to this ledger.
+- The unit store's first prototype (a stash, not landed) reached cross-program sharing with the
+  canonical tables: two programs whose closures overlap load each other's unit, and the fit is
+  verified. What it did not reach is a settled unit written by a session that had *loaded* a lower
+  unit: that manifest is refused on the next run, so the unit is lowered again and republished with a
+  new digest. The suspected remaining half is the one §3.3 still lists — cross-layer *addresses* in the
+  tables (a frozen relocation whose target lives below, a layer's own slot assumptions) — and it is to
+  be diagnosed before the store lands, not guessed at.
 - Binding-walk cost on the warm path is unmeasured; if it erodes the L2 gate, the counter-move is
   caching bound bodies in the L2 entry (space traded back for time, per program).
 - open-issues G5 asks whether cross-project sharing is needed at all and whether tainted images
