@@ -193,16 +193,19 @@ macro_rules! families {
 families! {
     // owners: image::base — the MIR-rich std base; keyed by build id + sysroot stamp, `build_id` first.
     Cache BASE            "base"            generation("img") flag(Base);
-    // owners: image::deps — the lowered registry dependency closure; keyed by base key + `--extern` stamps.
+    // owners: image::deps, image::collect — the lowered registry dependency closure; keyed by base key
+    // + `--extern` stamps.
     Cache DEPS            "deps"            generation("img") flag(Deps);
     // owners: image::program — one program's post-mono engine IR; keyed by rustc args + dep-info, `build_id` first.
     Cache IR              "ir"              generation("bin") flag(Ir);
-    // owners: store::frags — the shared canonical function bodies every manifest references by
-    // content address; a pack is reachable only through the manifests that name its fragments.
+    // owners: store::frags, image::collect — the shared canonical function bodies every manifest
+    // references by content address; a pack is reachable only through the manifests that name its
+    // fragments.
     Cache FRAGS           "frags"           pack flag(Frags);
-    // owners: image::units — one manifest per crate, content-named by unit key + manifest digest so a
-    // grown unit adds a manifest instead of overwriting the one a running program pinned. Generational
-    // like the closure manifest its format matches: a manifest another build wrote is prunable.
+    // owners: image::units, image::collect — one manifest per crate, content-named by unit key +
+    // manifest digest so a grown unit adds a manifest instead of overwriting the one a running program
+    // pinned. Generational like the closure manifest its format matches: a manifest another build
+    // wrote is prunable.
     Cache UNITS           "units"           generation(crate::image::units::EXT) flag(Units);
     // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;

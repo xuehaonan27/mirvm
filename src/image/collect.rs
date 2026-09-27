@@ -21,7 +21,11 @@ use super::manifest;
 pub(crate) fn live_fragments(root: &Path) -> HashSet<[u8; 32]> {
     let mut live = HashSet::new();
     mark(&crate::store::DEPS.dir_in(root), "img", &mut live);
-    mark(&crate::store::UNITS.dir_in(root), super::units::EXT, &mut live);
+    mark(
+        &crate::store::UNITS.dir_in(root),
+        super::units::EXT,
+        &mut live,
+    );
     live
 }
 
@@ -111,7 +115,9 @@ mod tests {
         // A unit manifest and a closure manifest of this build both mark, a file from another build
         // does not, and neither does a file whose name lies about its extension.
         std::fs::write(
-            crate::store::UNITS.dir_in(&root).join(format!("key-{:064x}.unit", 1)),
+            crate::store::UNITS
+                .dir_in(&root)
+                .join(format!("key-{:064x}.unit", 1)),
             manifest(current, &[id(1), id(2)]),
         )
         .unwrap();
@@ -121,7 +127,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            crate::store::UNITS.dir_in(&root).join(format!("key-{:064x}.unit", 4)),
+            crate::store::UNITS
+                .dir_in(&root)
+                .join(format!("key-{:064x}.unit", 4)),
             manifest("some-other-build", &[id(4)]),
         )
         .unwrap();

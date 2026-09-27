@@ -449,7 +449,7 @@ impl PurgeReport {
         {
             table.row(vec![
                 Cell::left(verb(true)),
-                Cell::left("cache/frags"),
+                Cell::left(store::FRAGS.path()),
                 Cell::left(format!(
                     "({}, no current-generation manifest names them: {} removed, {} compacted)",
                     human_bytes(swept.reclaimed),
@@ -458,7 +458,12 @@ impl PurgeReport {
                 )),
             ]);
         }
-        if self.actions.is_empty() && self.swept.as_ref().is_none_or(store::frags::Sweep::is_empty) {
+        if self.actions.is_empty()
+            && self
+                .swept
+                .as_ref()
+                .is_none_or(store::frags::Sweep::is_empty)
+        {
             table.row(vec![Cell::left("nothing to be cleared")]);
         }
         out.push_str(&table.render());

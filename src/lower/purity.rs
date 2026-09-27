@@ -205,6 +205,24 @@ pub(crate) fn home_of(
     tcx: TyCtxt<'_>,
     table: &crate::image::units::UnitTable,
 ) -> Option<crate::image::units::Home> {
+    let inputs = home_inputs(inst, tcx, table)?;
+    table.home_of(inputs.def, &inputs.mentioned)
+}
+
+/// The home rule's inputs for one instance: the unit its definition belongs to (`None` when its crate
+/// is not a unit) and the units its generic arguments mention. `None` is residue — the instance names
+/// the local crate, which is above every unit, so no unit can hold it without referencing a layer
+/// above itself.
+pub(crate) struct HomeInputs {
+    pub def: Option<u32>,
+    pub mentioned: std::collections::BTreeSet<u32>,
+}
+
+pub(crate) fn home_inputs(
+    inst: Instance<'_>,
+    tcx: TyCtxt<'_>,
+    table: &crate::image::units::UnitTable,
+) -> Option<HomeInputs> {
     use rustc_hir::def_id::LOCAL_CRATE;
     let mut local = false;
     let mut def = None;
@@ -244,7 +262,7 @@ pub(crate) fn home_of(
     if local {
         return None;
     }
-    table.home_of(def, &mentioned)
+    Some(HomeInputs { def, mentioned })
 }
 
 /// The unit a crate was compiled to, matched by the artifact path the session resolved it from. Two

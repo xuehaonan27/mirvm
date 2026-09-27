@@ -80,14 +80,15 @@ impl Unit {
         // `own` holds this unit's own ranges as recorded in its image; only the start moves, to the
         // end of the last layer below. With no layer below, the image's own start is already right
         // (the first home of a session).
-        let shift = |last: Option<&LayerRanges>, own: (u32, u32), pick: fn(&LayerRanges) -> (u32, u32)| {
-            let (start, len) = own;
-            let start = match last {
-                Some(range) => pick(range).0 + pick(range).1,
-                None => start,
+        let shift =
+            |last: Option<&LayerRanges>, own: (u32, u32), pick: fn(&LayerRanges) -> (u32, u32)| {
+                let (start, len) = own;
+                let start = match last {
+                    Some(range) => pick(range).0 + pick(range).1,
+                    None => start,
+                };
+                (start, len)
             };
-            (start, len)
-        };
         let (funcs, tls) = (
             shift(below.last(), self.funcs, |r| r.0),
             shift(below.last(), self.tls, |r| r.1),
@@ -102,16 +103,15 @@ impl Unit {
 
     /// Which layer owns `id` in `space`, and the ordinal inside it.
     fn owner(&self, space: Space, id: u32) -> Option<(usize, u32)> {
-        self.layers
-            .iter()
-            .enumerate()
-            .find_map(|(index, ranges)| {
-                let (start, len) = match space {
-                    Space::Func => ranges.0,
-                    Space::Tls => ranges.1,
-                };
-                id.checked_sub(start).filter(|at| at < &len).map(|at| (index, at))
-            })
+        self.layers.iter().enumerate().find_map(|(index, ranges)| {
+            let (start, len) = match space {
+                Space::Func => ranges.0,
+                Space::Tls => ranges.1,
+            };
+            id.checked_sub(start)
+                .filter(|at| at < &len)
+                .map(|at| (index, at))
+        })
     }
 }
 
