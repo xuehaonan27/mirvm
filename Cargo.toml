@@ -58,6 +58,10 @@ rustc_private = true
 # interpreter panic in release builds without full DWARF; the catch/panic cases in
 # tests/run.sh fast reproduce it reliably. Generating code with DWARF and stripping
 # it afterwards keeps the unwind control flow correct without growing the artifact.
+# The abort also follows codegen-unit packing (`open-issues.md` E35 records that it
+# disappears under 256 units and not under 1), so the partition is stated here
+# rather than left to whichever layout the current function set happens to produce.
 [profile.release]
 debug = 2
 strip = "debuginfo"
+codegen-units = 256

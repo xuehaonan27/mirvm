@@ -40,6 +40,27 @@ pub struct Canonical {
     pub targets: Vec<Target>,
 }
 
+/// What a walk over a body's reference sites does with each one: canonicalization replaces the value
+/// with its ordinal, binding replaces the ordinal with the value it names. Sharing one exhaustive
+/// walk is what keeps the two directions from drifting.
+pub(crate) trait SiteVisitor {
+    fn func(&mut self, id: &mut FuncId);
+    fn tls(&mut self, id: &mut TlsId);
+    fn asm(&mut self, id: &mut AsmStubId);
+    fn link(&mut self, addr: &mut LinkAddr);
+}
+
+/// Visit every reference site of a body in walk order: blocks in order, statements before the
+/// terminator, places and operands in the order the instruction reads them.
+pub(crate) fn visit_sites(body: &mut FuncBody, visitor: &mut impl SiteVisitor) {
+    for block in &mut body.blocks {
+        for stmt in &mut block.stmts {
+            visit_stmt(stmt, visitor);
+        }
+        visit_term(&mut block.term, visitor);
+    }
+}
+
 /// Canonicalize one body. The clone is what keeps the caller's body (still carrying the ids the
 /// runtime needs) untouched.
 pub fn canonical(body: &FuncBody) -> Canonical {
@@ -47,12 +68,7 @@ pub fn canonical(body: &FuncBody) -> Canonical {
     // The symbol name is the manifest's, not the fragment's: it is what names the fragment there.
     body.name = Box::default();
     let mut ordinals = Ordinals::default();
-    for block in &mut body.blocks {
-        for stmt in &mut block.stmts {
-            rewrite_stmt(stmt, &mut ordinals);
-        }
-        rewrite_term(&mut block.term, &mut ordinals);
-    }
+    visit_sites(&mut body, &mut ordinals);
     Canonical {
         body,
         targets: ordinals.targets,
@@ -62,10 +78,30 @@ pub fn canonical(body: &FuncBody) -> Canonical {
 /// The fragment's bytes: the encoding version, then the canonical body's postcard form. The
 /// version is hashed rather than assumed, so a form change cannot silently alias old fragments.
 pub fn encode(body: &FuncBody) -> Result<Vec<u8>, String> {
+    encode_canonical(&canonical(body).body)
+}
+
+/// [`encode`] for a body that is already canonical, so a caller that projected one does not
+/// canonicalize it twice.
+pub fn encode_canonical(body: &FuncBody) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     bytes.push(ENCODING_VERSION);
-    bytes.extend(postcard::to_stdvec(&canonical(body).body).map_err(|e| e.to_string())?);
+    bytes.extend(postcard::to_stdvec(body).map_err(|e| e.to_string())?);
     Ok(bytes)
+}
+
+/// The canonical body inside a fragment's bytes. The encoding version is checked here rather than
+/// assumed, so bytes another version wrote are refused instead of misread.
+pub fn decode(bytes: &[u8]) -> Result<FuncBody, String> {
+    match bytes.split_first() {
+        Some((&ENCODING_VERSION, body)) => {
+            postcard::from_bytes(body).map_err(|error| format!("fragment decode: {error}"))
+        }
+        Some((&version, _)) => Err(format!(
+            "fragment encoding version {version} is not {ENCODING_VERSION}"
+        )),
+        None => Err("empty fragment".into()),
+    }
 }
 
 /// The content address of already-encoded fragment bytes.
@@ -99,75 +135,85 @@ impl Ordinals {
             }
         }
     }
+}
 
-    /// Rewrite a link address in place to its ordinal.
+impl SiteVisitor for Ordinals {
+    fn func(&mut self, id: &mut FuncId) {
+        *id = self.of(Target::Func(*id));
+    }
+    fn tls(&mut self, id: &mut TlsId) {
+        *id = self.of(Target::Tls(*id));
+    }
+    fn asm(&mut self, id: &mut AsmStubId) {
+        *id = self.of(Target::Asm(*id));
+    }
     fn link(&mut self, addr: &mut LinkAddr) {
         *addr = LinkAddr(u64::from(self.of(Target::Link(*addr))));
     }
 }
 
-fn rewrite_operand(operand: &mut Operand, ord: &mut Ordinals) {
+fn visit_operand(operand: &mut Operand, visitor: &mut impl SiteVisitor) {
     match operand {
         Operand::Slot(_) | Operand::Imm { .. } => {}
-        Operand::Mem { expr, .. } | Operand::AddrOf(expr) => rewrite_place(expr, ord),
-        Operand::AddrImm(addr) => ord.link(addr),
-        Operand::SubImm { base, .. } => rewrite_operand(base, ord),
+        Operand::Mem { expr, .. } | Operand::AddrOf(expr) => visit_place(expr, visitor),
+        Operand::AddrImm(addr) => visitor.link(addr),
+        Operand::SubImm { base, .. } => visit_operand(base, visitor),
     }
 }
 
-fn rewrite_place(place: &mut PlaceExpr, ord: &mut Ordinals) {
+fn visit_place(place: &mut PlaceExpr, visitor: &mut impl SiteVisitor) {
     match &mut place.base {
         PlaceBase::Local(_) => {}
-        PlaceBase::Static(addr) => ord.link(addr),
+        PlaceBase::Static(addr) => visitor.link(addr),
     }
     // Only the vtable-align step reads a value; the other steps are pure address arithmetic.
     for step in place.steps.iter_mut() {
         if let PlaceStep::VTableAlignOffset { meta, .. } = step {
-            rewrite_operand(meta, ord);
+            visit_operand(meta, visitor);
         }
     }
 }
 
-fn rewrite_scalar_place(place: &mut ScalarPlace, ord: &mut Ordinals) {
+fn visit_scalar_place(place: &mut ScalarPlace, visitor: &mut impl SiteVisitor) {
     if let ScalarPlace::Mem { expr, .. } = place {
-        rewrite_place(expr, ord);
+        visit_place(expr, visitor);
     }
 }
 
-fn rewrite_ret_dest(ret: &mut RetDest, ord: &mut Ordinals) {
+fn visit_ret_dest(ret: &mut RetDest, visitor: &mut impl SiteVisitor) {
     match ret {
         RetDest::Ignore => {}
-        RetDest::Scalar(place) => rewrite_scalar_place(place, ord),
+        RetDest::Scalar(place) => visit_scalar_place(place, visitor),
         RetDest::Pair(a, b) => {
-            rewrite_scalar_place(a, ord);
-            rewrite_scalar_place(b, ord);
+            visit_scalar_place(a, visitor);
+            visit_scalar_place(b, visitor);
         }
-        RetDest::Indirect(place) => rewrite_place(place, ord),
+        RetDest::Indirect(place) => visit_place(place, visitor),
     }
 }
 
-fn rewrite_switch_discr(discr: &mut SwitchDiscr, ord: &mut Ordinals) {
+fn visit_switch_discr(discr: &mut SwitchDiscr, visitor: &mut impl SiteVisitor) {
     match discr {
-        SwitchDiscr::Scalar(operand) => rewrite_operand(operand, ord),
-        SwitchDiscr::Wide(place) => rewrite_place(place, ord),
+        SwitchDiscr::Scalar(operand) => visit_operand(operand, visitor),
+        SwitchDiscr::Wide(place) => visit_place(place, visitor),
     }
 }
 
-fn rewrite_bin128_rhs(rhs: &mut Bin128Rhs, ord: &mut Ordinals) {
+fn visit_bin128_rhs(rhs: &mut Bin128Rhs, visitor: &mut impl SiteVisitor) {
     match rhs {
-        Bin128Rhs::Wide(place) => rewrite_place(place, ord),
-        Bin128Rhs::Scalar(operand) => rewrite_operand(operand, ord),
+        Bin128Rhs::Wide(place) => visit_place(place, visitor),
+        Bin128Rhs::Scalar(operand) => visit_operand(operand, visitor),
     }
 }
 
-fn rewrite_f128_rhs(rhs: &mut F128Rhs, ord: &mut Ordinals) {
+fn visit_f128_rhs(rhs: &mut F128Rhs, visitor: &mut impl SiteVisitor) {
     match rhs {
-        F128Rhs::Wide(place) => rewrite_place(place, ord),
-        F128Rhs::Scalar(operand) => rewrite_operand(operand, ord),
+        F128Rhs::Wide(place) => visit_place(place, visitor),
+        F128Rhs::Scalar(operand) => visit_operand(operand, visitor),
     }
 }
 
-fn rewrite_rvalue(rvalue: &mut Rvalue, ord: &mut Ordinals) {
+fn visit_rvalue(rvalue: &mut Rvalue, visitor: &mut impl SiteVisitor) {
     match rvalue {
         Rvalue::Use(a)
         | Rvalue::NotBits(a)
@@ -180,8 +226,8 @@ fn rewrite_rvalue(rvalue: &mut Rvalue, ord: &mut Ordinals) {
         | Rvalue::FloatToInt { a, .. }
         | Rvalue::IntToFloat { a, .. }
         | Rvalue::BitUn { a, .. }
-        | Rvalue::AtomicLoad { addr: a, .. } => rewrite_operand(a, ord),
-        Rvalue::TlsRef(id) => *id = ord.of(Target::Tls(*id)),
+        | Rvalue::AtomicLoad { addr: a, .. } => visit_operand(a, visitor),
+        Rvalue::TlsRef(id) => visitor.tls(id),
         Rvalue::IntBin { a, b, .. }
         | Rvalue::IntCmp { a, b, .. }
         | Rvalue::PtrOffset {
@@ -194,31 +240,31 @@ fn rewrite_rvalue(rvalue: &mut Rvalue, ord: &mut Ordinals) {
         | Rvalue::FloatCmp { a, b, .. }
         | Rvalue::PtrDiff { a, b, .. }
         | Rvalue::IntSat { a, b, .. } => {
-            rewrite_operand(a, ord);
-            rewrite_operand(b, ord);
+            visit_operand(a, visitor);
+            visit_operand(b, visitor);
         }
-        Rvalue::NicheDiscr { tag, .. } => rewrite_operand(tag, ord),
+        Rvalue::NicheDiscr { tag, .. } => visit_operand(tag, visitor),
         Rvalue::MathFma { a, b, c, .. } | Rvalue::MemCmp { a, b, n: c } => {
-            rewrite_operand(a, ord);
-            rewrite_operand(b, ord);
-            rewrite_operand(c, ord);
+            visit_operand(a, visitor);
+            visit_operand(b, visitor);
+            visit_operand(c, visitor);
         }
-        Rvalue::Ref(place) => rewrite_place(place, ord),
+        Rvalue::Ref(place) => visit_place(place, visitor),
         Rvalue::F128Cmp { a, b, .. } | Rvalue::Cmp128 { a, b, .. } => {
-            rewrite_place(a, ord);
-            rewrite_place(b, ord);
+            visit_place(a, visitor);
+            visit_place(b, visitor);
         }
         Rvalue::SimdBitmask { a, .. }
         | Rvalue::SimdReduce { a, .. }
-        | Rvalue::SimdReduceArith { a, .. } => rewrite_place(a, ord),
+        | Rvalue::SimdReduceArith { a, .. } => visit_place(a, visitor),
     }
 }
 
-fn rewrite_stmt(stmt: &mut Stmt, ord: &mut Ordinals) {
+fn visit_stmt(stmt: &mut Stmt, visitor: &mut impl SiteVisitor) {
     match stmt {
         Stmt::Assign { dst, rv } => {
-            rewrite_scalar_place(dst, ord);
-            rewrite_rvalue(rv, ord);
+            visit_scalar_place(dst, visitor);
+            visit_rvalue(rv, visitor);
         }
         Stmt::AssignOverflow {
             a,
@@ -227,30 +273,30 @@ fn rewrite_stmt(stmt: &mut Stmt, ord: &mut Ordinals) {
             dst_flag,
             ..
         } => {
-            rewrite_operand(a, ord);
-            rewrite_operand(b, ord);
-            rewrite_scalar_place(dst_val, ord);
-            rewrite_scalar_place(dst_flag, ord);
+            visit_operand(a, visitor);
+            visit_operand(b, visitor);
+            visit_scalar_place(dst_val, visitor);
+            visit_scalar_place(dst_flag, visitor);
         }
         Stmt::Copy { dst, src, .. } => {
-            rewrite_place(dst, ord);
-            rewrite_place(src, ord);
+            visit_place(dst, visitor);
+            visit_place(src, visitor);
         }
         Stmt::RepeatScalar { dst, val, .. } => {
-            rewrite_place(dst, ord);
-            rewrite_operand(val, ord);
+            visit_place(dst, visitor);
+            visit_operand(val, visitor);
         }
         Stmt::AtomicStore { addr, val, .. } => {
-            rewrite_operand(addr, ord);
-            rewrite_operand(val, ord);
+            visit_operand(addr, visitor);
+            visit_operand(val, visitor);
         }
         Stmt::VolatileLoad { addr, dst, .. } => {
-            rewrite_operand(addr, ord);
-            rewrite_place(dst, ord);
+            visit_operand(addr, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::VolatileStore { addr, src, .. } => {
-            rewrite_operand(addr, ord);
-            rewrite_place(src, ord);
+            visit_operand(addr, visitor);
+            visit_place(src, visitor);
         }
         Stmt::AtomicCxchg {
             addr,
@@ -260,39 +306,39 @@ fn rewrite_stmt(stmt: &mut Stmt, ord: &mut Ordinals) {
             dst_ok,
             ..
         } => {
-            rewrite_operand(addr, ord);
-            rewrite_operand(expected, ord);
-            rewrite_operand(new, ord);
-            rewrite_scalar_place(dst_val, ord);
-            rewrite_scalar_place(dst_ok, ord);
+            visit_operand(addr, visitor);
+            visit_operand(expected, visitor);
+            visit_operand(new, visitor);
+            visit_scalar_place(dst_val, visitor);
+            visit_scalar_place(dst_ok, visitor);
         }
         Stmt::AtomicRmw { addr, val, dst, .. } => {
-            rewrite_operand(addr, ord);
-            rewrite_operand(val, ord);
-            rewrite_scalar_place(dst, ord);
+            visit_operand(addr, visitor);
+            visit_operand(val, visitor);
+            visit_scalar_place(dst, visitor);
         }
         Stmt::MemCopy {
             dst, src, count, ..
         } => {
-            rewrite_operand(dst, ord);
-            rewrite_operand(src, ord);
-            rewrite_operand(count, ord);
+            visit_operand(dst, visitor);
+            visit_operand(src, visitor);
+            visit_operand(count, visitor);
         }
         Stmt::MemSet {
             dst, val, count, ..
         } => {
-            rewrite_operand(dst, ord);
-            rewrite_operand(val, ord);
-            rewrite_operand(count, ord);
+            visit_operand(dst, visitor);
+            visit_operand(val, visitor);
+            visit_operand(count, visitor);
         }
         Stmt::SimdBin { dst, a, b, .. } => {
-            rewrite_place(dst, ord);
-            rewrite_place(a, ord);
-            rewrite_place(b, ord);
+            visit_place(dst, visitor);
+            visit_place(a, visitor);
+            visit_place(b, visitor);
         }
         Stmt::SimdUn { dst, a, .. } => {
-            rewrite_place(dst, ord);
-            rewrite_place(a, ord);
+            visit_place(dst, visitor);
+            visit_place(a, visitor);
         }
         Stmt::SimdFma { dst, a, b, c, .. }
         | Stmt::SimdFunnel {
@@ -302,30 +348,30 @@ fn rewrite_stmt(stmt: &mut Stmt, ord: &mut Ordinals) {
             shift: c,
             ..
         } => {
-            rewrite_place(dst, ord);
-            rewrite_place(a, ord);
-            rewrite_place(b, ord);
-            rewrite_place(c, ord);
+            visit_place(dst, visitor);
+            visit_place(a, visitor);
+            visit_place(b, visitor);
+            visit_place(c, visitor);
         }
         Stmt::SimdCast { dst, src, .. } => {
-            rewrite_place(dst, ord);
-            rewrite_place(src, ord);
+            visit_place(dst, visitor);
+            visit_place(src, visitor);
         }
         Stmt::SimdSelect {
             mask, a, b, dst, ..
         } => {
-            rewrite_place(mask, ord);
-            rewrite_place(a, ord);
-            rewrite_place(b, ord);
-            rewrite_place(dst, ord);
+            visit_place(mask, visitor);
+            visit_place(a, visitor);
+            visit_place(b, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::SimdSelectBitmask {
             mask, a, b, dst, ..
         } => {
-            rewrite_operand(mask, ord);
-            rewrite_place(a, ord);
-            rewrite_place(b, ord);
-            rewrite_place(dst, ord);
+            visit_operand(mask, visitor);
+            visit_place(a, visitor);
+            visit_place(b, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::SimdGather {
             passthru,
@@ -334,17 +380,17 @@ fn rewrite_stmt(stmt: &mut Stmt, ord: &mut Ordinals) {
             dst,
             ..
         } => {
-            rewrite_place(passthru, ord);
-            rewrite_place(ptrs, ord);
-            rewrite_place(mask, ord);
-            rewrite_place(dst, ord);
+            visit_place(passthru, visitor);
+            visit_place(ptrs, visitor);
+            visit_place(mask, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::SimdScatter {
             values, ptrs, mask, ..
         } => {
-            rewrite_place(values, ord);
-            rewrite_place(ptrs, ord);
-            rewrite_place(mask, ord);
+            visit_place(values, visitor);
+            visit_place(ptrs, visitor);
+            visit_place(mask, visitor);
         }
         Stmt::SimdMaskedLoad {
             mask,
@@ -353,137 +399,137 @@ fn rewrite_stmt(stmt: &mut Stmt, ord: &mut Ordinals) {
             dst,
             ..
         } => {
-            rewrite_operand(base, ord);
-            rewrite_place(mask, ord);
-            rewrite_place(passthru, ord);
-            rewrite_place(dst, ord);
+            visit_operand(base, visitor);
+            visit_place(mask, visitor);
+            visit_place(passthru, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::SimdMaskedStore {
             mask, base, values, ..
         } => {
-            rewrite_operand(base, ord);
-            rewrite_place(mask, ord);
-            rewrite_place(values, ord);
+            visit_operand(base, visitor);
+            visit_place(mask, visitor);
+            visit_place(values, visitor);
         }
         Stmt::SimdExtractDyn { src, idx, dst, .. } => {
-            rewrite_place(src, ord);
-            rewrite_operand(idx, ord);
-            rewrite_scalar_place(dst, ord);
+            visit_place(src, visitor);
+            visit_operand(idx, visitor);
+            visit_scalar_place(dst, visitor);
         }
         Stmt::SimdInsertDyn {
             src, idx, val, dst, ..
         } => {
-            rewrite_place(src, ord);
-            rewrite_place(dst, ord);
-            rewrite_operand(idx, ord);
-            rewrite_operand(val, ord);
+            visit_place(src, visitor);
+            visit_place(dst, visitor);
+            visit_operand(idx, visitor);
+            visit_operand(val, visitor);
         }
         Stmt::SimdArithOffset {
             ptrs, offsets, dst, ..
         } => {
-            rewrite_place(ptrs, ord);
-            rewrite_place(offsets, ord);
-            rewrite_place(dst, ord);
+            visit_place(ptrs, visitor);
+            visit_place(offsets, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::SimdSplat { dst, val, .. } => {
-            rewrite_place(dst, ord);
-            rewrite_operand(val, ord);
+            visit_place(dst, visitor);
+            visit_operand(val, visitor);
         }
         Stmt::Bin128 { a, b, dst, .. } => {
-            rewrite_place(a, ord);
-            rewrite_bin128_rhs(b, ord);
-            rewrite_place(dst, ord);
+            visit_place(a, visitor);
+            visit_bin128_rhs(b, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::Sat128 { a, b, dst, .. } | Stmt::F128Bin { a, b, dst, .. } => {
-            rewrite_place(a, ord);
-            rewrite_place(b, ord);
-            rewrite_place(dst, ord);
+            visit_place(a, visitor);
+            visit_place(b, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::F128MathBin { a, b, dst, .. } => {
-            rewrite_place(a, ord);
-            rewrite_f128_rhs(b, ord);
-            rewrite_place(dst, ord);
+            visit_place(a, visitor);
+            visit_f128_rhs(b, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::Wide128ToFloat { src, dst, .. }
         | Stmt::Bit128Count { src, dst, .. }
         | Stmt::F128ToScalar { src, dst, .. } => {
-            rewrite_place(src, ord);
-            rewrite_scalar_place(dst, ord);
+            visit_place(src, visitor);
+            visit_scalar_place(dst, visitor);
         }
         Stmt::FloatToWide128 { src, dst, .. } | Stmt::F128FromScalar { src, dst, .. } => {
-            rewrite_operand(src, ord);
-            rewrite_place(dst, ord);
+            visit_operand(src, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::Bit128 { src, dst, .. }
         | Stmt::F128Un { a: src, dst, .. }
         | Stmt::F128FromWideInt { src, dst, .. }
         | Stmt::F128ToWideInt { src, dst, .. } => {
-            rewrite_place(src, ord);
-            rewrite_place(dst, ord);
+            visit_place(src, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::F128Fma { a, b, c, dst } => {
-            rewrite_place(a, ord);
-            rewrite_place(b, ord);
-            rewrite_place(c, ord);
-            rewrite_place(dst, ord);
+            visit_place(a, visitor);
+            visit_place(b, visitor);
+            visit_place(c, visitor);
+            visit_place(dst, visitor);
         }
         Stmt::NicheDiscr128 { tag, dst, .. } => {
-            rewrite_place(tag, ord);
-            rewrite_scalar_place(dst, ord);
+            visit_place(tag, visitor);
+            visit_scalar_place(dst, visitor);
         }
-        Stmt::RepeatBytes { first, .. } => rewrite_place(first, ord),
+        Stmt::RepeatBytes { first, .. } => visit_place(first, visitor),
         Stmt::Trap(_) | Stmt::Nop | Stmt::Fence { .. } => {}
     }
 }
 
-fn rewrite_term(term: &mut Terminator, ord: &mut Ordinals) {
+fn visit_term(term: &mut Terminator, visitor: &mut impl SiteVisitor) {
     match term {
         Terminator::Goto(_) => {}
-        Terminator::SwitchInt { discr, .. } => rewrite_switch_discr(discr, ord),
+        Terminator::SwitchInt { discr, .. } => visit_switch_discr(discr, visitor),
         Terminator::Call {
             callee, args, ret, ..
         } => {
-            *callee = ord.of(Target::Func(*callee));
+            visitor.func(callee);
             for arg in args {
-                rewrite_operand(arg, ord);
+                visit_operand(arg, visitor);
             }
-            rewrite_ret_dest(ret, ord);
+            visit_ret_dest(ret, visitor);
         }
         Terminator::CallBuiltin { args, ret, .. } => {
             for arg in args {
-                rewrite_operand(arg, ord);
+                visit_operand(arg, visitor);
             }
-            rewrite_ret_dest(ret, ord);
+            visit_ret_dest(ret, visitor);
         }
         Terminator::CallForeign { args, ret, .. } => {
             for arg in args {
-                rewrite_operand(arg, ord);
+                visit_operand(arg, visitor);
             }
-            rewrite_ret_dest(ret, ord);
+            visit_ret_dest(ret, visitor);
         }
         Terminator::CallIndirect {
             callee, args, ret, ..
         } => {
-            rewrite_operand(callee, ord);
+            visit_operand(callee, visitor);
             for arg in args {
-                rewrite_operand(arg, ord);
+                visit_operand(arg, visitor);
             }
-            rewrite_ret_dest(ret, ord);
+            visit_ret_dest(ret, visitor);
         }
         Terminator::InlineAsm {
             stub, ins, outs, ..
         } => {
-            *stub = ord.of(Target::Asm(*stub));
+            visitor.asm(stub);
             for (_, value) in ins {
                 match value {
-                    AsmIoVal::Scalar(operand) => rewrite_operand(operand, ord),
-                    AsmIoVal::VecBytes(place, _) => rewrite_place(place, ord),
+                    AsmIoVal::Scalar(operand) => visit_operand(operand, visitor),
+                    AsmIoVal::VecBytes(place, _) => visit_place(place, visitor),
                 }
             }
             for (_, dst) in outs {
                 match dst {
-                    AsmIoDst::Scalar(place) => rewrite_scalar_place(place, ord),
-                    AsmIoDst::VecBytes(place, _) => rewrite_place(place, ord),
+                    AsmIoDst::Scalar(place) => visit_scalar_place(place, visitor),
+                    AsmIoDst::VecBytes(place, _) => visit_place(place, visitor),
                 }
             }
         }

@@ -35,8 +35,11 @@ contracts are its siblings in `docs/designs/`.
   continuously; on that track `prepare` is `cargo build`, since Cargo's own cache is what a following
   run would reuse. `mirvm test` covers lib/bin/test/bench/example with libtest or a custom harness, and a
   rustdoc front end adds doctests without pretending they are ordinary tests.
-- **Images and caches** — a byte-deterministic std base image plus a deps image make warm runs load
-  instead of re-lower. An image stack of `[std base, deps…]` carries multi-source lookup, cumulative
+- **Images and caches** — a byte-deterministic std base image plus a deps manifest make warm runs load
+  instead of re-lower. The manifest stores each dependency function as a fragment in the shared
+  content-addressed `cache/frags` store plus the binding table that gives that fragment's ordinals
+  meaning, so identical bodies are stored once machine-wide. An image stack of `[std base, deps…]`
+  carries multi-source lookup, cumulative
   offsets and a key chain, and an L2 post-mono engine-IR cache serializes a whole frozen region at
   fixed logical addresses. `MIRVM_TIMING` prints a phase ledger.
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the

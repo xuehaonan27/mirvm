@@ -368,7 +368,7 @@ impl Callbacks for MirvmCallbacks {
                     &self.rustc_args,
                     &base_key,
                     fp,
-                    self.stack.below(),
+                    &self.stack,
                     img,
                 );
                 self.stack.push(bi);

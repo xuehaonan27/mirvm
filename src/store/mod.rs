@@ -28,6 +28,7 @@
 //! `mirvm cache purge`.
 
 pub(crate) mod entry;
+pub(crate) mod frags;
 pub(crate) mod report;
 
 use std::path::{Path, PathBuf};
@@ -83,6 +84,10 @@ pub(crate) enum Shape {
     /// One file per key, with the `build_id` that wrote it as the entry's first serialized field:
     /// a stale generation is individually recognisable and removable.
     Generation { ext: &'static str },
+    /// Append-only packs, each holding many content-addressed entries with a trailing index. No
+    /// entry can go stale on its own, so the family is the unit of removal; what is live inside a
+    /// pack is decided by the manifests that reference it, not by the pack.
+    Pack,
 }
 
 /// The family flag of `mirvm cache purge` that takes a whole family, as declared in the register.
@@ -91,6 +96,7 @@ pub(crate) enum FamilyFlag {
     Base,
     Deps,
     Ir,
+    Frags,
     Scripts,
     Target,
 }
@@ -137,6 +143,9 @@ macro_rules! shape_of {
     };
     (keyed) => {
         Shape::Keyed
+    };
+    (pack) => {
+        Shape::Pack
     };
     (generation($ext:literal)) => {
         Shape::Generation { ext: $ext }
@@ -187,6 +196,9 @@ families! {
     Cache DEPS            "deps"            generation("img") flag(Deps);
     // owners: image::program — one program's post-mono engine IR; keyed by rustc args + dep-info, `build_id` first.
     Cache IR              "ir"              generation("bin") flag(Ir);
+    // owners: store::frags — the shared canonical function bodies every manifest references by
+    // content address; a pack is reachable only through the manifests that name its fragments.
+    Cache FRAGS           "frags"           pack flag(Frags);
     // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // owners: lower::global_asm, pack — materialized `global_asm!`/naked-fn objects; keyed by the
