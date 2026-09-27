@@ -61,18 +61,6 @@ impl Error {
     }
 }
 
-fn toolchain_rustc() -> PathBuf {
-    PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustc")
-}
-
-fn toolchain_cargo() -> PathBuf {
-    PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/cargo")
-}
-
-fn toolchain_rustdoc() -> PathBuf {
-    PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustdoc")
-}
-
 pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), Error> {
     if let (Ok(actual), Ok(expected)) =
         (std::fs::canonicalize(path), std::fs::canonicalize(self_exe))
@@ -192,7 +180,7 @@ fn cargo_project_command(
     locked: bool,
 ) -> Command {
     let self_str = self_exe.to_str().expect("mirvm path is not UTF-8");
-    let mut cmd = Command::new(toolchain_cargo());
+    let mut cmd = Command::new(crate::sysroot::toolchain::cargo());
     cmd.current_dir(project_dir);
     cmd.arg(action.subcommand());
     if locked {
@@ -480,7 +468,7 @@ pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
             .expect("Cargo rustdoc phase is missing the doctest builder option");
         args = cargo_doctest_rustdoc_args(args, sysroot, builder);
     }
-    let mut command = Command::new(toolchain_rustdoc());
+    let mut command = Command::new(crate::sysroot::toolchain::rustdoc());
     command.args(args);
     exec(command)
 }
@@ -489,7 +477,9 @@ pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
 /// prepend the pinned toolchain's rustc and continue on the same path as the traditional
 /// wrapper.
 pub fn phase_compiler(argv: impl Iterator<Item = String>) -> ! {
-    phase_wrapper(std::iter::once(toolchain_rustc().display().to_string()).chain(argv))
+    phase_wrapper(
+        std::iter::once(crate::sysroot::toolchain::rustc().display().to_string()).chain(argv),
+    )
 }
 
 /// Phase 2: compile capture. argv = [<rustc name>, <rustc args...>].
@@ -499,7 +489,7 @@ pub fn phase_compiler(argv: impl Iterator<Item = String>) -> ! {
 /// version exactly.
 pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     let _rustc_name = argv.next();
-    let rustc = toolchain_rustc();
+    let rustc = crate::sysroot::toolchain::rustc();
     let mut args: Vec<String> = argv.collect();
     append_encoded_rustflags(
         &mut args,

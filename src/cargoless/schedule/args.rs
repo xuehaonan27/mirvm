@@ -1,6 +1,6 @@
 //! Per-crate rustc argument tables: dependency, root, host and build-script compile recipes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::cargoless::buildrs::BuildOutput;
 use crate::cargoless::manifest::{DepKind, PackageManifest, ProfileFlags, Target};
@@ -22,22 +22,14 @@ fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags) {
     }
 }
 
-/// Absolute path of the real rustc, taken from the default sysroot baked in at compile time
-/// (same approach as manifest.rs host_cfg_atoms). Host-side compilation trusts only this: a
-/// rustc on PATH may belong to another toolchain, and the proc-macro dylib's compiler version
-/// must match the interpreter session's exactly (same discipline as cargo_shim's wrapper).
+/// The pinned toolchain's `rustc` as an argv0, which is all this file needs of it.
 fn real_rustc() -> String {
-    PathBuf::from(crate::options::build::DEFAULT_SYSROOT)
-        .join("bin/rustc")
-        .display()
-        .to_string()
+    crate::sysroot::toolchain::rustc().display().to_string()
 }
 
+/// The pinned toolchain's `rustdoc` as an argv0.
 fn real_rustdoc() -> String {
-    PathBuf::from(crate::options::build::DEFAULT_SYSROOT)
-        .join("bin/rustdoc")
-        .display()
-        .to_string()
+    crate::sysroot::toolchain::rustdoc().display().to_string()
 }
 
 /// Dispatch of one dep edge's --extern target path: a proc-macro dep points at the host-deps

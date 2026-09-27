@@ -52,17 +52,18 @@ fn disabled() -> bool {
     crate::options::get().no_base_image
 }
 
-fn base_dir() -> PathBuf {
-    crate::store::BASE.dir()
-}
-
 /// (base image path, sysroot stamp). `None` when the stamp is unavailable (sysroot not
 /// built yet, etc.), i.e. no base image.
 fn locate() -> Option<(PathBuf, String)> {
     let stamp = crate::sysroot::current_stamp_value()?;
     let mut key = entry::Key::new();
     key.part(&stamp);
-    Some((base_dir().join(format!("{}.img", key.digest())), stamp))
+    Some((
+        crate::store::BASE
+            .dir()
+            .join(format!("{}.img", key.digest())),
+        stamp,
+    ))
 }
 
 fn load(path: &Path, want_stamp: &str) -> Option<crate::image::BaseImage> {
@@ -118,8 +119,8 @@ fn ensure_base() -> Option<crate::image::BaseImage> {
     // the global counters) forbids a second compiler. The exec itself costs ~13ms and
     // happens once.
     let self_exe = std::env::current_exe().ok()?;
-    let _ = std::fs::create_dir_all(base_dir());
-    let log = std::fs::File::create(base_dir().join("build.log")).ok()?;
+    let _ = std::fs::create_dir_all(crate::store::BASE.dir());
+    let log = std::fs::File::create(crate::store::BASE.dir().join("build.log")).ok()?;
     let status = std::process::Command::new(self_exe)
         .arg("__build-base-image")
         .arg(&path)

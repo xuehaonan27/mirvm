@@ -144,7 +144,7 @@ fn remove_output_arg(args: &[String]) -> Vec<String> {
 pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = argv.collect();
     let crate_type = doctest_crate_type(&args).unwrap_or_default();
-    let rustc = PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustc");
+    let rustc = crate::sysroot::toolchain::rustc();
     if crate_type == "lib" {
         let status = std::process::Command::new(&rustc)
             .args(&args)

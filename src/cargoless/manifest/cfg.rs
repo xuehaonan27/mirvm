@@ -83,8 +83,7 @@ static HOST_CFG_ATOMS: std::sync::OnceLock<std::collections::BTreeSet<String>> =
 /// The CARGO_CFG_* mapping exposed to buildrs.rs.
 pub(crate) fn host_cfg_atoms() -> &'static std::collections::BTreeSet<String> {
     HOST_CFG_ATOMS.get_or_init(|| {
-        let rustc =
-            std::path::PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustc");
+        let rustc = crate::sysroot::toolchain::rustc();
         let out = std::process::Command::new(rustc)
             .args(["--print", "cfg", "--target", crate::options::build::HOST])
             .output()

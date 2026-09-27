@@ -66,10 +66,6 @@ pub fn bypassed() -> bool {
     crate::options::get().no_deps_image
 }
 
-fn deps_dir() -> PathBuf {
-    crate::store::DEPS.dir()
-}
-
 /// Pre-key material: the paths in `--extern name=path` (two-arg form) and `--extern=name=path` (single-arg
 /// form), deduped and sorted. A bare-name `--extern` without a path returns `None`, so v1 neither produces
 /// nor uses an image and full lowering self-heals instead of risking silently wrong values.
@@ -130,7 +126,7 @@ pub(crate) fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, 
 }
 
 fn file_path(key: &str) -> PathBuf {
-    deps_dir().join(format!("{key}.img"))
+    crate::store::DEPS.dir().join(format!("{key}.img"))
 }
 
 /// Load the deps-image; called before the compiler session. `base` is the already-present base, whose key
