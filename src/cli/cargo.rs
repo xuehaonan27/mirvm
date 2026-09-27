@@ -82,9 +82,9 @@ impl GuestProcessState {
         let caller_sysroot = crate::options::caller_sysroot();
         let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
         for key in [
-            crate::options::protocol::CARGO_SESSION,
-            crate::options::protocol::GUEST_CWD,
-            crate::options::protocol::CALLER_SYSROOT,
+            crate::options::CARGO_SESSION,
+            crate::options::GUEST_CWD,
+            crate::options::CALLER_SYSROOT,
             "RUSTC_WRAPPER",
         ] {
             env.remove(std::ffi::OsStr::new(key));
