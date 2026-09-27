@@ -153,12 +153,24 @@ pub fn try_load(
     if !entry::frozen_at(&f.module, Some(crate::os_arch::addrspace::image_addr(0))) {
         return None;
     }
-    let prefix = crate::vm::verify::Prefix {
-        funcs: base.module.funcs.len(),
-        tls: base.module.tls.len(),
-        asm: base.module.asm_sites.len(),
+    // The image is verified against the stack it is about to join: its frozen bytes may reference an
+    // entry the base owns (`fn_entry_addr` reuses a base entry so one function keeps one address
+    // identity), which is legitimate exactly because the base is below it.
+    let base_links = base.entry_links().collect::<Vec<_>>();
+    let below = crate::vm::verify::Below {
+        prefix: crate::vm::verify::Prefix {
+            funcs: base.module.funcs.len(),
+            tls: base.module.tls.len(),
+            asm: base.module.asm_sites.len(),
+        },
+        entries: &base_links,
     };
-    let instance = entry::revive(&mut f.module, prefix)?;
+    let Some(instance) = entry::revive(&mut f.module, below) else {
+        if crate::options::a2_debug() {
+            eprintln!("[a2-debug] deps image {key} rejected: verification failed against the base");
+        }
+        return None;
+    };
     // A removed required .so is a miss that falls back to the cold-path self-heal (same contract as
     // the L2 cache)
     if !entry::native_libs_present(&f.module) {
@@ -178,13 +190,15 @@ pub fn try_load(
 }
 
 /// Persist the split product and return the `BaseImage` to push. If it is cacheable the file is written
-/// atomically. A write failure, a non-cacheable product or an unavailable pre-key simply leaves no file for
-/// this run, so later runs do full lowering and self-heal; the returned stack-layer key degrades to a
-/// process-unique placeholder, which makes the L2 key chain invalid across runs rather than a false hit.
+/// atomically. A write failure, a non-cacheable product, a product the loader would refuse or an
+/// unavailable pre-key simply leaves no file for this run, so later runs do full lowering and self-heal;
+/// the returned stack-layer key degrades to a process-unique placeholder, which makes the L2 key chain
+/// invalid across runs rather than a false hit.
 pub fn store_and_wrap(
     rustc_args: &[String],
     base_key: &str,
     fp: (bool, bool, bool),
+    below: crate::vm::verify::Below<'_>,
     image: crate::lower::SplitImage,
 ) -> crate::image::BaseImage {
     let mut bi = image.into_base_image(fp);
@@ -192,11 +206,26 @@ pub fn store_and_wrap(
     // a prerequisite for the snapshot's embedded absolute addresses to stay stable across processes.
     // Foreign symbols go through GOT slots: the image-side GOT table travels with the file and is
     // refilled with this process's real values at startup, so it does not block writing the file.
-    let cacheable = entry::snapshot_is_publishable(
+    let publishable = entry::snapshot_is_publishable(
         &bi.module,
         &bi.instance,
         Some(crate::os_arch::addrspace::image_addr(0)),
     );
+    // The writer applies the loader's predicate against the same stack: publishing a file the loader
+    // will refuse is worse than publishing none — the image is rebuilt and re-keyed every run while
+    // its key chain is already written into the L2 entries above it.
+    let cacheable =
+        publishable && crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
+    if !cacheable && crate::options::a2_debug() {
+        eprintln!(
+            "[a2-debug] split image not published: {}",
+            if publishable {
+                "verification against the stack below failed"
+            } else {
+                "snapshot is not fixed-domain publishable"
+            }
+        );
+    }
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
         let mut fn_entry_syms = bi

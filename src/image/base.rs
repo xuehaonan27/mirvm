@@ -91,7 +91,7 @@ fn load(path: &Path, want_stamp: &str) -> Option<crate::image::BaseImage> {
     let mut module = f.module;
     module.exports = f.export_syms.iter().cloned().collect();
     module.fn_entry_links = f.fn_entry_links;
-    let instance = entry::revive(&mut module, crate::vm::verify::Prefix::default())?;
+    let instance = entry::revive(&mut module, crate::vm::verify::Below::default())?;
     Some(crate::image::BaseImage {
         fn_by_sym: f.export_syms.into_iter().collect(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),

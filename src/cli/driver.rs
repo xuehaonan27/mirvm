@@ -362,7 +362,15 @@ impl Callbacks for MirvmCallbacks {
                     .key()
                     .expect("split implies a base image is present")
                     .to_string();
-                let bi = crate::image::deps::store_and_wrap(&self.rustc_args, &base_key, fp, img);
+                // The image is published only if it verifies against the stack below it, which is
+                // the same predicate the loader applies.
+                let bi = crate::image::deps::store_and_wrap(
+                    &self.rustc_args,
+                    &base_key,
+                    fp,
+                    self.stack.below(),
+                    img,
+                );
                 self.stack.push(bi);
             }
             // L2 entry: the clean snapshot before the guest runs (argv is not finalized yet). Any
@@ -378,11 +386,7 @@ impl Callbacks for MirvmCallbacks {
                     self.module.as_ref().expect("just set"),
                     self.instance.as_ref().expect("just set"),
                     self.stack.key(),
-                    crate::vm::verify::Prefix {
-                        funcs: self.stack.total_fns(),
-                        tls: self.stack.total_tls(),
-                        asm: self.stack.total_asm(),
-                    },
+                    self.stack.below(),
                 )
             {
                 self.timing.cache_store = Some(t_store.elapsed());
@@ -695,15 +699,8 @@ pub(crate) fn run_driver(
     // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
     // against the key chain.
     if !dump_mir
-        && let Some((mut module, mut instance)) = crate::image::program::lookup(
-            &rustc_args,
-            base_key.as_deref(),
-            crate::vm::verify::Prefix {
-                funcs: stack.total_fns(),
-                tls: stack.total_tls(),
-                asm: stack.total_asm(),
-            },
-        )
+        && let Some((mut module, mut instance)) =
+            crate::image::program::lookup(&rustc_args, base_key.as_deref(), stack.below())
     {
         // A cache hit has no compiler session; seal that empty phase before
         // MIRVM control and guest execution begin.
