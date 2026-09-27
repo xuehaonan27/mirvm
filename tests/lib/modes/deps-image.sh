@@ -18,7 +18,9 @@ export MIRVM_DEPS=cargo
 cp -r ${FIXTURES[0]} "$TMP/a2_ws"
 WS="$TMP/a2_ws"
 HOST=$(rustc_host)
-DEPS=${MIRVM_HOME:-$HOME/.mirvm}/cache/deps
+HOME_DIR=${MIRVM_HOME:-$HOME/.mirvm}
+DEPS=$HOME_DIR/cache/deps
+FRAGS=$HOME_DIR/cache/frags
 SYSROOT=${MIRVM_HOME:-$HOME/.mirvm}/data/sysroot-$HOST
 # Unified dependency storage: mirvm run (steps 1-5) goes through cargo_project_command into shared
 # target dir; bin2 manually driven by this script must use same location, otherwise extern stamps differ and image is not shared
@@ -100,5 +102,20 @@ ms=$(lower_ms "$TMP/s3c.timing")
 le300 "$ms" || abort_test "second-bin lower ${ms}ms > 300ms"
 [ "$(ls "$DEPS" | wc -l)" -eq "$imgs_before_s3c" ] || abort_test "second bin rebuilt the image (not shared)"
 
-ok "cold write, warm read, edit, bypass and cross-bin sharing"
+# 7) the fragment store is shared across programs, not copied per program: dropping this closure's
+#    manifest and lowering it again must store no fragment the store already holds, and
+#    `cache status` must report what the family holds.
+packs_before=$(ls "$FRAGS" 2>/dev/null | wc -l)
+rm -f "$DEPS"/*.img
+MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/restore.out" 2>"$TMP/restore.timing" \
+    || abort_test "re-lowering run exited non-zero"
+grep -q 'a2_one: found QUICK at 9' "$TMP/restore.out" || abort_test "re-lowering output wrong"
+[ "$(ls "$FRAGS" 2>/dev/null | wc -l)" -eq "$packs_before" ] \
+    || abort_test "re-lowering stored fragments the store already had"
+frags=$(MIRVM_HOME="$HOME_DIR" "$MIRVM" cache status 2>/dev/null \
+    | sed -n 's/.*cache\/frags.*(\([0-9]*\) packs, \([0-9]*\) fragments.*/\2/p')
+[ -n "$frags" ] && [ "$frags" -gt 0 ] \
+    || abort_test "cache status does not report the stored fragments: $(MIRVM_HOME="$HOME_DIR" "$MIRVM" cache status 2>/dev/null | grep frags)"
+
+ok "cold write, warm read, edit, bypass, cross-bin sharing and one stored copy of each fragment"
 }

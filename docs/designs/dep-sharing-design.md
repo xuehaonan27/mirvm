@@ -159,15 +159,17 @@ Two new `Class::Cache` families in the register:
 - `cache/units/` — `<unit_key>-<manifest_digest>.unit`, generational shape. A new session prefers
   the newest current-generation manifest per `unit_key`; an L2 entry's key chain pins exact digests,
   so machine-wide unit growth caused by *other* projects misses that L2 entry (correct: absolute
-  offsets shifted) without stealing the manifest it would need to rebuild cheaply. The Cargo track
-  writes the same manifest format with its closure-level key material, so one format serves both
-  tracks and only the keying discipline differs.
-- `cache/frags/` — append-only pack files, each an atomic publish of one session's new fragments
-  with a trailing index; a store-level index memo is a rebuildable convenience. Readers mmap packs
-  and decode lazily — `FuncTable::from_bytes` (per-function blob bounds + expected hash + heat-order
-  prefetch) is the existing mechanism, extended to multiple maps and to running the binding walk
-  after postcard decode. Writers dedupe against the index before appending; a lost race stores a
-  duplicate that the next repack folds.
+  offsets shifted) without stealing the manifest it would need to rebuild cheaply. The closure track
+  writes the same manifest format with its closure-level key material (it does so already, in
+  `cache/deps/`), so one format serves both tracks and only the keying discipline differs.
+- `cache/frags/` — append-only pack files, each an atomic publish of one session's new fragments with
+  a trailing index (`id`, record offset, fragment length, sorted by id), named by the BLAKE3 of the
+  pack's own bytes so republishing one fragment set is idempotent. A fragment averages ~131 bytes
+  (measured by the probe below), which is why a pack and not one file per fragment: a filesystem
+  block each would spend roughly thirty times the data. Readers read a pack's trailing index and then
+  only the fragments they ask for, re-hashing each body against its id before the binding walk and
+  postcard decode; writers dedupe against every pack's index before appending, so a re-lowered
+  closure stores no fragment twice and a lost race stores a duplicate that the next repack folds.
 
 Fragments carry no generation: they are reached only through manifests, manifests are generational,
 and collection is **mark-sweep from current-generation manifests** — refcounts are rejected as
@@ -232,9 +234,11 @@ parent document are the regression fence.
   manifest digest and one fragment set — the base-image byte-determinism gate, generalized.
 - **Equivalence gate**: cold full lowering versus a warm unit stack must produce byte-identical guest
   output through the existing diff channel, per the L2 acceptance rule.
-- **Sharing acceptance**: two projects with overlapping lockfiles produce one copy of every shared
-  unit; two adjacent versions of the fixture crate keep ≥ 99% of their fragments (the `frag-share`
-  gate); `cache status` reports live/dead fragment bytes and the dedup factor.
+- **Sharing acceptance**: two programs whose closures lower the same bodies produce one stored copy of
+  every fragment — the `deps-image` gate drops a closure's manifest, lowers it again and requires that
+  the store grew by no pack at all; two adjacent versions of the fixture crate keep ≥ 99% of their
+  fragments (the `frag-share` gate); `cache status` reports the family's fragments, unique bytes and
+  repeated bytes, which is the dedup factor until manifests make live/dead accounting possible.
 - **Collection safety**: purge under a concurrent publisher never leaves a manifest referencing a
   swept fragment (lock discipline §3.4); a manifest referencing a missing fragment is a miss that
   self-heals, never a runtime error.
@@ -244,19 +248,21 @@ parent document are the regression fence.
 No intermediate formats and no migration paths: this is development, so the monolithic deps image is
 deleted and replaced, not phased out.
 
-1. Measurement: the dedup probe (`MIRVM_FRAG_STATS`, following the purity-stats pattern) plus
-   unit-size and frozen-share numbers on real fixtures; this prices the §7 extensions and fixes the
-   acceptance ratios of §5.
-2. **Canonical fragment encoding and the binding walk** — the keystone this design shares with
-   [jit-code-cache-design.md](jit-code-cache-design.md); fragment ids exist from here on, before and
-   independent of the store.
-3. **The fragment store**: `cache/frags/` packs, BLAKE3 ids, mark-sweep purge.
-4. **Per-crate units as manifests** on the cargoless track: the reserved build path wired as a
-   multi-way split with the home rule, symbolic cross-unit edges, `cache/units/`, k by load order;
-   the monolithic deps image is removed in the same change, gated by the §5 equivalence gate.
-5. **The Cargo track's closure manifest**: same manifest format, closure-level key, observable
-   behaviour untouched.
-6. Extensions, each behind its own measurement: frozen-region chunk dedup; the L2 entry as a
+1. **Canonical fragment encoding and the binding walk**: one exhaustive site walk, dense ordinals and
+   the BLAKE3 fragment id (`vm::ir::frag`), the binding projection and its inverse
+   (`image::manifest`), and the probe that prices the design (`MIRVM_FRAG_STATS`, `frag-share`).
+   Implemented, and measured before the store was designed (§5).
+2. **The closure manifest over the shared fragment store**: the deps layer became a manifest — header
+   material, the module without bodies, one record per function (fragment id + binding table) — with
+   `cache/frags/` packs behind it, publish-side dedupe and `cache purge --frags`. Implemented; both
+   tracks use the same format and key material as before, so behaviour is unchanged.
+3. **Per-crate units as manifests** on the cargoless track: the reserved build path wired as a
+   multi-way split with the home rule, symbolic cross-unit edges, `cache/units/`, k by load order.
+   The storage form is already the manifest one, so this step generalizes the *split*, gated by the
+   §5 equivalence gate.
+4. **Collection**: mark-sweep from current-generation manifests, the `--units` flag, the shared/
+   exclusive lock discipline of §3.4, and the live/dead accounting `cache status` will report.
+5. Extensions, each behind its own measurement: frozen-region chunk dedup; the L2 entry as a
    fragment manifest; heat-order-driven pack layout.
 
 ## 7. Open items
@@ -268,6 +274,6 @@ deleted and replaced, not phased out.
 - open-issues G5 asks whether cross-project sharing is needed at all and whether tainted images
   should become project-local; this RFC is the "yes, and finer" answer to the first question and
   leaves the second untouched. Deciding this RFC closes that branch of G5.
-- The store register rows, purge flags (`--units`, `--frags`) and `options.rs` entries land with
-  their implementing steps; the parent document's store-layout table follows the code, per the
-  "current code wins" rule.
+- `cache/units/` and `cache purge --units` land with the unit step; `cache/frags` and `--frags`
+  already exist. The parent document's store-layout table follows the code, per the "current code
+  wins" rule.

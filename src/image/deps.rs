@@ -18,9 +18,15 @@
 //! after analysis. Any mismatch means do not load, and full lowering self-heals rather than producing
 //! wrong values.
 //!
-//! The file is not required to be byte-deterministic: identity is carried by the key and file name, and
-//! nothing compares contents. v1 boundary: an empty `--extern` (a pure-std program with no registry
-//! dependencies) neither produces nor uses an image, since the std base already covers that territory.
+//! The file is a **manifest**, not a second copy of the code: each function is one record naming a
+//! fragment ([`crate::store::frags`]) and the binding table that gives that fragment's ordinals
+//! meaning ([`super::manifest`]). Two programs whose closures lower the same bodies therefore share
+//! them, and a version or feature change that leaves a body alone keeps its fragment. The manifest
+//! itself is not required to be byte-deterministic: identity is carried by the key and file name, and
+//! nothing compares contents.
+//!
+//! v1 boundary: an empty `--extern` (a pure-std program with no registry dependencies) neither
+//! produces nor uses a manifest, since the std base already covers that territory.
 
 use std::path::PathBuf;
 
@@ -30,9 +36,11 @@ use crate::store::entry;
 use crate::utils::content::{FileStamp, digest_hex};
 use crate::vm::ir;
 
-/// deps-image file (v1 = the whole package as postcard). The module's exports and function-entry
-/// links stay inside the module: this file has no byte-determinism contract, so it does not need
-/// BaseFile's sorted extraction/reconstruction.
+use super::manifest;
+
+/// The closure manifest file: header material, the module without its bodies, and one stored record
+/// per function in FuncId order (parallel to `module.function_names`). The bodies themselves are in
+/// the fragment store, which is what makes two programs with the same closure share them.
 #[derive(Serialize, Deserialize)]
 struct DepsFile {
     build_id: String,
@@ -42,6 +50,7 @@ struct DepsFile {
     /// Pre-key material for comparison (hash-collision immune): sorted --extern artifact stamps
     extern_stamps: Vec<FileStamp>,
     module: ir::Module,
+    funcs: Vec<manifest::Record>,
     fn_entry_syms: Vec<(Box<str>, u64)>,
     static_syms: Vec<(Box<str>, u64)>,
     tls_syms: Vec<(Box<str>, ir::TlsId)>,
@@ -55,9 +64,30 @@ struct DepsFileRef<'a> {
     lowering_fp: (bool, bool, bool),
     extern_stamps: &'a [FileStamp],
     module: &'a ir::Module,
+    funcs: &'a [manifest::Record],
     fn_entry_syms: &'a [(Box<str>, u64)],
     static_syms: &'a [(Box<str>, u64)],
     tls_syms: &'a [(Box<str>, ir::TlsId)],
+}
+
+/// The unit view of the layer being stored or loaded: its own id ranges and fixed domains, which is
+/// what makes a binding's local half identical on both sides.
+fn unit_of(
+    prefix: crate::vm::verify::Prefix,
+    module: &ir::Module,
+    frozen: (u64, u64),
+) -> manifest::Unit {
+    manifest::Unit {
+        funcs: (prefix.funcs as u32, module.funcs.len() as u32),
+        tls: (prefix.tls as u32, module.tls.len() as u32),
+        asm: (prefix.asm as u32, module.asm_sites.len() as u32),
+        frozen,
+        // The image's entry stubs live in its own code spline slot, one 16 GiB step wide.
+        code: (
+            super::image_code_home(),
+            crate::os_arch::addrspace::IMAGE_CODE_STEP as u64,
+        ),
+    }
 }
 
 /// Whether the deps-image cache is bypassed. The cache is on by default and the only knob is
@@ -129,10 +159,11 @@ fn file_path(key: &str) -> PathBuf {
     crate::store::DEPS.dir().join(format!("{key}.img"))
 }
 
-/// Load the deps-image; called before the compiler session. `base` is the already-present base, whose key
-/// and fingerprint are validated in layers. On success the returned `BaseImage` is pushed onto the stack,
-/// with its key set to the pre-key so the L2 key chain can use it. Any mismatch or failure yields `None`:
-/// full lowering self-heals and the main path stays silent, because stderr participates in native diffs.
+/// Load the closure manifest; called before the compiler session. `base` is the already-present base,
+/// whose key and fingerprint are validated in layers. On success the returned `BaseImage` is pushed
+/// onto the stack, with its key set to the pre-key so the L2 key chain can use it. Any mismatch or
+/// failure yields `None`: full lowering self-heals and the main path stays silent, because stderr
+/// participates in native diffs.
 pub fn try_load(
     rustc_args: &[String],
     base: &crate::image::BaseImage,
@@ -153,24 +184,59 @@ pub fn try_load(
     if !entry::frozen_at(&f.module, Some(crate::os_arch::addrspace::image_addr(0))) {
         return None;
     }
+    // The bodies come back from the fragment store before anything can be verified: the frozen mapping
+    // is what binds their addresses, and the verifier walks the bodies themselves.
+    let frozen = f
+        .module
+        .frozen
+        .as_ref()
+        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))?;
+    let prefix = crate::vm::verify::Prefix {
+        funcs: base.module.funcs.len(),
+        tls: base.module.tls.len(),
+        asm: base.module.asm_sites.len(),
+    };
+    let unit = unit_of(prefix, &f.module, frozen);
+    let symbols = manifest::Symbols::of(std::iter::once(base));
+    let ids: Vec<[u8; 32]> = f.funcs.iter().map(|record| record.fragment).collect();
+    let fragments = crate::store::frags::Index::load().read_many(&ids);
+    let mut bodies = Vec::with_capacity(f.funcs.len());
+    for (index, record) in f.funcs.iter().enumerate() {
+        // A manifest names its bodies by content address: a missing or unreadable fragment is a miss,
+        // never a partially assembled layer.
+        let fragment = fragments.get(&record.fragment)?;
+        let name = f.module.function_names.get(index).map_or("?", |name| name);
+        bodies.push(manifest::rehydrate(fragment, &record.bindings, name, &unit, &symbols).ok()?);
+    }
+    if f.module.function_names.len() != f.funcs.len() {
+        return None;
+    }
+    f.module.funcs = bodies.into();
     // The image is verified against the stack it is about to join: its frozen bytes may reference an
     // entry the base owns (`fn_entry_addr` reuses a base entry so one function keeps one address
     // identity), which is legitimate exactly because the base is below it.
+    let mut instance = match crate::vm::instance::Instance::materialize(&f.module) {
+        Ok(instance) => instance,
+        Err(error) => {
+            if crate::options::a2_debug() {
+                eprintln!("[a2-debug] deps image {key} rejected: {error}");
+            }
+            return None;
+        }
+    };
     let base_links = base.entry_links().collect::<Vec<_>>();
     let below = crate::vm::verify::Below {
-        prefix: crate::vm::verify::Prefix {
-            funcs: base.module.funcs.len(),
-            tls: base.module.tls.len(),
-            asm: base.module.asm_sites.len(),
-        },
+        prefix,
         entries: &base_links,
     };
-    let Some(instance) = entry::revive(&mut f.module, below) else {
+    if crate::vm::verify::module_below(&f.module, &instance, below).is_err() {
         if crate::options::a2_debug() {
             eprintln!("[a2-debug] deps image {key} rejected: verification failed against the base");
         }
         return None;
-    };
+    }
+    // asm stubs are materialized from the module's recipes on every load, including this one.
+    instance.asm_stub_addrs = crate::lower::asm::materialize(&f.module.asm_sites);
     // A removed required .so is a miss that falls back to the cold-path self-heal (same contract as
     // the L2 cache)
     if !entry::native_libs_present(&f.module) {
@@ -198,7 +264,7 @@ pub fn store_and_wrap(
     rustc_args: &[String],
     base_key: &str,
     fp: (bool, bool, bool),
-    below: crate::vm::verify::Below<'_>,
+    stack: &crate::image::ImageStack,
     image: crate::lower::SplitImage,
 ) -> crate::image::BaseImage {
     let mut bi = image.into_base_image(fp);
@@ -211,52 +277,99 @@ pub fn store_and_wrap(
         &bi.instance,
         Some(crate::os_arch::addrspace::image_addr(0)),
     );
+    let below = stack.below();
     // The writer applies the loader's predicate against the same stack: publishing a file the loader
     // will refuse is worse than publishing none — the image is rebuilt and re-keyed every run while
     // its key chain is already written into the L2 entries above it.
-    let cacheable =
-        publishable && crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
+    let verified = crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
+    let cacheable = publishable && verified;
     if !cacheable && crate::options::a2_debug() {
         eprintln!(
             "[a2-debug] split image not published: {}",
-            if publishable {
-                "verification against the stack below failed"
-            } else {
+            if !publishable {
                 "snapshot is not fixed-domain publishable"
+            } else {
+                "verification against the stack below failed"
             }
         );
     }
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
-        let mut fn_entry_syms = bi
-            .entry_by_sym
-            .iter()
-            .map(|(s, a)| (s.clone(), *a))
-            .collect::<Vec<_>>();
-        fn_entry_syms.sort_unstable();
-        let mut static_syms = bi
-            .static_by_sym
-            .iter()
-            .map(|(s, a)| (s.clone(), *a))
-            .collect::<Vec<_>>();
-        static_syms.sort_unstable();
-        let mut tls_syms = bi
-            .tls_by_sym
-            .iter()
-            .map(|(s, id)| (s.clone(), *id))
-            .collect::<Vec<_>>();
-        tls_syms.sort_unstable();
-        let file = DepsFileRef {
-            build_id: crate::options::build::BUILD_ID,
-            base_key,
-            lowering_fp: fp,
-            extern_stamps: &stamps,
-            module: &bi.module,
-            fn_entry_syms: &fn_entry_syms,
-            static_syms: &static_syms,
-            tls_syms: &tls_syms,
+        let frozen_home = bi
+            .module
+            .frozen
+            .as_ref()
+            .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64));
+        let Some(unit) = frozen_home.map(|frozen| unit_of(below.prefix, &bi.module, frozen)) else {
+            return degraded(bi);
         };
-        if let Ok(bytes) = postcard::to_stdvec(&file) {
+        let symbols = manifest::Symbols::of(stack.layers());
+        // The bodies leave the module so the manifest can be serialized without them, and come back
+        // right after: this session keeps running the layer it just wrote.
+        let mut bodies = Vec::new();
+        bi.module.funcs.drain_into(&mut bodies);
+        let mut records = Vec::with_capacity(bodies.len());
+        let mut session = crate::store::frags::Session::default();
+        let mut failure = None;
+        for body in &bodies {
+            match manifest::project(body, &unit, &symbols) {
+                Ok(projected) => {
+                    records.push(projected.record);
+                    session.add(projected.bytes);
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        let manifest_bytes = failure
+            .is_none()
+            .then(|| {
+                let mut fn_entry_syms = bi
+                    .entry_by_sym
+                    .iter()
+                    .map(|(s, a)| (s.clone(), *a))
+                    .collect::<Vec<_>>();
+                fn_entry_syms.sort_unstable();
+                let mut static_syms = bi
+                    .static_by_sym
+                    .iter()
+                    .map(|(s, a)| (s.clone(), *a))
+                    .collect::<Vec<_>>();
+                static_syms.sort_unstable();
+                let mut tls_syms = bi
+                    .tls_by_sym
+                    .iter()
+                    .map(|(s, id)| (s.clone(), *id))
+                    .collect::<Vec<_>>();
+                tls_syms.sort_unstable();
+                let file = DepsFileRef {
+                    build_id: crate::options::build::BUILD_ID,
+                    base_key,
+                    lowering_fp: fp,
+                    extern_stamps: &stamps,
+                    module: &bi.module,
+                    funcs: &records,
+                    fn_entry_syms: &fn_entry_syms,
+                    static_syms: &static_syms,
+                    tls_syms: &tls_syms,
+                };
+                postcard::to_stdvec(&file).ok()
+            })
+            .flatten();
+        bi.module.funcs = bodies.into();
+        if let (Ok(()), Some(bytes)) = (
+            session.publish().map(|published| {
+                if crate::options::a2_debug() {
+                    eprintln!(
+                        "[a2-debug] stored {} fragments ({} already shared), {} B",
+                        published.stored, published.deduped, published.bytes
+                    );
+                }
+            }),
+            manifest_bytes,
+        ) {
             let path = file_path(&key);
             let dir_exists = path
                 .parent()
@@ -265,9 +378,19 @@ pub fn store_and_wrap(
                 bi.key = key;
                 return bi;
             }
+        } else if crate::options::a2_debug()
+            && let Some(error) = failure
+        {
+            eprintln!("[a2-debug] split image not stored: {error}");
         }
     }
-    // Degraded key: process-unique ⇒ L2 key chain never false-hits across runs (in-memory absorb for this run is unaffected)
+    degraded(bi)
+}
+
+/// A layer the store cannot hold: the key degrades to a process-unique placeholder, which makes the L2
+/// key chain invalid across runs rather than a false hit (the in-memory absorb for this run is
+/// unaffected).
+fn degraded(mut bi: crate::image::BaseImage) -> crate::image::BaseImage {
     bi.key = format!("a2-unstable-{}", std::process::id());
     bi
 }

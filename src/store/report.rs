@@ -23,6 +23,7 @@ pub struct Purge {
     pub deps: bool,
     pub base: bool,
     pub ir: bool,
+    pub frags: bool,
     pub scripts: bool,
     /// The target directories (shared dependency storage and the native differential builds).
     pub target: bool,
@@ -41,6 +42,7 @@ impl Purge {
             Some(FamilyFlag::Base) => self.base,
             Some(FamilyFlag::Deps) => self.deps,
             Some(FamilyFlag::Ir) => self.ir,
+            Some(FamilyFlag::Frags) => self.frags,
             Some(FamilyFlag::Scripts) => self.scripts,
             Some(FamilyFlag::Target) => self.target,
             None => false,
@@ -91,6 +93,9 @@ struct FamilyStatus {
     generations: Option<(u64, u64)>,
     /// For the others, how the family is keyed — which is why it cannot be cleaned partially.
     kind: &'static str,
+    /// For a pack family: what its own indexes say. Repeated bytes are fragments a later pack stored
+    /// again; removing them is what a repack would buy.
+    fragments: Option<store::frags::Inventory>,
 }
 
 impl FamilyStatus {
@@ -102,7 +107,16 @@ impl FamilyStatus {
                 human_bytes(stale),
                 human_bytes(garbage)
             ),
-            None => format!("({} items, {})", self.items, self.kind),
+            None => match &self.fragments {
+                Some(inventory) => format!(
+                    "({} packs, {} fragments, {} unique, {} repeated)",
+                    self.items,
+                    inventory.records,
+                    human_bytes(inventory.unique_bytes),
+                    human_bytes(inventory.duplicate_bytes)
+                ),
+                None => format!("({} items, {})", self.items, self.kind),
+            },
         }
     }
 }
@@ -201,6 +215,11 @@ impl Status {
                             }
                             None => {
                                 out.string("kind", family.kind);
+                                if let Some(inventory) = &family.fragments {
+                                    out.number("fragments", inventory.records);
+                                    out.number("unique_bytes", inventory.unique_bytes);
+                                    out.number("repeated_bytes", inventory.duplicate_bytes);
+                                }
                             }
                         };
                         out.finish()
@@ -248,6 +267,18 @@ pub fn status(root: &Path) -> Status {
             claimed.push(name.clone());
             let dir = family.dir_in(root);
             let status = match family.shape {
+                Shape::Pack => {
+                    let (bytes, files) = du(&dir);
+                    total += bytes;
+                    FamilyStatus {
+                        path: name,
+                        bytes,
+                        items: files,
+                        generations: None,
+                        kind: "content-keyed packs",
+                        fragments: Some(store::frags::inventory()),
+                    }
+                }
                 Shape::Generation { ext } => {
                     let (current, stale, garbage) = store::split_generational(&dir, ext);
                     let (current_bytes, stale_bytes, garbage_bytes) =
@@ -261,6 +292,7 @@ pub fn status(root: &Path) -> Status {
                         items: (current.len() + stale.len() + garbage.len()) as u64,
                         generations: Some((stale_bytes, garbage_bytes)),
                         kind: "content-keyed",
+                        fragments: None,
                     }
                 }
                 // A keyed family is cleaned exactly like a single artifact; naming the shape is what
@@ -277,6 +309,7 @@ pub fn status(root: &Path) -> Status {
                             Shape::Keyed => "content-keyed",
                             _ => "one artifact",
                         },
+                        fragments: None,
                     }
                 }
             };

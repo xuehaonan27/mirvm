@@ -20,6 +20,7 @@
 
 pub(crate) mod base;
 pub(crate) mod deps;
+pub(crate) mod manifest;
 pub(crate) mod program;
 
 use crate::vm::instance::Instance;
@@ -61,6 +62,12 @@ crate::diag_codes! {
         Encode => "image.encode",
         Io => "image.io",
     }
+}
+
+/// The code domain a dependency image's entry stubs are allocated in. One image occupies spline slot
+/// k=0 today; the unit design assigns k by load order.
+pub(crate) fn image_code_home() -> u64 {
+    crate::os_arch::addrspace::image_code_addr(0) as u64
 }
 
 /// A loaded layer, ready for a program session to use.
@@ -176,6 +183,11 @@ impl ImageStack {
     }
     pub fn key(&self) -> Option<&str> {
         self.key.as_deref()
+    }
+
+    /// The layers of this stack, bottom first: what a symbolic binding may name.
+    pub fn layers(&self) -> &[BaseImage] {
+        &self.images
     }
 
     /// The stack context for a module that is about to join above these layers: the numbering they
