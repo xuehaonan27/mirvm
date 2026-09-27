@@ -142,6 +142,14 @@ modifications.
   same way: the fixed-address structure is the axis's, its numbers are the pair's. A new architecture
   or platform is a directory plus an arm in that ladder; the axis refusals name what a pair must
   implement. `repo-quality`'s `platform boundary` gate enforces the boundary.
+- An external input is declared, and read, in the register in `src/options.rs`: the row carries how the
+  option is read (`reads` for a value resolved at first use, `live` for one evaluated on every call,
+  `child_only` for a value the command line exports for its children alone), and the macro generates
+  that option's one accessor. Nothing else resolves an option or reads the environment for one. A
+  derived location has one owner in the same way: a store family is reached through
+  `store::FAMILY.dir()`, and the pinned toolchain's layout through `sysroot::toolchain`, rather than
+  each consumer joining the same path. `repo-quality`'s `option access`, `option readers` and
+  `toolchain layout` checks enforce the boundary.
 - A frozen surface stays byte-identical unless its own test changes: guest stdout/stderr, rustc
   diagnostics, cargo-mirror lines, and the first line of `cache status`. The lowering cache key is
   the FNV of the final assembly text, so a whitespace change in emitted asm silently invalidates

@@ -43,6 +43,68 @@ check_store_families() {
     fi
 }
 
+# The pinned toolchain's layout has one owner. `src/options.rs` declares the constant and
+# `src/sysroot.rs` derives the paths from it; a consumer names `sysroot::toolchain::…` rather than
+# joining `bin/rustc` again, which is how one layout came to be spelled in eight modules.
+check_toolchain_layout() {
+    local bad
+    bad=$(grep -rnE 'DEFAULT_SYSROOT|"bin/(rustc|cargo|rustdoc)"' src --include='*.rs' \
+        | grep -v '^src/options.rs:' | grep -v '^src/sysroot.rs:' \
+        | grep -vE '^src/[^:]*tests?\.rs:|^src/[^:]*/tests/')
+    if [ -n "$bad" ]; then
+        echo "the pinned toolchain's layout spelled outside src/{options,sysroot}.rs:" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
+# A register row is the whole read surface: it declares how an option is read and generates the one
+# accessor, so nothing outside `src/options.rs` names the resolved values or the raw environment.
+# The writing half (`export_to_process`, `note_cli`) and the parent-to-child half (`protocol`) are
+# that module's own, which is why they may be named from anywhere.
+check_option_access() {
+    local bad
+    bad=$(grep -rnE 'options::(get|raw|flag|nonempty)\(' src --include='*.rs' \
+        | grep -v '^src/options.rs:')
+    if [ -n "$bad" ]; then
+        echo "options reads outside src/options.rs (name the accessor its row generates):" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
+# An option the command line settles after startup is exported into the variable its child processes
+# inherit, so this process has to read that option live as well — or say `child_only`, meaning the
+# export is for the child alone and nothing here reads it again. A protocol row declares no reader
+# (its typed accessors are the `protocol` module's), so it is not part of this.
+check_option_readers() {
+    local bad
+    bad=$(
+        grep -rhoE '(export_to_process|export_os_to_process|note_cli)\("[a-z_0-9]+"' src --include='*.rs' \
+            | grep -oE '"[a-z_0-9]+"' | tr -d '"' | sort -u \
+        | while read -r field; do
+            row=$(awk -v field="$field" '
+                /^entries! \{/ { inside = 1; next }
+                /^\}/ { inside = 0 }
+                inside && $2 == field { collecting = 1 }
+                collecting { print; if ($0 ~ /;/) exit }
+            ' src/options.rs)
+            [ -n "$row" ] || continue
+            if printf '%s' "$row" | grep -qE 'live\(|child_only'; then
+                continue
+            fi
+            if printf '%s' "$row" | grep -q 'reads('; then
+                printf '%s\n' "$field"
+            fi
+        done
+    )
+    if [ -n "$bad" ]; then
+        echo "options the CLI exports are read as snapshots (make the row live, or mark it child_only):" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
 # anyhow is banned outright: every failure class is a typed thiserror enum, because the loss of a
 # failure's identity is exactly what an unstructured error string costs a machine consumer. The
 # pattern matches uses, not the word: a lockfile fixture that merely names the crate is fine.
@@ -128,6 +190,9 @@ mode_run() {
     run_check "cargo clippy" "${CARGO:-cargo}" clippy --locked --all-targets --all-features -- -D warnings
     run_check "cargo test" "${CARGO:-cargo}" test --locked --all-features
     run_check "options register" check_option_register
+    run_check "option access" check_option_access
+    run_check "option readers" check_option_readers
+    run_check "toolchain layout" check_toolchain_layout
     run_check "store families" check_store_families
     run_check "no anyhow" check_no_anyhow
     run_check "error codes" check_error_codes
