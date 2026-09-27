@@ -227,172 +227,159 @@ macro_rules! entries {
     };
 }
 
+/// The internal argv spelling one mirvm process hands the runner it starts.
+///
+/// Declared here so the register row below owns the spelling the way an environment-backed row owns
+/// its variable: `cli(...)` points at this constant, and `cli` re-exports it for the argument.
+pub(crate) const INTERNAL_CAPTURE_DIR: &str = "--mirvm-capture-directory";
+
+// ===== spellings the register points at =====
+
+/// Names one mirvm process hands another: the rows below declare them like any other input and are
+/// where a child reads them back, and [`protocol`] is how a parent writes one onto that child.
+pub const CARGO_SESSION: &str = "MIRVM_CARGO_SESSION";
+pub const CARGO_COMPILER: &str = "MIRVM_CARGO_COMPILER";
+pub const PACK: &str = "MIRVM_PACK";
+pub const GUEST_CWD: &str = "MIRVM_GUEST_CWD";
+pub const CALLER_SYSROOT: &str = "MIRVM_CALLER_SYSROOT";
+pub const DOCTEST_BUILDER: &str = "MIRVM_DOCTEST_BUILDER";
+pub const DOCTEST_RUN_DIR: &str = "MIRVM_DOCTEST_RUN_DIR";
+pub const BUILD_LOG: &str = "MIRVM_BUILD_LOG";
+
 entries! {
     /// Machine output: reports as one JSON document, diagnostics as one JSON object per line.
-    user output_format env("MIRVM_OUTPUT")         default("text")       cli("--json", "Run Prepare Pack Capture Cache Deps Options") flag
+    user output_format env("MIRVM_OUTPUT")     default("text")       cli("--json", "Run Prepare Pack Capture Cache Deps Options") flag
         => live(Result<OutputFormat, Error>, |_| read_output_format());
     /// The quietest diagnostic that still prints: error | warning | note | info | debug.
-    user log_level     env("MIRVM_LOG")            default("warning")    cli("--verbose", "-v", "Run Prepare") flag
+    user log_level     env("MIRVM_LOG")        default("warning")    cli("--verbose", "-v", "Run Prepare") flag
         => live(Result<crate::diag::Severity, Error>, |_| read_log_level());
     /// MIR-rich sysroot; equivalent to --sysroot. Default: build and cache one.
-    user sysroot       env("MIRVM_SYSROOT")        default("auto-built") cli("--sysroot", "Run")
+    user sysroot       env("MIRVM_SYSROOT")    default("auto-built") cli("--sysroot", "Run")
         => live(Option<PathBuf>, |_| read_sysroot());
     /// Guest main execution stack reservation; accepts a k/m/g suffix, range 1m..=1t.
-    user stack_size    env("MIRVM_STACK_SIZE")     default("1g")         cli("--stack-size", "Run")
+    user stack_size    env("MIRVM_STACK_SIZE") default("1g")         cli("--stack-size", "Run")
         => live(Option<String>, |_| read_stack_size());
     /// Method-level JIT; `off` runs the pure interpreter (differential benchmark).
-    user jit           env("MIRVM_JIT")            default("on")         cli("--jit", "Run")
+    user jit           env("MIRVM_JIT")        default("on")         cli("--jit", "Run")
         => live(bool, |_| read_jit());
+
     /// JIT compilation trigger threshold (diagnostic).
-    user jit_threshold env("MIRVM_JIT_THRESHOLD")  default("1000")
-        => reads(u32, |o| o.jit_threshold);
+    user jit_threshold env("MIRVM_JIT_THRESHOLD")  default("1000")           => reads(u32, |o| o.jit_threshold);
     /// Compile on the enqueueing thread and fail loudly; makes a forced threshold observable.
-    user jit_sync      env("MIRVM_JIT_SYNC")       default("off")
-        => reads(bool, |o| o.jit_sync);
+    user jit_sync      env("MIRVM_JIT_SYNC")       default("off")            => reads(bool, |o| o.jit_sync);
     /// Print JIT helper frequency statistics at process exit.
-    user jit_stats     env("MIRVM_JIT_STATS")      default("off")
-        => reads(bool, |o| o.jit_stats);
+    user jit_stats     env("MIRVM_JIT_STATS")      default("off")            => reads(bool, |o| o.jit_stats);
     /// Local store root: cache/ (deletable), data/ (expensive to lose), build/ (project space), run/ (process scratch).
-    user home          env("MIRVM_HOME")           default("$HOME/.mirvm")
-        => reads(&'static std::path::Path, |o| &o.home);
+    user home          env("MIRVM_HOME")           default("$HOME/.mirvm")   => reads(&'static std::path::Path, |o| &o.home);
     /// Relocate the Cargo track's target directory (the shared dependency store) out of `build/`.
-    user target_dir    env("MIRVM_TARGET_DIR")     default("$MIRVM_HOME/build/target/mirvm")
-        => reads(&'static std::path::Path, |o| &o.target_dir);
+    user target_dir    env("MIRVM_TARGET_DIR")     default("$MIRVM_HOME/build/target/mirvm") => reads(&'static std::path::Path, |o| &o.target_dir);
     /// Build frontmatter/script projects with --locked.
-    user cargo_locked  env("MIRVM_CARGO_LOCKED")   default("off")
-        => reads(bool, |o| o.cargo_locked);
+    user cargo_locked  env("MIRVM_CARGO_LOCKED")   default("off")            => reads(bool, |o| o.cargo_locked);
     /// `self` = zero-cargo own scheduling; `cargo` = the Cargo compatibility track.
-    user deps          env("MIRVM_DEPS")           default("self")
-        => live(Result<DepsTrack, Error>, |_| read_deps());
+    user deps          env("MIRVM_DEPS")           default("self")           => live(Result<DepsTrack, Error>, |_| read_deps());
     /// Cargoless compilation concurrency; =1 is the serial differential anchor.
-    user cless_jobs    env("MIRVM_CLESS_JOBS")     default("available parallelism")
-        => live(Result<usize, Error>, |_| read_cless_jobs());
+    user cless_jobs    env("MIRVM_CLESS_JOBS")     default("available parallelism") => live(Result<usize, Error>, |_| read_cless_jobs());
     /// rustc frontend threads for the compile session: off | sync | 0..=256.
-    user threads       env("MIRVM_THREADS")        default("off")
-        => live(Result<String, Error>, |_| read_threads());
+    user threads       env("MIRVM_THREADS")        default("off")            => live(Result<String, Error>, |_| read_threads());
     /// Write the phase ledger (frontend/lower/engine/total) to stderr.
-    user timing        env("MIRVM_TIMING")         default("off")
-        => reads(bool, |o| o.timing);
+    user timing        env("MIRVM_TIMING")         default("off")            => reads(bool, |o| o.timing);
     /// Bypass the L2 engine-IR cache (read and write).
-    user no_ir_cache   env("MIRVM_NO_IR_CACHE")    default("off")
-        => reads(bool, |o| o.no_ir_cache);
+    user no_ir_cache   env("MIRVM_NO_IR_CACHE")    default("off")            => reads(bool, |o| o.no_ir_cache);
     /// Bypass the pre-lowered std base image (full cold lowering).
-    user no_base_image env("MIRVM_NO_BASE_IMAGE")  default("off") child_only
-        => reads(bool, |o| o.no_base_image);
+    user no_base_image env("MIRVM_NO_BASE_IMAGE")  default("off") child_only => reads(bool, |o| o.no_base_image);
     /// Bypass the dependency image.
-    user no_deps_image env("MIRVM_NO_DEPS_IMAGE")  default("off") child_only
-        => reads(bool, |o| o.no_deps_image);
+    user no_deps_image env("MIRVM_NO_DEPS_IMAGE")  default("off") child_only => reads(bool, |o| o.no_deps_image);
     /// Disable registry HTTP; resolve from the local cache only and fail loudly on a miss.
-    user offline       env("MIRVM_OFFLINE")        default("off")
-        => live(bool, |_| read_offline());
+    user offline       env("MIRVM_OFFLINE")        default("off")            => live(bool, |_| read_offline());
     /// `mirvm pack`: carry machine code out of line and rematerialize it on load.
-    user pack_no_mc    env("MIRVM_PACK_NO_MC")     default("off")
-        => reads(bool, |o| o.pack_no_mc);
+    user pack_no_mc    env("MIRVM_PACK_NO_MC")     default("off")            => reads(bool, |o| o.pack_no_mc);
 
     /// Log the JIT compiler thread's receive/publish flow.
-    dev  jit_debug       env("MIRVM_JIT_DEBUG")       default("off")
-        => reads(bool, |o| o.jit_debug);
+    dev  jit_debug       env("MIRVM_JIT_DEBUG")       default("off") => reads(bool, |o| o.jit_debug);
     /// Dump CLIF for functions whose compilation fails.
-    dev  jit_debug_dump  env("MIRVM_JIT_DEBUG_DUMP")  default("off")
-        => reads(bool, |o| o.jit_debug_dump);
+    dev  jit_debug_dump  env("MIRVM_JIT_DEBUG_DUMP")  default("off") => reads(bool, |o| o.jit_debug_dump);
     /// Log build-script scheduling.
-    dev  debug_bldrs     env("MIRVM_DEBUG_BLDRS")     default("off")
-        => reads(bool, |o| o.debug_bldrs);
+    dev  debug_bldrs     env("MIRVM_DEBUG_BLDRS")     default("off") => reads(bool, |o| o.debug_bldrs);
     /// Log resolver feature unification.
-    dev  debug_unify     env("MIRVM_DEBUG_UNIFY")     default("off")
-        => reads(bool, |o| o.debug_unify);
+    dev  debug_unify     env("MIRVM_DEBUG_UNIFY")     default("off") => reads(bool, |o| o.debug_unify);
     /// `mirvm deps audit`: keep the scratch tree instead of cleaning it up.
-    dev  deps_audit_keep env("MIRVM_DEPS_AUDIT_KEEP") default("off")
-        => reads(bool, |o| o.deps_audit_keep);
+    dev  deps_audit_keep env("MIRVM_DEPS_AUDIT_KEEP") default("off") => reads(bool, |o| o.deps_audit_keep);
     /// Log native-archive symbol resolution.
-    dev  c2_debug        env("MIRVM_C2_DEBUG")        default("off")
-        => reads(bool, |o| o.c2_debug);
+    dev  c2_debug        env("MIRVM_C2_DEBUG")        default("off") => reads(bool, |o| o.c2_debug);
     /// Log dependency-image pre-key computation.
-    dev  a2_debug        env("MIRVM_A2_DEBUG")        default("off")
-        => reads(bool, |o| o.a2_debug);
+    dev  a2_debug        env("MIRVM_A2_DEBUG")        default("off") => reads(bool, |o| o.a2_debug);
     /// Print lowering purity statistics.
-    dev  purity_stats    env("MIRVM_PURITY_STATS")    default("off")
-        => reads(bool, |o| o.purity_stats);
+    dev  purity_stats    env("MIRVM_PURITY_STATS")    default("off") => reads(bool, |o| o.purity_stats);
     /// Trace guest syscalls.
-    dev  syscall_trace   env("MIRVM_SYSCALL_TRACE")   default("off")
-        => reads(bool, |o| o.syscall_trace);
+    dev  syscall_trace   env("MIRVM_SYSCALL_TRACE")   default("off") => reads(bool, |o| o.syscall_trace);
     /// Print the fault RIP on SIGSEGV to locate a JIT code crash site.
-    dev  segv_dump       env("MIRVM_SEGV_DUMP")       default("off")
-        => reads(bool, |o| o.segv_dump);
+    dev  segv_dump       env("MIRVM_SEGV_DUMP")       default("off") => reads(bool, |o| o.segv_dump);
 
     /// Encoded rustflags appended inside the compiler wrapper; set by the differential suite.
     test encoded_rustflags_append env("MIRVM_ENCODED_RUSTFLAGS_APPEND") default("empty")
         => reads(Option<&'static str>, |o| o.encoded_rustflags_append.as_deref());
 
     /// Route argv into the Cargo wrapper phase.
-    protocol cargo_session   env(protocol::CARGO_SESSION)   default("unset")
-        => live(bool, |_| env::var_os(protocol::CARGO_SESSION).is_some());
+    protocol cargo_session   env(CARGO_SESSION)   default("unset") => live(bool, |_| env::var_os(CARGO_SESSION).is_some());
     /// This session occupies Cargo's RUSTC slot rather than the wrapper slot.
-    protocol cargo_compiler  env(protocol::CARGO_COMPILER)  default("unset")
-        => live(bool, |_| env::var_os(protocol::CARGO_COMPILER).is_some());
+    protocol cargo_compiler  env(CARGO_COMPILER)  default("unset") => live(bool, |_| env::var_os(CARGO_COMPILER).is_some());
     /// Emit a .mirvm package to this path instead of executing.
-    protocol pack            env(protocol::PACK)            default("unset")
-        => live(Option<PathBuf>, |_| env::var_os(protocol::PACK).map(PathBuf::from));
+    protocol pack            env(PACK)            default("unset") => live(Option<PathBuf>, |_| env::var_os(PACK).map(PathBuf::from));
     /// Caller directory to enter before guest execution.
-    protocol guest_cwd       env(protocol::GUEST_CWD)       default("unset")
-        => live(Option<PathBuf>, |_| env::var_os(protocol::GUEST_CWD).map(PathBuf::from));
+    protocol guest_cwd       env(GUEST_CWD)       default("unset") => live(Option<PathBuf>, |_| env::var_os(GUEST_CWD).map(PathBuf::from));
     /// The caller's own sysroot, echoed back into the guest environment.
-    protocol caller_sysroot  env(protocol::CALLER_SYSROOT)  default("unset")
-        => live(Option<std::ffi::OsString>, |_| env::var_os(protocol::CALLER_SYSROOT));
+    protocol caller_sysroot  env(CALLER_SYSROOT)  default("unset") => live(Option<std::ffi::OsString>, |_| env::var_os(CALLER_SYSROOT));
     /// Doctest builder launcher path.
-    protocol doctest_builder env(protocol::DOCTEST_BUILDER) default("unset")
-        => live(Option<String>, |_| env::var(protocol::DOCTEST_BUILDER).ok());
+    protocol doctest_builder env(DOCTEST_BUILDER) default("unset") => live(Option<String>, |_| env::var(DOCTEST_BUILDER).ok());
     /// Doctest working directory.
-    protocol doctest_run_dir env(protocol::DOCTEST_RUN_DIR) default("unset")
-        => live(Option<PathBuf>, |_| env::var_os(protocol::DOCTEST_RUN_DIR).map(PathBuf::from));
+    protocol doctest_run_dir env(DOCTEST_RUN_DIR) default("unset") => live(Option<PathBuf>, |_| env::var_os(DOCTEST_RUN_DIR).map(PathBuf::from));
     /// `hold` = a build's own compiler diagnostics wait for its outcome; `live` = they print at once.
-    protocol build_log       env(protocol::BUILD_LOG)       default("live")
-        => live(Option<String>, |_| env::var(protocol::BUILD_LOG).ok());
+    protocol build_log       env(BUILD_LOG)       default("live")  => live(Option<String>, |_| env::var(BUILD_LOG).ok());
 
     /// Print the entry function's MIR and exit.
-    user dump_mir                 cli("--dump-mir", "Run")              default("off") flag;
+    user dump_mir            cli("--dump-mir", "Run")              default("off") flag;
     /// Edition for the single-file form.
-    user edition                  cli("--edition", "Run")               default("2024");
+    user edition             cli("--edition", "Run")               default("2024");
     /// Compatibility spelling; `vm` is the only engine and is accepted silently.
-    user run_engine               cli("--engine", "Run")                default("vm");
+    user run_engine          cli("--engine", "Run")                default("vm");
     /// Call an exported function directly, e.g. 'fib(25)', instead of the main startup chain.
-    user vm_call                  cli("--vm-call", "Run")               default("unset");
+    user vm_call             cli("--vm-call", "Run")               default("unset");
     /// Print Trap-debt statistics and exit.
-    user vm_stats                 cli("--vm-stats", "Run")              default("off") flag;
+    user vm_stats            cli("--vm-stats", "Run")              default("off") flag;
     /// Cargo `--bin` semantics; project form only.
-    user bin                      cli("--bin", "Run")                   default("unset");
+    user bin                 cli("--bin", "Run")                   default("unset");
     /// Ignore package.rust-version, with Cargo's semantics.
-    user ignore_rust_version      cli("--ignore-rust-version", "Run")   default("off") flag;
+    user ignore_rust_version cli("--ignore-rust-version", "Run")   default("off") flag;
     /// Output path: the .mirvm package (`pack`) or the capture directory (`capture`).
-    user output                   cli("--output", "-o", "Pack Capture") default("unset");
+    user output              cli("--output", "-o", "Pack Capture") default("unset");
     /// Report what `cache purge` would remove without removing it.
-    user cache_dry_run            cli("--dry-run", "Cache")             default("off") flag;
+    user cache_dry_run       cli("--dry-run", "Cache")             default("off") flag;
     /// Purge the whole dependency-image family.
-    user cache_deps               cli("--deps", "Cache")                default("off") flag;
+    user cache_deps          cli("--deps", "Cache")                default("off") flag;
     /// Purge the whole base-image family.
-    user cache_base               cli("--base", "Cache")                default("off") flag;
+    user cache_base          cli("--base", "Cache")                default("off") flag;
     /// Purge the whole L2 engine-IR family.
-    user cache_ir                 cli("--ir", "Cache")                  default("off") flag;
+    user cache_ir            cli("--ir", "Cache")                  default("off") flag;
     /// Purge scripts/ (materialized frontmatter projects).
-    user cache_scripts            cli("--scripts", "Cache")             default("off") flag;
+    user cache_scripts       cli("--scripts", "Cache")             default("off") flag;
     /// Purge the unified target directory (the shared dependency store).
-    user cache_target             cli("--target", "Cache")              default("off") flag;
+    user cache_target        cli("--target", "Cache")              default("off") flag;
     /// Purge all of cache/, build/ and run/: everything that costs no network to rebuild.
-    user cache_all                cli("--all", "Cache")                 default("off") flag;
+    user cache_all           cli("--all", "Cache")                 default("off") flag;
     /// Also purge data/ (crate store and sysroot); with --all this is a full cold start.
-    user cache_data               cli("--data", "Cache")                default("off") flag;
+    user cache_data          cli("--data", "Cache")                default("off") flag;
     /// `log export` filter: engine id, or `unknown`.
-    user log_engine               cli("--engine", "Log")                default("unset");
+    user log_engine          cli("--engine", "Log")                default("unset");
     /// `log export` filter: producer id.
-    user log_producer             cli("--producer", "Log")              default("unset");
+    user log_producer        cli("--producer", "Log")              default("unset");
     /// `log export` filter: thread id.
-    user log_tid                  cli("--tid", "Log")                   default("unset");
+    user log_tid             cli("--tid", "Log")                   default("unset");
     /// `log export` filter: event kind.
-    user log_kind                 cli("--kind", "Log")                  default("unset");
+    user log_kind            cli("--kind", "Log")                  default("unset");
     /// `log export` filter: a sequence number or a START:END range.
-    user log_sequence             cli("--sequence", "Log")              default("unset");
+    user log_sequence        cli("--sequence", "Log")              default("unset");
     /// Internal: forwarded capture directory for the Cargo runner form.
-    user mirvm_capture_directory  cli("--mirvm-capture-directory", "Internal") default("unset");
+    user mirvm_capture_dir   cli(INTERNAL_CAPTURE_DIR, "Internal") default("unset");
 }
 
 /// Look up a register row. Panics on an unknown field: an accessor naming a field that is not
@@ -762,23 +749,19 @@ fn threads_from(raw: Option<&str>) -> Result<String, Error> {
 
 // ===== internal protocol =====
 
-/// Variables one mirvm process sets for another, and the writing half of their lifecycle.
+/// The writing half of the parent-to-child protocol.
 ///
-/// Each name is declared once here and pointed at by its register row above, which is also where the
-/// value is read from. This module writes them onto a child's `Command`, and answers the one question
-/// that is about a value rather than about it being present (`build_log_hold`).
+/// The names live beside the register, which declares them and is where a child reads them back;
+/// this module is what a parent uses to write one onto a child's `Command`, and answers the one
+/// question that is about a value rather than about it being present (`build_log_hold`).
 pub mod protocol {
     use std::path::Path;
     use std::process::Command;
 
-    pub const CARGO_SESSION: &str = "MIRVM_CARGO_SESSION";
-    pub const CARGO_COMPILER: &str = "MIRVM_CARGO_COMPILER";
-    pub const PACK: &str = "MIRVM_PACK";
-    pub const GUEST_CWD: &str = "MIRVM_GUEST_CWD";
-    pub const CALLER_SYSROOT: &str = "MIRVM_CALLER_SYSROOT";
-    pub const DOCTEST_BUILDER: &str = "MIRVM_DOCTEST_BUILDER";
-    pub const DOCTEST_RUN_DIR: &str = "MIRVM_DOCTEST_RUN_DIR";
-    pub const BUILD_LOG: &str = "MIRVM_BUILD_LOG";
+    use super::{
+        CALLER_SYSROOT, CARGO_COMPILER, CARGO_SESSION, DOCTEST_BUILDER, DOCTEST_RUN_DIR, GUEST_CWD,
+        PACK,
+    };
 
     pub fn set_cargo_session(cmd: &mut Command) {
         cmd.env(CARGO_SESSION, "1");

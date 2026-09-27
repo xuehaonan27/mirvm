@@ -732,8 +732,7 @@ mod tests {
             key == OsStr::new("RUSTC") && value == Some(OsStr::new("/tmp/mirvm"))
         }));
         assert!(command.get_envs().any(|(key, value)| {
-            key == OsStr::new(crate::options::protocol::CARGO_COMPILER)
-                && value == Some(OsStr::new("1"))
+            key == OsStr::new(crate::options::CARGO_COMPILER) && value == Some(OsStr::new("1"))
         }));
         for key in [
             "RUSTC_WRAPPER",

@@ -314,7 +314,7 @@ fn options_main(args: impl Iterator<Item = String>) -> Result<ExitCode, crate::e
     Ok(ExitCode::SUCCESS)
 }
 
-pub(crate) const INTERNAL_CAPTURE_DIRECTORY_ARG: &str = "--mirvm-capture-directory";
+pub(crate) use crate::options::INTERNAL_CAPTURE_DIR as INTERNAL_CAPTURE_DIRECTORY_ARG;
 static CAPTURE_DIRECTORY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 static FORWARDED_CAPTURE_DIRECTORY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
