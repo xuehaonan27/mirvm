@@ -310,6 +310,8 @@ entries! {
     dev  a2_debug        env("MIRVM_A2_DEBUG")        default("off") => reads(bool, |o| o.a2_debug);
     /// Print lowering purity statistics.
     dev  purity_stats    env("MIRVM_PURITY_STATS")    default("off") => reads(bool, |o| o.purity_stats);
+    /// Print the dedup probe: canonical fragment ids and the frozen share of a lowered layer.
+    dev  frag_stats      env("MIRVM_FRAG_STATS")      default("off") => reads(bool, |o| o.frag_stats);
     /// Trace guest syscalls.
     dev  syscall_trace   env("MIRVM_SYSCALL_TRACE")   default("off") => reads(bool, |o| o.syscall_trace);
     /// Print the fault RIP on SIGSEGV to locate a JIT code crash site.
@@ -563,6 +565,7 @@ struct Options {
     c2_debug: bool,
     a2_debug: bool,
     purity_stats: bool,
+    frag_stats: bool,
     syscall_trace: bool,
     segv_dump: bool,
 }
@@ -612,6 +615,7 @@ impl Options {
             c2_debug: flag("c2_debug"),
             a2_debug: flag("a2_debug"),
             purity_stats: nonempty("purity_stats"),
+            frag_stats: nonempty("frag_stats"),
             syscall_trace: flag("syscall_trace"),
             segv_dump: flag("segv_dump"),
         }
@@ -1097,6 +1101,7 @@ mod tests {
         let _ = super::c2_debug();
         let _ = super::a2_debug();
         let _ = super::purity_stats();
+        let _ = super::frag_stats();
         let _ = super::syscall_trace();
         let _ = super::segv_dump();
         let _ = super::encoded_rustflags_append();
