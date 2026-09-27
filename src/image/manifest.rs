@@ -15,6 +15,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::vm::ir::frag::{self, SiteVisitor, Target};
 use crate::vm::ir::{AsmStubId, FuncBody, FuncId, LinkAddr, TlsId};
 
@@ -151,6 +153,287 @@ impl Symbols {
             // Asm-stub recipes are per-module: one module's stub id never names another's site.
             Target::Asm(_) => None,
         }
+    }
+}
+
+/// The stored manifest of one layer: header material, the module without its bodies and without its
+/// id-bearing tables, and one record per function in FuncId order (parallel to
+/// `module.function_names`). The bodies are fragments in the shared store and the tables are
+/// canonical ([`Tables`]), so nothing in the file depends on how many layers happen to sit below it.
+///
+/// The same format serves both layers the design has: a **closure manifest** (one program's whole
+/// dependency closure, keyed by the `--extern` stamps, in `cache/deps/`) and a **unit manifest** (one
+/// crate, keyed by its rlib, in `cache/units/`). A unit manifest also records the spline slot its
+/// arenas were built in, so the loader restores them where their baked link addresses point.
+#[derive(Deserialize, Serialize)]
+pub(crate) struct File {
+    pub build_id: String,
+    /// The layer below the stack: the base image's key. Exact equality is required — a mismatch is
+    /// wrong at every value.
+    pub base_key: String,
+    /// A unit manifest's key (`build id ⊕ base key ⊕ rlib stamp`); `None` for a closure manifest,
+    /// whose key material is the `--extern` stamps.
+    pub unit_key: Option<String>,
+    /// The frozen/code spline slot the layer's arenas were built in (`0` for a closure manifest).
+    pub home: usize,
+    pub lowering_fp: (bool, bool, bool),
+    /// Content stamps of the artifacts the key material was built from (hash-collision immune).
+    pub extern_stamps: Vec<crate::utils::content::FileStamp>,
+    /// The module with its bodies and id-bearing tables removed.
+    pub module: crate::vm::ir::Module,
+    pub funcs: Vec<Record>,
+    pub tables: Tables,
+    pub fn_entry_syms: Vec<(Box<str>, u64)>,
+    pub static_syms: Vec<(Box<str>, u64)>,
+}
+
+/// Borrowed shape for writing (`ir::Module` is not `Clone`).
+#[derive(Serialize)]
+pub(crate) struct FileRef<'a> {
+    pub build_id: &'a str,
+    pub base_key: &'a str,
+    pub unit_key: Option<&'a str>,
+    pub home: usize,
+    pub lowering_fp: (bool, bool, bool),
+    pub extern_stamps: &'a [crate::utils::content::FileStamp],
+    pub module: &'a crate::vm::ir::Module,
+    pub funcs: &'a [Record],
+    pub tables: &'a Tables,
+    pub fn_entry_syms: &'a [(Box<str>, u64)],
+    pub static_syms: &'a [(Box<str>, u64)],
+}
+
+/// Serialize one manifest. The bytes are what a unit manifest is named by, so the caller that wants a
+/// content address hashes exactly these.
+pub(crate) fn encode(file: &FileRef<'_>) -> Result<Vec<u8>, String> {
+    postcard::to_stdvec(file).map_err(|error| error.to_string())
+}
+
+/// Project every function of `module` into `session` (the fragment store's staging set) and return the
+/// manifest records. The bodies come back into the module before returning: the layer this session
+/// runs is the one it just wrote.
+pub(crate) fn project_module(
+    module: &mut crate::vm::ir::Module,
+    unit: &Unit,
+    symbols: &Symbols,
+    session: &mut crate::store::frags::Session,
+) -> Result<Vec<Record>, String> {
+    let mut bodies = Vec::new();
+    module.funcs.drain_into(&mut bodies);
+    let mut records = Vec::with_capacity(bodies.len());
+    let mut failure = None;
+    for body in &bodies {
+        match project(body, unit, symbols) {
+            Ok(projected) => {
+                records.push(projected.record);
+                session.add(projected.bytes);
+            }
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    module.funcs = bodies.into();
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(records),
+    }
+}
+
+/// The manifest's records back into bodies, in FuncId order. Every fragment must be in the store and
+/// every binding must resolve: anything else is a miss, never a partially assembled layer.
+pub(crate) fn rehydrate_module(
+    module: &mut crate::vm::ir::Module,
+    records: &[Record],
+    unit: &Unit,
+    symbols: &Symbols,
+) -> Result<(), String> {
+    if module.function_names.len() != records.len() {
+        return Err(format!(
+            "manifest stores {} functions but the module names {}",
+            records.len(),
+            module.function_names.len()
+        ));
+    }
+    let ids: Vec<[u8; 32]> = records.iter().map(|record| record.fragment).collect();
+    let fragments = crate::store::frags::Index::load().read_many(&ids);
+    let mut bodies = Vec::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        let fragment = fragments
+            .get(&record.fragment)
+            .ok_or_else(|| "a fragment the manifest names is not in the store".to_string())?;
+        let name = module.function_names.get(index).map_or("?", |name| name);
+        bodies.push(rehydrate(fragment, &record.bindings, name, unit, symbols)?);
+    }
+    module.funcs = bodies.into();
+    Ok(())
+}
+
+/// Which table of the unit an [`Owned`] reference is about: the two spaces a manifest names by
+/// ordinal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Space {
+    Func,
+    Tls,
+}
+
+/// A reference from a manifest table to something a layer owns: this layer's own ordinal, or a symbol a
+/// layer below owns. Absolute ids are the sum of the layers under the manifest, which a shared
+/// manifest cannot know, so its tables store ordinals and symbols and the loader rebuilds the ids.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Owned {
+    Local(u32),
+    Symbol { kind: SymbolKind, name: Box<str> },
+}
+
+/// The two symbol indexes a load rebuilds from the canonical tables: exported function symbols and TLS
+/// symbols, both under the prefix this layer was loaded at.
+pub(crate) type SymbolIndexes = (
+    HashMap<Box<str>, crate::vm::ir::FuncId>,
+    HashMap<Box<str>, crate::vm::ir::TlsId>,
+);
+
+/// The module's id-bearing tables in canonical form. [`File`] serializes the module with these
+/// drained, so the manifest carries no absolute id at all.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Tables {
+    /// Exported symbol → the function it names.
+    pub exports: Vec<(Box<str>, Owned)>,
+    /// Entry link address (inside this layer's own domains) → the function the entry names.
+    pub fn_entry_links: Vec<(LinkAddr, Owned)>,
+    /// Entry-stub recipe functions, parallel to `module.entry_stub_sites`.
+    pub entry_stub_funcs: Vec<Owned>,
+    /// TLS symbol → the slot it names.
+    pub tls_syms: Vec<(Box<str>, Owned)>,
+}
+
+pub(crate) fn project_owned(
+    space: Space,
+    id: u32,
+    unit: &Unit,
+    symbols: &Symbols,
+) -> Result<Owned, String> {
+    let (start, len) = match space {
+        Space::Func => unit.funcs,
+        Space::Tls => unit.tls,
+    };
+    if let Some(local) = id.checked_sub(start).filter(|at| *at < len) {
+        return Ok(Owned::Local(local));
+    }
+    let target = match space {
+        Space::Func => Target::Func(id),
+        Space::Tls => Target::Tls(id),
+    };
+    match (symbols.name_of(target), space) {
+        (Some(Binding::Symbol { kind, name }), Space::Func) if kind == SymbolKind::Func => {
+            Ok(Owned::Symbol { kind, name })
+        }
+        (Some(Binding::Symbol { kind, name }), Space::Tls) if kind == SymbolKind::Tls => {
+            Ok(Owned::Symbol { kind, name })
+        }
+        _ => Err(format!(
+            "no symbol names id {id}, which this unit does not own"
+        )),
+    }
+}
+
+fn resolve_owned(space: Space, owned: &Owned, unit: &Unit, symbols: &Symbols) -> Option<u32> {
+    match owned {
+        Owned::Local(local) => {
+            let (start, len) = match space {
+                Space::Func => unit.funcs,
+                Space::Tls => unit.tls,
+            };
+            (*local < len).then(|| start + local)
+        }
+        Owned::Symbol { kind, name } => match (space, kind) {
+            (Space::Func, SymbolKind::Func) => symbols.func(name),
+            (Space::Tls, SymbolKind::Tls) => symbols.tls(name),
+            _ => None,
+        },
+    }
+}
+
+impl Tables {
+    /// Take the module's id-bearing tables out, in canonical form: the module is left with them empty
+    /// (or zeroed) so serializing it carries no absolute id.
+    pub(crate) fn capture(
+        module: &mut crate::vm::ir::Module,
+        unit: &Unit,
+        symbols: &Symbols,
+        tls_by_sym: &std::collections::HashMap<Box<str>, crate::vm::ir::TlsId>,
+    ) -> Result<Tables, String> {
+        let mut tables = Tables::default();
+        for (name, id) in module.exports.drain() {
+            tables
+                .exports
+                .push((name, project_owned(Space::Func, id, unit, symbols)?));
+        }
+        for (addr, id) in std::mem::take(&mut module.fn_entry_links) {
+            tables
+                .fn_entry_links
+                .push((addr, project_owned(Space::Func, id, unit, symbols)?));
+        }
+        for site in &mut module.entry_stub_sites {
+            tables
+                .entry_stub_funcs
+                .push(project_owned(Space::Func, site.func, unit, symbols)?);
+            site.func = 0;
+        }
+        for (name, id) in tls_by_sym {
+            tables
+                .tls_syms
+                .push((name.clone(), project_owned(Space::Tls, *id, unit, symbols)?));
+        }
+        Ok(tables)
+    }
+
+    /// Put the absolute ids back, against the prefix this layer was loaded at and the layers below it.
+    pub(crate) fn restore(
+        &self,
+        module: &mut crate::vm::ir::Module,
+        unit: &Unit,
+        symbols: &Symbols,
+    ) -> Result<SymbolIndexes, String> {
+        let mut exports = HashMap::with_capacity(self.exports.len());
+        for (name, owned) in &self.exports {
+            let id = resolve_owned(Space::Func, owned, unit, symbols).ok_or_else(|| {
+                format!("export `{name}` does not resolve against the stack below")
+            })?;
+            exports.insert(name.clone(), id);
+        }
+        let mut links = Vec::with_capacity(self.fn_entry_links.len());
+        for (addr, owned) in &self.fn_entry_links {
+            let id = resolve_owned(Space::Func, owned, unit, symbols).ok_or_else(|| {
+                format!(
+                    "entry link {:#x} does not resolve against the stack below",
+                    addr.0
+                )
+            })?;
+            links.push((*addr, id));
+        }
+        if module.entry_stub_sites.len() != self.entry_stub_funcs.len() {
+            return Err("entry-stub table size changed between write and load".into());
+        }
+        for (site, owned) in module
+            .entry_stub_sites
+            .iter_mut()
+            .zip(&self.entry_stub_funcs)
+        {
+            site.func = resolve_owned(Space::Func, owned, unit, symbols)
+                .ok_or_else(|| "entry stub does not resolve against the stack below".to_string())?;
+        }
+        let mut tls = HashMap::with_capacity(self.tls_syms.len());
+        for (name, owned) in &self.tls_syms {
+            let id = resolve_owned(Space::Tls, owned, unit, symbols).ok_or_else(|| {
+                format!("TLS symbol `{name}` does not resolve against the stack below")
+            })?;
+            tls.insert(name.clone(), id);
+        }
+        module.exports = exports.clone();
+        module.fn_entry_links = links;
+        Ok((exports, tls))
     }
 }
 
@@ -428,6 +711,88 @@ mod tests {
         symbols.func_names.insert(7, "base::fn".into());
         symbols.funcs.insert("base::fn".into(), 7);
         symbols
+    }
+
+    fn sig() -> crate::vm::ir::ForeignSig {
+        crate::vm::ir::ForeignSig {
+            args: Vec::new(),
+            ret: crate::vm::ir::FfiKind::U64,
+            fixed: None,
+            thunk_args: Vec::new(),
+            unwind: true,
+        }
+    }
+
+    #[test]
+    fn the_canonical_tables_rebuild_under_a_different_prefix() {
+        // A unit whose functions start at 100 and TLS slots at 20, with an export, an entry link, an
+        // entry stub and a TLS symbol that name its own items, plus one export naming a lower layer's
+        // function by symbol.
+        let unit = unit();
+        let mut symbols = Symbols::default();
+        symbols.func_names.insert(7, "base::fn".into());
+        symbols.funcs.insert("base::fn".into(), 7);
+        let mut module = crate::vm::ir::Module::default();
+        module.exports.insert("mine".into(), 11);
+        module.exports.insert("theirs".into(), 7);
+        module
+            .fn_entry_links
+            .push((LinkAddr(unit.frozen.0 + 0x40), 12));
+        module.entry_stub_sites.push(crate::vm::ir::EntryStubSite {
+            link_addr: LinkAddr(unit.code.0 + 0x20),
+            func: 13,
+            sig: sig(),
+        });
+        let tls_by_sym = HashMap::from([(Box::<str>::from("T"), 101u32)]);
+
+        let tables = Tables::capture(&mut module, &unit, &symbols, &tls_by_sym).unwrap();
+        assert!(module.exports.is_empty(), "exports stay in the manifest");
+        assert!(
+            module.fn_entry_links.is_empty(),
+            "links stay in the manifest"
+        );
+        assert_eq!(module.entry_stub_sites[0].func, 0);
+        let stored: HashMap<&str, &Owned> = tables
+            .exports
+            .iter()
+            .map(|(name, owned)| (name.as_ref(), owned))
+            .collect();
+        assert_eq!(stored["mine"], &Owned::Local(1));
+        assert_eq!(
+            stored["theirs"],
+            &Owned::Symbol {
+                kind: SymbolKind::Func,
+                name: "base::fn".into()
+            }
+        );
+
+        // The same stack: every id comes back where it was.
+        let (exports, tls) = tables.restore(&mut module, &unit, &symbols).unwrap();
+        assert_eq!(exports["mine"], 11);
+        assert_eq!(exports["theirs"], 7);
+        assert_eq!(
+            module.fn_entry_links,
+            vec![(LinkAddr(unit.frozen.0 + 0x40), 12)]
+        );
+        assert_eq!(module.entry_stub_sites[0].func, 13);
+        assert_eq!(tls["T"], 101);
+
+        // A stack with 50 more functions and 5 more TLS slots below: the local ids move with the
+        // prefix, the lower layer's symbol does not.
+        let moved = Unit {
+            funcs: (60, 4),
+            tls: (105, 2),
+            ..unit
+        };
+        let (exports, tls) = tables.restore(&mut module, &moved, &symbols).unwrap();
+        assert_eq!(exports["mine"], 61);
+        assert_eq!(exports["theirs"], 7);
+        assert_eq!(
+            module.fn_entry_links,
+            vec![(LinkAddr(unit.frozen.0 + 0x40), 62)]
+        );
+        assert_eq!(module.entry_stub_sites[0].func, 63);
+        assert_eq!(tls["T"], 106);
     }
 
     #[test]

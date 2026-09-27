@@ -30,45 +30,11 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use crate::store::entry;
 use crate::utils::content::{FileStamp, digest_hex};
 use crate::vm::ir;
 
 use super::manifest;
-
-/// The closure manifest file: header material, the module without its bodies, and one stored record
-/// per function in FuncId order (parallel to `module.function_names`). The bodies themselves are in
-/// the fragment store, which is what makes two programs with the same closure share them.
-#[derive(Serialize, Deserialize)]
-struct DepsFile {
-    build_id: String,
-    /// Exact identity of the stack below (= [base]); a mismatch is wrong at every value, so it must be equal
-    base_key: String,
-    lowering_fp: (bool, bool, bool),
-    /// Pre-key material for comparison (hash-collision immune): sorted --extern artifact stamps
-    extern_stamps: Vec<FileStamp>,
-    module: ir::Module,
-    funcs: Vec<manifest::Record>,
-    fn_entry_syms: Vec<(Box<str>, u64)>,
-    static_syms: Vec<(Box<str>, u64)>,
-    tls_syms: Vec<(Box<str>, ir::TlsId)>,
-}
-
-/// Borrowed shape for writing (ir::Module is not Clone — FrozenArena owns the mmap).
-#[derive(Serialize)]
-struct DepsFileRef<'a> {
-    build_id: &'a str,
-    base_key: &'a str,
-    lowering_fp: (bool, bool, bool),
-    extern_stamps: &'a [FileStamp],
-    module: &'a ir::Module,
-    funcs: &'a [manifest::Record],
-    fn_entry_syms: &'a [(Box<str>, u64)],
-    static_syms: &'a [(Box<str>, u64)],
-    tls_syms: &'a [(Box<str>, ir::TlsId)],
-}
 
 /// The unit view of the layer being stored or loaded: its own id ranges and fixed domains, which is
 /// what makes a binding's local half identical on both sides.
@@ -170,7 +136,7 @@ pub fn try_load(
 ) -> Option<crate::image::BaseImage> {
     let (key, stamps) = pre_key(rustc_args, &base.key)?;
     let data = std::fs::read(file_path(&key)).ok()?;
-    let mut f: DepsFile = postcard::from_bytes(&data).ok()?;
+    let mut f: manifest::File = postcard::from_bytes(&data).ok()?;
     // Exact-equality validation: build id, base key, stamp list (collision immune), layered lowering fingerprint
     if !entry::is_current_generation(&f.build_id)
         || f.base_key != base.key
@@ -198,20 +164,10 @@ pub fn try_load(
     };
     let unit = unit_of(prefix, &f.module, frozen);
     let symbols = manifest::Symbols::of(std::iter::once(base));
-    let ids: Vec<[u8; 32]> = f.funcs.iter().map(|record| record.fragment).collect();
-    let fragments = crate::store::frags::Index::load().read_many(&ids);
-    let mut bodies = Vec::with_capacity(f.funcs.len());
-    for (index, record) in f.funcs.iter().enumerate() {
-        // A manifest names its bodies by content address: a missing or unreadable fragment is a miss,
-        // never a partially assembled layer.
-        let fragment = fragments.get(&record.fragment)?;
-        let name = f.module.function_names.get(index).map_or("?", |name| name);
-        bodies.push(manifest::rehydrate(fragment, &record.bindings, name, &unit, &symbols).ok()?);
-    }
-    if f.module.function_names.len() != f.funcs.len() {
-        return None;
-    }
-    f.module.funcs = bodies.into();
+    // The bodies come back from the fragment store, then the id-bearing tables from the canonical
+    // form: a missing fragment or an unresolvable symbol is a miss, never a partial layer.
+    manifest::rehydrate_module(&mut f.module, &f.funcs, &unit, &symbols).ok()?;
+    let (_, tls_syms) = f.tables.restore(&mut f.module, &unit, &symbols).ok()?;
     // The image is verified against the stack it is about to join: its frozen bytes may reference an
     // entry the base owns (`fn_entry_addr` reuses a base entry so one function keeps one address
     // identity), which is legitimate exactly because the base is below it.
@@ -247,7 +203,7 @@ pub fn try_load(
         fn_by_sym: module.exports.clone(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
         static_by_sym: f.static_syms.into_iter().collect(),
-        tls_by_sym: f.tls_syms.into_iter().collect(),
+        tls_by_sym: tls_syms,
         lowering_fp: f.lowering_fp,
         key,
         module,
@@ -304,61 +260,53 @@ pub fn store_and_wrap(
             return degraded(bi);
         };
         let symbols = manifest::Symbols::of(stack.layers());
-        // The bodies leave the module so the manifest can be serialized without them, and come back
-        // right after: this session keeps running the layer it just wrote.
-        let mut bodies = Vec::new();
-        bi.module.funcs.drain_into(&mut bodies);
-        let mut records = Vec::with_capacity(bodies.len());
+        // The bodies and the id-bearing tables leave the module so the manifest can be serialized
+        // without either, and come back right after: this session keeps running the layer it just
+        // wrote.
         let mut session = crate::store::frags::Session::default();
-        let mut failure = None;
-        for body in &bodies {
-            match manifest::project(body, &unit, &symbols) {
-                Ok(projected) => {
-                    records.push(projected.record);
-                    session.add(projected.bytes);
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    break;
-                }
-            }
+        let projected = manifest::project_module(&mut bi.module, &unit, &symbols, &mut session)
+            .and_then(|records| {
+                let tables =
+                    manifest::Tables::capture(&mut bi.module, &unit, &symbols, &bi.tls_by_sym)?;
+                Ok((records, tables))
+            });
+        if let Err(error) = &projected
+            && crate::options::a2_debug()
+        {
+            eprintln!("[a2-debug] closure manifest not written: {error}");
         }
-        let manifest_bytes = failure
-            .is_none()
-            .then(|| {
-                let mut fn_entry_syms = bi
-                    .entry_by_sym
-                    .iter()
-                    .map(|(s, a)| (s.clone(), *a))
-                    .collect::<Vec<_>>();
-                fn_entry_syms.sort_unstable();
-                let mut static_syms = bi
-                    .static_by_sym
-                    .iter()
-                    .map(|(s, a)| (s.clone(), *a))
-                    .collect::<Vec<_>>();
-                static_syms.sort_unstable();
-                let mut tls_syms = bi
-                    .tls_by_sym
-                    .iter()
-                    .map(|(s, id)| (s.clone(), *id))
-                    .collect::<Vec<_>>();
-                tls_syms.sort_unstable();
-                let file = DepsFileRef {
-                    build_id: crate::options::build::BUILD_ID,
-                    base_key,
-                    lowering_fp: fp,
-                    extern_stamps: &stamps,
-                    module: &bi.module,
-                    funcs: &records,
-                    fn_entry_syms: &fn_entry_syms,
-                    static_syms: &static_syms,
-                    tls_syms: &tls_syms,
-                };
-                postcard::to_stdvec(&file).ok()
-            })
-            .flatten();
-        bi.module.funcs = bodies.into();
+        let manifest_bytes = projected.ok().map(|(records, tables)| {
+            let mut fn_entry_syms = bi
+                .entry_by_sym
+                .iter()
+                .map(|(s, a)| (s.clone(), *a))
+                .collect::<Vec<_>>();
+            fn_entry_syms.sort_unstable();
+            let mut static_syms = bi
+                .static_by_sym
+                .iter()
+                .map(|(s, a)| (s.clone(), *a))
+                .collect::<Vec<_>>();
+            static_syms.sort_unstable();
+            let file = manifest::FileRef {
+                build_id: crate::options::build::BUILD_ID,
+                base_key,
+                unit_key: None,
+                home: 0,
+                lowering_fp: fp,
+                extern_stamps: &stamps,
+                module: &bi.module,
+                funcs: &records,
+                tables: &tables,
+                fn_entry_syms: &fn_entry_syms,
+                static_syms: &static_syms,
+            };
+            manifest::encode(&file)
+        });
+        let manifest_bytes = match manifest_bytes {
+            Some(Ok(bytes)) => Some(bytes),
+            _ => None,
+        };
         if let (Ok(()), Some(bytes)) = (
             session.publish().map(|published| {
                 if crate::options::a2_debug() {
@@ -378,10 +326,6 @@ pub fn store_and_wrap(
                 bi.key = key;
                 return bi;
             }
-        } else if crate::options::a2_debug()
-            && let Some(error) = failure
-        {
-            eprintln!("[a2-debug] split image not stored: {error}");
         }
     }
     degraded(bi)
