@@ -356,12 +356,20 @@ impl EngineControl {
         }
     }
 
+    /// The caller must hold an [`ExecutionLease`], a [`FinalizerPermit`] or an equivalent lifecycle
+    /// count on this Engine, which is what makes the pointer below valid.
     fn shared_after_lease(&self) -> Arc<Shared> {
         let shared = self.shared.load(std::sync::atomic::Ordering::Acquire);
         if shared.is_null() {
             eprintln!("mirvm[m4-engine]: active Engine lease lost its Shared state");
             std::process::abort();
         }
+        // SAFETY: `install_owner` published this pointer from a live `Arc<Shared>` before the first
+        // lease could be taken, and `finish_close` is the only writer that clears it. That writer
+        // runs in the finalizer, after the phase reached FINALIZING with every lifecycle count
+        // released, so a caller that holds a count — as this one does — cannot be inside this
+        // function while the pointer is cleared, and `owner`'s strong reference is still the
+        // Engine's when it is incremented below.
         unsafe { Arc::increment_strong_count(shared) };
         unsafe { Arc::from_raw(shared) }
     }

@@ -18,7 +18,7 @@ pub(crate) use stats::*;
 
 fn active() -> (*mut crate::vm::ctx::Ctx, &'static Shared) {
     let ctx = crate::vm::ctx::current();
-    (ctx, unsafe { &*(*ctx).shared })
+    (ctx, unsafe { (*ctx).shared })
 }
 
 fn active_shared() -> &'static Shared {

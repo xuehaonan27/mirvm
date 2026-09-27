@@ -34,8 +34,14 @@ fn one_host_thread_keeps_distinct_contexts_for_distinct_engines() {
     let second_ctx = attach(&second);
 
     assert_ne!(first_ctx, second_ctx);
-    assert_eq!(unsafe { (*first_ctx).shared }, Arc::as_ptr(&first));
-    assert_eq!(unsafe { (*second_ctx).shared }, Arc::as_ptr(&second));
+    assert!(std::ptr::eq(
+        unsafe { (*first_ctx).shared },
+        Arc::as_ptr(&first)
+    ));
+    assert!(std::ptr::eq(
+        unsafe { (*second_ctx).shared },
+        Arc::as_ptr(&second)
+    ));
 }
 
 #[test]

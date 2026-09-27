@@ -24,7 +24,7 @@ use crate::vm::unwind::engine_abort;
 /// Calls the guest function `func` with already-flattened arguments (a pair takes 2 slots, an
 /// indirect argument passes its address) and returns `(lo, hi)`.
 pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
-    let jit = unsafe { &(*(*ctx).shared).jit };
+    let jit = unsafe { &(*ctx).shared.jit };
     if jit.enabled {
         let call_compiled = |entry: u64| -> (u64, u64) {
             // i2c: the packed entry (published fast -> packed, and the Acquire load has
@@ -39,7 +39,7 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         // compile aborts loudly at every later call site. The worker writes the sentinel only
         // in sync mode, so it never appears otherwise.
         let fail_abort = |ctx: *mut Ctx| -> ! {
-            let shared = unsafe { &*(*ctx).shared };
+            let shared = unsafe { (*ctx).shared };
             engine_abort(&format!(
                 "JIT strict: f{func}({}) meets compilation threshold but failed to be compiled",
                 shared.module.funcs[func as usize].name
@@ -131,7 +131,7 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
 /// Calls the guest function whose entry address is `addr`. A target that is not a known guest
 /// entry breaks an engine invariant, and `caller` names the site that asked.
 pub(crate) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str) -> (u64, u64) {
-    let instance: &Instance = unsafe { &(*(*ctx).shared).instance };
+    let instance: &Instance = unsafe { &(*ctx).shared.instance };
     let Some(&fid) = instance.fn_addrs.get(&addr) else {
         engine_abort(&format!(
             "indirect call target {addr:#x} is not a known fn entry (caller {caller})"
@@ -143,6 +143,6 @@ pub(crate) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str)
 /// The return shape a call to `func` must be written back under.
 #[inline]
 pub(crate) fn ret_abi_of(ctx: *mut Ctx, func: u32) -> RetAbi {
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let module: &Module = unsafe { &(*ctx).shared.module };
     module.funcs[func as usize].ret
 }

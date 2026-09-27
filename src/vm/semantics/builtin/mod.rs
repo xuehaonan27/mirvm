@@ -49,8 +49,8 @@ pub(crate) fn exec_builtin(
     crate::telemetry::capture::rebuild_on_boundary();
     // Reserved in the signature for call-site symmetry; the body reads the module from ctx.
     let _ = body;
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
-    let instance: &Instance = unsafe { &(*(*ctx).shared).instance };
+    let module: &Module = unsafe { &(*ctx).shared.module };
+    let instance: &Instance = unsafe { &(*ctx).shared.instance };
     let a = |i: usize| av[i];
     // RaiseException starts its unwind through this edge.
     edge.set(unwind.cleanup_edge());

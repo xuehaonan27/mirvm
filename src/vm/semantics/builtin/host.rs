@@ -52,7 +52,7 @@ pub(super) fn exec(ctx: *mut Ctx, builtin: &Builtin, av: &[u64]) -> u64 {
                 // eh_frames stay valid while the queue and worker are replaced. A non-sync
                 // child keeps the unchanged interpret-as-fallback semantics.
                 #[cfg(feature = "cranelift")]
-                if unsafe { &*(*ctx).shared }.jit.sync {
+                if unsafe { (*ctx).shared }.jit.sync {
                     let shared = unsafe { (*ctx).shared_arc() };
                     crate::vm::jit::start(&shared);
                 }

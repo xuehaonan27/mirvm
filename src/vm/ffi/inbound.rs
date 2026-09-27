@@ -99,7 +99,7 @@ pub(crate) fn call_guest_ffi(
     vals: &[u64],
     ret_addr: Option<u64>,
 ) -> (u64, u64) {
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let module: &Module = unsafe { &(*ctx).shared.module };
     let body: &FuncBody = &module.funcs[func as usize];
     let mut av: Vec<u64> = Vec::with_capacity(vals.len() + body.params.len() + 1);
     if let RetAbi::Indirect { .. } = body.ret {
