@@ -129,6 +129,15 @@ The bytecode is already relocatable in principle; the design only exploits invar
   Frozen-to-frozen pointers are enumerated `FrozenReloc`s; foreign symbols go through the GOT and are
   re-resolved at startup; fn-ptr values are `EntryStubSite` recipes rebuilt per Engine.
 
+The same rule binds the manifest's *tables*, and landing the unit store showed why: a unit's absolute
+ids are the sum of the layers below it and its link addresses are the spline slot it was lowered in,
+so a manifest that stored either could only be loaded above the exact stack that produced it. Storing
+exports, entry links, entry-stub sites, frozen relocations, TLS templates, GOT slots and the export
+indexes in the same local form (a unit-local ordinal, an offset inside one of the unit's own domains,
+or a symbol a lower layer owns) is what makes "a unit is valid above any stack that satisfies its
+symbols" literal rather than aspirational; the loader rebuilds them from the prefix and the slot it
+chose. The closure manifest already looks position-independent only because its stack is fixed.
+
 A **fragment** is one `FuncBody` in canonical form: the `name` field is lifted into the manifest, and
 each of the five reference sites is rewritten to a dense ordinal in order of first appearance.
 `CallForeign`/GOT names are stable C symbols and stay inline. Fragment bytes = one encoding-version
@@ -258,8 +267,12 @@ deleted and replaced, not phased out.
    tracks use the same format and key material as before, so behaviour is unchanged.
 3. **Per-crate units as manifests** on the cargoless track: the reserved build path wired as a
    multi-way split with the home rule, symbolic cross-unit edges, `cache/units/`, k by load order.
-   The storage form is already the manifest one, so this step generalizes the *split*, gated by the
-   §5 equivalence gate.
+   The split is already per home and the home rule is already the placement rule, so what this step
+   still needs is the canonical tables of §3.3 — a unit manifest whose tables keep absolute ids or
+   link addresses is refused by the loader above any stack but its own — plus content-named manifests
+   (a grown unit adds a digest instead of overwriting the one a running program pinned) and the
+   `--units` purge flag. Gated by the §5 equivalence gate and a sharing gate: two programs with
+   overlapping closures must load each other's units rather than lower them again.
 4. **Collection**: mark-sweep from current-generation manifests, the `--units` flag, the shared/
    exclusive lock discipline of §3.4, and the live/dead accounting `cache status` will report.
 5. Extensions, each behind its own measurement: frozen-region chunk dedup; the L2 entry as a
