@@ -13,9 +13,9 @@ impl<'tcx> Linker<'tcx> {
     /// reuses the base id without enqueuing, and `symbol_name` is only computed when a base
     /// image exists, so the base-less path pays nothing.
     ///
-    /// Split mode routes non-base instances by purity: an image-class (pure) instance gets
-    /// a tagged id and joins the image queue, while a delta-class (local or tainted)
-    /// instance takes an untagged id and joins the delta queue.
+    /// Split mode routes non-base instances by home: a homed instance gets a tagged id and joins that
+    /// home's queue, while a delta-class (local, tainted or residue) instance takes an untagged id and
+    /// joins the delta queue.
     pub(crate) fn func_id(&mut self, inst: Instance<'tcx>) -> ir::FuncId {
         if let Some(&id) = self.ids.get(&inst) {
             return id;
@@ -26,22 +26,27 @@ impl<'tcx> Linker<'tcx> {
             self.ids.insert(inst, bid);
             return bid;
         }
+        let home = self.split.is_some().then(|| self.place(inst)).flatten();
         if let Some(s) = &mut self.split {
-            let id = if classify_purity(inst).is_image() {
-                let j = s.image_fn_next;
-                s.image_fn_next += 1;
-                let id = IMAGE_TAG | j;
-                s.image_queue.push_back((id, inst));
-                if s.image_funcs.len() <= j as usize {
-                    s.image_funcs.resize_with(j as usize + 1, || None);
+            let id = match home {
+                Some(home) => {
+                    let layer = s.home_mut(home);
+                    let ordinal = layer.fn_next;
+                    layer.fn_next += 1;
+                    let id = home_tag(home, ordinal);
+                    layer.queue.push_back((id, inst));
+                    if layer.funcs.len() <= ordinal as usize {
+                        layer.funcs.resize_with(ordinal as usize + 1, || None);
+                    }
+                    layer.insts.push(inst);
+                    id
                 }
-                s.image_insts.push(inst);
-                id
-            } else {
-                let id = self.next_fn;
-                self.next_fn += 1;
-                self.queue.push_back((id, inst));
-                id
+                None => {
+                    let id = self.next_fn;
+                    self.next_fn += 1;
+                    self.queue.push_back((id, inst));
+                    id
+                }
             };
             self.ids.insert(inst, id);
             return id;

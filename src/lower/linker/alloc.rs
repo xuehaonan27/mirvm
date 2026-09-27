@@ -14,7 +14,7 @@ impl<'tcx> Linker<'tcx> {
     /// current context decides the region.
     pub(crate) fn frozen_alloc_bytes(&mut self, bytes: &[u8]) -> u64 {
         let arena: &mut FrozenArena = match &mut self.split {
-            Some(s) if s.current_image => &mut s.image_frozen,
+            Some(s) if s.current.is_some() => &mut s.cur().frozen,
             _ => &mut self.frozen,
         };
         let p = arena.alloc(bytes.len() as u64, 16);
@@ -36,29 +36,24 @@ impl<'tcx> Linker<'tcx> {
     ///   region is **promoted** (materialized twice, which is safe because constants are
     ///   read-only).
     pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, Error> {
-        let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
-        if ctx_image {
-            if let Some(&a) = self
-                .split
-                .as_ref()
-                .expect("split")
-                .image_alloc_addrs
-                .get(&id)
-            {
-                return Ok(a);
-            }
-        } else {
-            if let Some(&a) = self.alloc_addrs.get(&id) {
-                return Ok(a);
-            }
-            if let Some(s) = &self.split
-                && let Some(&a) = s.image_alloc_addrs.get(&id)
-            {
-                return Ok(a);
-            }
+        let ctx_home = self.split.as_ref().and_then(|s| s.current);
+        // Reuse an existing materialization: the delta's own table first (only a delta body reads it —
+        // the delta is above the homes), then the current home's table and every lower home's, since a
+        // body may reference what a layer below it materialized.
+        if ctx_home.is_none()
+            && let Some(&a) = self.alloc_addrs.get(&id)
+        {
+            return Ok(a);
+        }
+        if let Some(a) = self
+            .split
+            .as_ref()
+            .and_then(|s| s.lookup_alloc(ctx_home, id))
+        {
+            return Ok(a);
         }
         match self.tcx.global_alloc(id) {
-            GlobalAlloc::Memory(alloc) => self.materialize_in(id, alloc, ctx_image),
+            GlobalAlloc::Memory(alloc) => self.materialize_in(id, alloc, ctx_home),
             GlobalAlloc::Static(def_id) => {
                 // An extern static is a real symbol reached through the os:: passthrough:
                 // - weak (the null-test pattern for fn symbols such as gettid): the cell
@@ -100,22 +95,28 @@ impl<'tcx> Linker<'tcx> {
                             }) || DENY_EXACT.contains(&name)
                                 || DENY_PREFIX.iter().any(|p| name.starts_with(p))
                                 || FORCE_ABSENT_WEAK.contains(&name);
-                        let cell = if engine_owned {
-                            // Null-test cell: the symbol is absent (placed by krate and
-                            // recorded in both tables as above).
-                            if let Some(s) = &mut self.split
-                                && def_id.krate != rustc_hir::def_id::LOCAL_CRATE
-                            {
-                                s.image_frozen.alloc(8, 8)
-                            } else {
-                                self.frozen.alloc(8, 8)
-                            }
+                        let home = self
+                            .split
+                            .is_some()
+                            .then(|| self.home_of_krate(def_id.krate))
+                            .flatten();
+                        let cell = if let Some(home) = home {
+                            // Null-test cell: the symbol is absent (placed by krate and recorded in
+                            // both tables as above).
+                            let layer = self
+                                .split
+                                .as_mut()
+                                .expect("a home cell requires split")
+                                .home_mut(home);
+                            layer.frozen.alloc(8, 8)
+                        } else if engine_owned {
+                            self.frozen.alloc(8, 8)
                         } else {
                             // GOT slot, initialized to 0; the startup phase refills it by
                             // name with the resolved value or 0.
                             self.foreign_slot(name, 0, true)
                         };
-                        self.record_both(id, cell);
+                        self.record_both(id, cell, home);
                         return Ok(cell);
                     }
                     // Resolution order matches the fn-address path: hidden fallback table,
@@ -154,7 +155,8 @@ impl<'tcx> Linker<'tcx> {
                     // frozen byte relocation records a fixup, and the startup phase refills
                     // both by name.
                     let _ = self.foreign_slot(name, p, false);
-                    self.record_both(id, p);
+                    let home = self.home_of_krate(def_id.krate);
+                    self.record_both(id, p, home);
                     self.foreign_alloc_sym.insert(id, (name.into(), false));
                     return Ok(p);
                 }
@@ -164,7 +166,8 @@ impl<'tcx> Linker<'tcx> {
                 if !self.base_statics.is_empty() {
                     let sym = self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name;
                     if let Some(&addr) = self.base_statics.get(sym) {
-                        self.record_both(id, addr);
+                        let home = self.home_of_krate(def_id.krate);
+                        self.record_both(id, addr, home);
                         return Ok(addr);
                     }
                 }
@@ -173,36 +176,37 @@ impl<'tcx> Linker<'tcx> {
                 // static goes to the image region. An image context that meets a local
                 // static means the purity closure is broken by a classifier bug, so fail
                 // loudly.
-                let to_image = if let Some(s) = &self.split {
+                let home = if let Some(s) = &self.split {
                     if def_id.krate == rustc_hir::def_id::LOCAL_CRATE {
-                        if s.current_image {
+                        if s.current.is_some() {
                             panic!(
-                                "A2 closure violation: image instance references a local static \
+                                "A2 closure violation: home instance references a local static \
                                  (classifier missed)"
                             );
                         }
-                        false
+                        None
                     } else {
-                        true
+                        self.home_of_krate(def_id.krate)
                     }
                 } else {
-                    false
+                    None
                 };
                 // A static's bytes come from evaluating its initializer and may be writable
                 // (`static mut`, interior mutability).
                 let alloc = self.tcx.eval_static_initializer(def_id).map_err(|e| {
                     Error::internal(format!("static initializer evaluation failed: {e:?}"))
                 })?;
-                let addr = self.materialize_in(id, alloc, to_image)?;
-                if to_image {
-                    self.record_both(id, addr);
+                let addr = self.materialize_in(id, alloc, home)?;
+                if let Some(home) = home {
+                    self.record_both(id, addr, Some(home));
                 }
                 self.static_defs.push((def_id, addr)); // material for base-image/image export
                 Ok(addr)
             }
             GlobalAlloc::Function { instance } => {
                 let addr = self.fn_entry_addr(instance)?;
-                self.record_both(id, addr);
+                let home = self.home_of_krate(instance.def_id().krate);
+                self.record_both(id, addr, home);
                 // Taking an extern fn's address (its fn-pointer value is the host code
                 // address from dlsym) registers a foreign allocation: constant emission
                 // reads the slot through `foreign_const_operand`, and frozen bytes get a
@@ -220,7 +224,7 @@ impl<'tcx> Linker<'tcx> {
                 // breaks the purity closure. Vtable address identity is unspecified, since
                 // rustc itself duplicates vtables per CGU, so the context decides the region
                 // (promoting to two copies is allowed) and `krate` plays no part.
-                if self.split.as_ref().is_some_and(|s| s.current_image)
+                if self.split.as_ref().is_some_and(|s| s.current.is_some())
                     && ty.walk().any(arg_mentions_local)
                 {
                     panic!(
@@ -235,38 +239,48 @@ impl<'tcx> Linker<'tcx> {
                     .map(|b| self.tcx.instantiate_bound_regions_with_erased(b));
                 let vt_id = self.tcx.vtable_allocation((ty, principal));
                 let addr = self.ensure_alloc(vt_id)?;
-                self.record_addr(id, addr, ctx_image);
+                self.record_addr(id, addr, ctx_home);
                 Ok(addr)
             }
             GlobalAlloc::TypeId { .. } => {
                 // A TypeId "allocation" has base 0: after relocation, base + addend is the
                 // pointer-width piece of the 128-bit type hash itself, as in tier-0
                 // `resolve_addr` and Miri.
-                self.record_addr(id, 0, ctx_image);
+                self.record_addr(id, 0, ctx_home);
                 Ok(0)
             }
         }
     }
 
-    /// Records the address in the dedup table of the context: the delta table unless
-    /// split mode selects the image table.
-    pub(super) fn record_addr(&mut self, id: AllocId, addr: u64, ctx_image: bool) {
-        match &mut self.split {
-            Some(s) if ctx_image => {
-                s.image_alloc_addrs.insert(id, addr);
+    /// Records the address in the dedup table of the context: the delta's own table, or the current
+    /// home's.
+    pub(super) fn record_addr(&mut self, id: AllocId, addr: u64, home: Option<usize>) {
+        match home {
+            Some(home) => {
+                self.split
+                    .as_mut()
+                    .expect("a home table requires split")
+                    .home_mut(home)
+                    .alloc_addrs
+                    .insert(id, addr);
             }
-            _ => {
+            None => {
                 self.alloc_addrs.insert(id, addr);
             }
         }
     }
 
-    /// Records an identity-bearing address in both tables, so either context reproduces
-    /// the same address and the identity stays single.
-    pub(super) fn record_both(&mut self, id: AllocId, addr: u64) {
+    /// Records an identity-bearing address in the owning home's table *and* the delta's, so either
+    /// side reproduces the same address and the identity stays single.
+    pub(super) fn record_both(&mut self, id: AllocId, addr: u64, home: Option<usize>) {
         self.alloc_addrs.insert(id, addr);
-        if let Some(s) = &mut self.split {
-            s.image_alloc_addrs.insert(id, addr);
+        if let Some(home) = home {
+            self.split
+                .as_mut()
+                .expect("a home table requires split")
+                .home_mut(home)
+                .alloc_addrs
+                .insert(id, addr);
         }
     }
 }

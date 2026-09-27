@@ -47,15 +47,15 @@ impl<'tcx> Linker<'tcx> {
             return Ok(addr);
         }
         let addr = if let Some(s) = &mut self.split {
-            if fid & IMAGE_TAG != 0 || fid < self.delta_first_fn {
+            if id_home(fid).is_some() || fid < self.delta_first_fn {
                 // image class, or a base hit whose base has no entry: allocate in the image area for a single
                 // address identity. The delta area is unstable across runs for image bytecode, so it must
                 // never be used there.
-                let a = s.image_frozen.alloc(8, 16);
-                s.image_fn_entries.insert(inst, a);
+                let a = s.cur().frozen.alloc(8, 16);
+                s.cur().fn_entries.insert(inst, a);
                 a
             } else {
-                if s.current_image {
+                if s.current.is_some() {
                     panic!(
                         "A2 closure violation: image instance references delta-class fn entry (classifier missed): {}",
                         self.tcx.symbol_name(inst).name
@@ -100,13 +100,14 @@ impl<'tcx> Linker<'tcx> {
         sig: ir::ForeignSig,
     ) -> u64 {
         let image_side =
-            self.split.is_some() && (fid & IMAGE_TAG != 0 || fid < self.delta_first_fn);
+            self.split.is_some() && (id_home(fid).is_some() || fid < self.delta_first_fn);
         if let Some(&i) = self.entry_stub_ids.get(&inst) {
             return if image_side {
                 self.split
                     .as_ref()
                     .expect("split")
-                    .image_code_arena
+                    .cur_ro()
+                    .code_arena
                     .addr_of(i as u64)
             } else {
                 self.code_arena.addr_of(i as u64)
@@ -114,18 +115,18 @@ impl<'tcx> Linker<'tcx> {
         }
         if image_side {
             let s = self.split.as_mut().expect("split");
-            let i = s.image_stub_sites.len() as u32;
-            let addr = s.image_code_arena.addr_of(i as u64);
-            s.image_stub_sites.push(ir::EntryStubSite {
+            let i = s.cur().stub_sites.len() as u32;
+            let addr = s.cur().code_arena.addr_of(i as u64);
+            s.cur().stub_sites.push(ir::EntryStubSite {
                 link_addr: ir::LinkAddr(addr),
                 func: fid,
                 sig,
             });
-            s.image_fn_entries.insert(inst, addr);
+            s.cur().fn_entries.insert(inst, addr);
             self.entry_stub_ids.insert(inst, i);
             addr
         } else {
-            if self.split.as_ref().is_some_and(|s| s.current_image) {
+            if self.split.as_ref().is_some_and(|s| s.current.is_some()) {
                 panic!(
                     "A2 closure violation: image instance references delta-class fn entry (classifier missed): {}",
                     self.tcx.symbol_name(inst).name
