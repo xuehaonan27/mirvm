@@ -75,7 +75,9 @@ cached at `~/.mirvm/data/sysroot-<target>` and keyed by content hash. `build.rs`
 `MIRVM_DEFAULT_SYSROOT` and an rpath to that sysroot's `librustc_driver.so`, so the binary is
 ABI-locked to the nightly that built it. The wrapper phase ignores the rustc name Cargo passes and
 always uses the pinned rustc, because proc-macro dylibs and rmeta must be the same compiler version as
-the interpreting session.
+the interpreting session. The layout inside that sysroot has one owner: `sysroot::toolchain` derives
+`bin/rustc` and its siblings from the constant, and a consumer names it rather than joining those
+paths again.
 
 ### 2.4 Store layout
 
@@ -89,7 +91,7 @@ because that is what decides whether a tree may be deleted:
 | `build/` | project and session space | `scripts/` (frontmatter materialization, keyed by path), `target/mirvm` (Cargo track), `target/cargoless/` (own scheduler), `target/native` (differential builds), `sysroot-build/` |
 | `run/` | process scratch | `runtime-native/` (per-Engine copies of required native libraries) and `lower-native/` (private copies of self-produced objects) |
 
-The layout is a register in `src/store.rs`, one line per family: a lifetime class, the directory, the
+The layout is a register in `src/store/mod.rs`, one line per family: a lifetime class, the directory, the
 shape of its entries, and — for a family that a flag names — that flag. `mirvm cache status` and
 `mirvm cache purge` iterate that register, so a family is reported and cleanable by construction, and
 a directory no family claims is reported rather than silently ignored (an older layout, or a leftover

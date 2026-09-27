@@ -1,9 +1,12 @@
 //! Single source of truth for every external input mirvm defines.
 //!
 //! Every environment variable and command-line option mirvm defines, and every test-only `MIRVM_*`
-//! name, is declared once in the `entries!` table below. [`get`] resolves them into
-//! [`Options`] once per process, `USAGE` is generated from the register, `mirvm options` prints it,
-//! and `quality.rust` fails when `src/` spells an `MIRVM_*` name anywhere else.
+//! name, is declared once in the `entries!` table below: the row carries the variable, the identity,
+//! the command-line spelling, the default, and how the option is read. The reader clause is what
+//! generates the accessor, so an input has one way to be declared and one way to be read —
+//! `options::<name>()` — and nothing outside this file resolves an option or reads the environment
+//! for one. `USAGE` and `mirvm options` are generated from the register, and `repo-quality` fails
+//! when `src/` spells an `MIRVM_*` name, or reads the options, anywhere else.
 //!
 //! Names that are not ours are deliberately absent: the `CARGO_*` contract mirvm consumes and
 //! injects belongs to cargo, and the `mirvm test` selection grammar belongs to cargo's command line.
@@ -106,6 +109,9 @@ pub struct Entry {
     /// inferred from `default`, so a flag whose environment value is a word (`MIRVM_OUTPUT=text`)
     /// still renders without a placeholder.
     pub flag: bool,
+    /// The command line exports this option for the child processes it starts, and this one never
+    /// reads it again. A row with a reader says so when its reader is a snapshot by intent.
+    pub child_only: bool,
     pub doc: &'static str,
 }
 
@@ -147,6 +153,9 @@ macro_rules! attr_of {
     }};
     ($entry:ident, default, $arg:expr) => {
         $entry.default = $arg;
+    };
+    ($entry:ident, child_only) => {
+        $entry.child_only = true;
     };
 }
 
@@ -198,6 +207,7 @@ macro_rules! entries {
                         scopes: Vec::new(),
                         default: "",
                         flag: false,
+                        child_only: false,
                         doc: $doc.trim_start(),
                     });
                     let entry = out.last_mut().expect("the entry was just pushed");
@@ -260,10 +270,10 @@ entries! {
     user no_ir_cache              env("MIRVM_NO_IR_CACHE") default("off")
         => reads(bool, |o| o.no_ir_cache);
     /// Bypass the pre-lowered std base image (full cold lowering).
-    user no_base_image            env("MIRVM_NO_BASE_IMAGE") default("off")
+    user no_base_image            env("MIRVM_NO_BASE_IMAGE") default("off") child_only
         => reads(bool, |o| o.no_base_image);
     /// Bypass the dependency image.
-    user no_deps_image            env("MIRVM_NO_DEPS_IMAGE") default("off")
+    user no_deps_image            env("MIRVM_NO_DEPS_IMAGE") default("off") child_only
         => reads(bool, |o| o.no_deps_image);
     /// Disable registry HTTP; resolve from the local cache only and fail loudly on a miss.
     user offline                  env("MIRVM_OFFLINE") default("off")
