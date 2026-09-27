@@ -267,8 +267,14 @@ deleted and replaced, not phased out.
 
 ## 7. Open items
 
-- The residue rule (v1: delta) versus synthesized join units for hot sibling-spanning instances —
-  decide on purity-ledger data, not up front.
+- Residue is two cases. An instance that mentions the local crate, or that spans units no closure
+  covers, stays in the delta (v1). The third case is measured: instances that name no unit at all —
+  std residue the base lacks, which every closure covers — are 227 of the 288 image bodies in the
+  `serde_json` fixture (196 fragments) and 400 of 400 in a one-dependency closure. They currently land
+  in the first unit whose closure covers them, which costs unit-manifest size rather than sharing
+  (the fragments are shared either way). A base-owned home for them — the adaptive-base direction of
+  open-issues D9 — would take them out of every unit manifest, and the same split machinery hosts
+  either choice, so the decision is left to this ledger.
 - Binding-walk cost on the warm path is unmeasured; if it erodes the L2 gate, the counter-move is
   caching bound bodies in the L2 entry (space traded back for time, per program).
 - open-issues G5 asks whether cross-project sharing is needed at all and whether tainted images

@@ -32,9 +32,10 @@ use std::process::ExitCode;
 
 use super::buildrs::{self, BuildOutput};
 use super::lockfile::Lockfile;
+use super::manifest::DepKind;
 use super::manifest::PackageManifest;
 use super::registry::Registry;
-use super::resolve::resolve;
+use super::resolve::{ResolvePlan, UnitClass, resolve};
 use super::schedule::{self, Layout};
 
 mod build;
@@ -648,6 +649,11 @@ fn drive(
                 .expect("root_lib present means fp must already be computed"),
         )
     });
+    // The session homes its lowered instances against this table, so it is installed (not threaded
+    // through the driver's signatures, the perturbation `open-issues.md` E35 is about) before the bin
+    // session starts. The build graph is this track's own; the Cargo track has none and installs
+    // nothing.
+    install_unit_table(&plan, &fps, &layout);
     let args = schedule::bin_rustc_args(
         manifest,
         &plan,
@@ -670,6 +676,45 @@ fn drive(
         crate::cli::pack_driver(args, program_argv, out.to_path_buf())
     } else {
         crate::cli::run_driver(args, program_argv, false, None, false, true, None)
+    }
+}
+
+/// Build the session's unit table from the resolved plan: one entry per *target* compilation unit (a
+/// proc-macro or build-script unit runs on the host and never enters the stack), in the topological
+/// order the resolver already computed, keyed by the rlib the session will see in `--extern`.
+fn install_unit_table(plan: &ResolvePlan, fps: &[String], layout: &Layout) {
+    let Ok(order) = schedule::topo_order(plan) else {
+        return;
+    };
+    let order: Vec<usize> = order
+        .into_iter()
+        .filter(|&unit| plan.units[unit].class == UnitClass::Normal && !plan.units[unit].proc_macro)
+        .collect();
+    let mut position = vec![usize::MAX; plan.units.len()];
+    for (at, &unit) in order.iter().enumerate() {
+        position[unit] = at;
+    }
+    let units: Vec<(Box<str>, PathBuf, Vec<u32>)> = order
+        .iter()
+        .map(|&unit| {
+            let entry = &plan.units[unit];
+            let deps = entry
+                .deps
+                .iter()
+                .filter(|dep| dep.kind == DepKind::Normal && position[dep.unit] != usize::MAX)
+                .map(|dep| position[dep.unit] as u32)
+                .collect();
+            (
+                entry.lib_name.clone().into_boxed_str(),
+                layout
+                    .deps
+                    .join(format!("lib{}-{}.rlib", entry.lib_name, fps[unit])),
+                deps,
+            )
+        })
+        .collect();
+    if !units.is_empty() {
+        crate::image::units::install(crate::image::units::UnitTable::new(units));
     }
 }
 

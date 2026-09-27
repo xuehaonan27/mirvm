@@ -133,8 +133,19 @@ pub(super) fn classify_purity(inst: Instance<'_>) -> Purity {
 /// Def at the top level that mentions LOCAL_CRATE? (Deep walk() traversal covers all nested bits)
 pub(super) fn arg_mentions_local(arg: rustc_middle::ty::GenericArg<'_>) -> bool {
     use rustc_hir::def_id::LOCAL_CRATE;
+    let mut local = false;
+    ty_def_ids(arg, &mut |did| local |= did.krate == LOCAL_CRATE);
+    local
+}
+
+/// Every `DefId` one generic argument's type mentions, outer type first. The walk is the one
+/// `arg_mentions_local` uses, so the purity class and the home rule see the same crates.
+pub(super) fn ty_def_ids(
+    arg: rustc_middle::ty::GenericArg<'_>,
+    visit: &mut impl FnMut(rustc_hir::def_id::DefId),
+) {
     use rustc_middle::ty::TyKind;
-    let Some(t) = arg.as_type() else { return false };
+    let Some(t) = arg.as_type() else { return };
     let did = match t.kind() {
         TyKind::Adt(def, _) => Some(def.did()),
         &TyKind::FnDef(d, _)
@@ -151,15 +162,103 @@ pub(super) fn arg_mentions_local(arg: rustc_middle::ty::GenericArg<'_>) -> bool 
         }),
         _ => None,
     };
-    if did.is_some_and(|d| d.krate == LOCAL_CRATE) {
-        return true;
+    if let Some(did) = did {
+        visit(did);
     }
     // walk does not descend into trait-object predicate DefId (rustc_type_ir walk.rs Dynamic branch only pushes args)
     if let TyKind::Dynamic(preds, ..) = t.kind() {
-        return preds
-            .principal()
-            .is_some_and(|p| p.skip_binder().def_id.krate == LOCAL_CRATE)
-            || preds.auto_traits().any(|d| d.krate == LOCAL_CRATE);
+        if let Some(principal) = preds.principal() {
+            visit(principal.skip_binder().def_id);
+        }
+        for did in preds.auto_traits() {
+            visit(did);
+        }
     }
-    false
+}
+
+/// The type a shim is glue over: the crate that owns it is the shim's defining crate.
+fn shim_def(inst: Instance<'_>) -> Option<rustc_middle::ty::Ty<'_>> {
+    use rustc_middle::ty::{ShimKind, Ty};
+    let tys: &[Ty<'_>] = match inst.def {
+        InstanceKind::Shim(ShimKind::FnPtr(_, t))
+        | InstanceKind::Shim(ShimKind::Clone(_, t))
+        | InstanceKind::Shim(ShimKind::FnPtrAddr(_, t))
+        | InstanceKind::Shim(ShimKind::AsyncDropGlueCtor(_, t))
+        | InstanceKind::Shim(ShimKind::AsyncDropGlue(_, t)) => &[t],
+        InstanceKind::Shim(ShimKind::FutureDropPoll(_, t1, _)) => &[t1],
+        InstanceKind::Shim(ShimKind::DropGlue(_, Some(t))) => &[t],
+        _ => &[],
+    };
+    tys.first().copied()
+}
+
+/// The unit an instance is homed to, or `None` for residue (see `crate::image::units`).
+///
+/// The defining crate decides when it is a unit; every unit the instance's generic arguments (for a
+/// shim, its type) mention must lie in that unit's closure, because a unit's contents may only
+/// reference the unit or a layer below it. A crate the sysroot owns is below every unit, so it
+/// constrains nothing and its instances are homed to the smallest closure that covers the arguments
+/// (the base has no unit of its own yet); the local crate is above every unit, so mentioning it is
+/// residue.
+pub(super) fn home_of(
+    inst: Instance<'_>,
+    tcx: TyCtxt<'_>,
+    table: &crate::image::units::UnitTable,
+) -> Option<crate::image::units::Home> {
+    use rustc_hir::def_id::LOCAL_CRATE;
+    let mut local = false;
+    let mut def = None;
+    let mut mentioned = std::collections::BTreeSet::new();
+    {
+        let mut visit = |did: rustc_hir::def_id::DefId, defining: bool| {
+            if did.krate == LOCAL_CRATE {
+                local = true;
+                return;
+            }
+            // A sysroot crate (core, std, ...) is not a unit: it is below every unit in the stack.
+            let Some(unit) = unit_of_crate(tcx, did.krate, table) else {
+                return;
+            };
+            if defining && def.is_none() {
+                def = Some(unit);
+            } else {
+                mentioned.insert(unit);
+            }
+        };
+        match inst.def {
+            InstanceKind::Item(d) | InstanceKind::Intrinsic(d) | InstanceKind::Virtual(d, _) => {
+                visit(d, true)
+            }
+            InstanceKind::Shim(_) => {
+                if let Some(ty) = shim_def(inst) {
+                    ty_def_ids(ty.into(), &mut |did| visit(did, true));
+                }
+            }
+        }
+        for arg in inst.args {
+            for nested in arg.walk() {
+                ty_def_ids(nested, &mut |did| visit(did, false));
+            }
+        }
+    }
+    if local {
+        return None;
+    }
+    table.home_of(def, &mentioned)
+}
+
+/// The unit a crate was compiled to, matched by the artifact path the session resolved it from. Two
+/// semver-forked versions of one crate are two units with two paths, so the path is the identity.
+fn unit_of_crate(
+    tcx: TyCtxt<'_>,
+    krate: rustc_span::def_id::CrateNum,
+    table: &crate::image::units::UnitTable,
+) -> Option<u32> {
+    for path in tcx.used_crate_source(krate).paths() {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        if let Some(unit) = table.by_rlib(&path) {
+            return Some(unit);
+        }
+    }
+    None
 }
