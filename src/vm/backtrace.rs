@@ -41,7 +41,7 @@ fn fallback_func_ip(func: u32) -> u64 {
 /// The instruction-pointer token for `func`: the address the symbol image published, when there
 /// is one.
 pub(crate) fn func_synth_ip(ctx: *mut Ctx, func: u32) -> u64 {
-    unsafe { &*(*ctx).shared }.symbols.ip_of(func)
+    unsafe { (*ctx).shared }.symbols.ip_of(func)
 }
 
 #[repr(C)]
@@ -69,7 +69,7 @@ extern "C" fn collect_host_frame(ctx: unwind::Context, arg: unwind::Context) -> 
 /// which are then merged with the interpreter's shadow frames by host stack position. The
 /// callback only ever sees a controlled guest context, never engine host frames.
 pub(crate) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
-    let shared = unsafe { &*(*ctx).shared };
+    let shared = unsafe { (*ctx).shared };
     let mut host: Vec<HostFrame> = Vec::new();
     unsafe {
         unwind::backtrace(

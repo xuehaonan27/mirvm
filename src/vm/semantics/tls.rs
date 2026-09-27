@@ -17,11 +17,11 @@ pub(crate) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
     {
         return a;
     }
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let module: &Module = unsafe { &(*ctx).shared.module };
     let t = module.tls[id as usize];
     let addr = crate::vm::heap::alloc(t.size.max(1), t.align as u64);
     unsafe {
-        let template = (*(*ctx).shared).instance.resolve_link_addr(t.template);
+        let template = (*ctx).shared.instance.resolve_link_addr(t.template);
         std::ptr::copy_nonoverlapping(template as *const u8, addr as *mut u8, t.size as usize);
         let tls = &mut (*ctx).tls;
         if tls.len() <= id as usize {

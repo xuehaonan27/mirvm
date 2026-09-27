@@ -16,7 +16,11 @@ use crate::os::thread::TlsKey;
 /// Per-thread execution state (vmctx): one per guest thread, with the lifetime of that host
 /// thread's thread-local storage.
 pub struct Ctx {
-    pub shared: *const Shared,
+    /// The Engine this `Ctx` executes in. A `&'static Shared` rather than a borrow of the `Arc`
+    /// below, because every reader reaches the `Ctx` through a raw pointer and would have to erase
+    /// that borrow at its own call site. The `Arc` keeps the referent alive for the `Ctx`'s whole
+    /// life, and a reader runs inside an activation of that Engine besides.
+    pub shared: &'static Shared,
     shared_owner: Arc<Shared>,
     pub region: ByteRegion,
     /// Interpreted-frame recursion depth, kept for diagnostics only: guest stack overflow is
@@ -65,8 +69,11 @@ pub struct ShadowFrame {
 impl Ctx {
     pub fn new(shared: &Arc<Shared>) -> Self {
         Ctx {
-            shared: Arc::as_ptr(shared),
             shared_owner: Arc::clone(shared),
+            // SAFETY: the `Arc` initialized above holds a strong reference to the same allocation
+            // for as long as this `Ctx` lives, so the reference handed out below cannot dangle
+            // through this field.
+            shared: unsafe { &*Arc::as_ptr(shared) },
             region: ByteRegion::new(),
             depth: 0,
             signal_draining: false,
@@ -175,6 +182,10 @@ pub(super) struct ThreadContexts {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EngineFaultToken {
     pub(super) owner_id: u64,
+    /// The `Ctx` that raised the fault, dereferenced only by [`finish_engine_fault`] to recheck the
+    /// raising Engine. It stays dereferenceable because the payload carrying this token holds a
+    /// lifecycle count on its Engine (`unwind::raise_engine_fault`), and finalization — the path
+    /// that releases a `Ctx` — cannot leave the Closing phase until every count is released.
     pub(super) raising_ctx: *mut Ctx,
     pub(super) nonce: u64,
 }
@@ -363,7 +374,7 @@ pub(super) fn guest_thread_count_for(shared: &Shared) -> usize {
 ///
 /// `ctx` must be a `Ctx` whose host thread is still inside its active scope.
 pub unsafe fn guest_spawned_threads(ctx: *mut Ctx) -> bool {
-    let shared = unsafe { &*(*ctx).shared };
+    let shared = unsafe { (*ctx).shared };
     let base = shared
         .fork_baseline_threads
         .load(std::sync::atomic::Ordering::SeqCst);

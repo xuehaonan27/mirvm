@@ -43,7 +43,7 @@ static REGISTRY: LazyLock<Mutex<HashMap<usize, Vec<Entry>>>> =
 /// Registers a callback for the Engine that owns `ctx`. `func` must be a known guest entry; a
 /// non-guest callback is refused, not silently dropped.
 pub(crate) fn register(ctx: *mut Ctx, func: u64, kind: Kind, arg: u64) -> u64 {
-    let shared = unsafe { &*(*ctx).shared };
+    let shared = unsafe { (*ctx).shared };
     if !shared.instance.fn_addrs.contains_key(&func) {
         engine_abort(&format!(
             "atexit callback {func:#x} is not a known guest fn entry"
@@ -149,7 +149,7 @@ pub(crate) fn has_callbacks(engine_id: u64) -> bool {
 /// Virtual process teardown for this Engine: runs its own guest callbacks in LIFO order, with
 /// `status` as `on_exit` sees it.
 pub(crate) fn run_callbacks(ctx: *mut Ctx, status: i32) {
-    let shared = unsafe { &*(*ctx).shared };
+    let shared = unsafe { (*ctx).shared };
     let key = shared.id as usize;
     // LIFO: the last registered callback runs first (C semantics).
     loop {

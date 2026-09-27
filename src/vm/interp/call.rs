@@ -34,7 +34,7 @@ pub(super) fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
 /// SIGSEGV with "has overflowed its stack"; this guard is the diagnostic stand-in and only
 /// approximates native (the overflow depth is unspecified).
 pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let module: &Module = unsafe { &(*ctx).shared.module };
     let body: &FuncBody = &module.funcs[func as usize];
 
     // The prologue can raise an EngineFault too (stack guard, argument ABI, exhausted operand

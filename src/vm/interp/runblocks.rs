@@ -19,8 +19,8 @@ pub(super) fn run_blocks(
     edge: &Cell<Option<Bb>>,
     entry: Bb,
 ) -> Exit {
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
-    let instance: &Instance = unsafe { &(*(*ctx).shared).instance };
+    let module: &Module = unsafe { &(*ctx).shared.module };
+    let instance: &Instance = unsafe { &(*ctx).shared.instance };
     let body: &FuncBody = &module.funcs[func as usize];
 
     let mut blk = entry as usize;
@@ -92,7 +92,7 @@ pub(super) fn run_blocks(
                 unwind,
             } => {
                 let mut av: Vec<u64> = aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
-                let shared: &'static Shared = unsafe { &*(*ctx).shared };
+                let shared: &'static Shared = unsafe { (*ctx).shared };
                 let callbacks =
                     crate::vm::thunks::prepare_foreign_callbacks(shared, sym, sig, &mut av);
                 edge.set(unwind.cleanup_edge());
