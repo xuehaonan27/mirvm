@@ -120,6 +120,32 @@ impl UnitTable {
             })
     }
 
+    /// The lowest unit whose closure covers `def` and `mentioned` and which `usable` accepts.
+    ///
+    /// A unit that is not usable is skipped rather than ending the search. That matters for an
+    /// instance no unit defines (a sysroot crate's): every unit covers it, and the layer that hosts it
+    /// must be one this session can still add to — a loaded layer cannot grow, and the delta sits above
+    /// its referers, so an instance every unit covers belongs to the lowest *available* unit.
+    pub(crate) fn home_of_usable(
+        &self,
+        def: Option<u32>,
+        mentioned: &BTreeSet<u32>,
+        usable: impl Fn(u32) -> bool,
+    ) -> Option<Home> {
+        self.units
+            .iter()
+            .enumerate()
+            .find(|(index, unit)| {
+                usable(*index as u32)
+                    && def.is_none_or(|def| unit.closure.contains(&def))
+                    && mentioned.iter().all(|m| unit.closure.contains(m))
+            })
+            .map(|(unit, _)| Home {
+                unit: unit as u32,
+                unattached: def.is_none() && mentioned.is_empty(),
+            })
+    }
+
     /// This unit's key: the build id, the stack below it and the rlib it was compiled to.
     ///
     /// The stack below is part of the key because a unit's bindings name symbols of the layers under
@@ -289,7 +315,13 @@ fn load_one(
         reason("no frozen region");
         return None;
     };
-    let unit_view = super::deps::unit_of(&stack.layer_ranges(), stack.below().prefix, &f.module, f.home, frozen);
+    let unit_view = super::deps::unit_of(
+        &stack.layer_ranges(),
+        stack.below().prefix,
+        &f.module,
+        f.home,
+        frozen,
+    );
     // Bindings and the id-bearing tables resolve against the layers below this unit, and the whole
     // module is verified against the stack it is about to join.
     let symbols = manifest::Symbols::of(stack.layers());
@@ -399,7 +431,13 @@ pub(crate) fn store(
         return super::deps::degraded(bi);
     };
     let frozen = (snapshot.home() as u64, snapshot.bytes().len() as u64);
-    let unit_view = super::deps::unit_of(&stack.layer_ranges(), below.prefix, &bi.module, home, frozen);
+    let unit_view = super::deps::unit_of(
+        &stack.layer_ranges(),
+        below.prefix,
+        &bi.module,
+        home,
+        frozen,
+    );
     let symbols = manifest::Symbols::of(stack.layers());
     let mut session = crate::store::frags::Session::default();
     let records = match manifest::project_module(&mut bi.module, &unit_view, &symbols, &mut session)

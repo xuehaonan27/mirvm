@@ -271,7 +271,8 @@ pub fn store_and_wrap(
             .frozen
             .as_ref()
             .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64));
-        let Some(unit) = frozen_home.map(|frozen| unit_of(&[], below.prefix, &bi.module, 0, frozen))
+        let Some(unit) =
+            frozen_home.map(|frozen| unit_of(&[], below.prefix, &bi.module, 0, frozen))
         else {
             return degraded(bi);
         };

@@ -384,11 +384,7 @@ pub(crate) fn sweep_in(dir: &Path, live: &HashSet<[u8; 32]>) -> std::io::Result<
             sweep.reclaimed += size;
             continue;
         }
-        let total: u64 = pack
-            .entries
-            .iter()
-            .map(|entry| u64::from(entry.2))
-            .sum();
+        let total: u64 = pack.entries.iter().map(|entry| u64::from(entry.2)).sum();
         if live_bytes * 2 >= total {
             continue;
         }

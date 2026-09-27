@@ -175,15 +175,20 @@ impl<'tcx> Linker<'tcx> {
             return None;
         }
         match crate::image::units::current() {
-            Some(table) => {
+            Some(table) => match crate::lower::purity::unit_of_crate(self.tcx, krate, table) {
+                // A unit's item stays in that unit or is residue: moving it to another unit's layer
+                // would publish one crate's private static inside another's shared manifest.
+                Some(unit) => self.placeable(unit as usize).then_some(unit as usize),
                 // A crate no unit covers — a sysroot crate, or a path dependency the table does not
-                // know — is below every unit, so the first one hosts it. That is the rule `place`
-                // applies to a function naming no unit; putting it in the delta instead would leave a
-                // home body referencing a layer above itself.
-                let unit = crate::lower::purity::unit_of_crate(self.tcx, krate, table)
-                    .or_else(|| (table.len() > 0).then_some(0))?;
-                self.placeable(unit as usize).then_some(unit as usize)
-            }
+                // know — is below every unit, so the lowest *available* one hosts it. That is where
+                // `place` puts a function naming no unit, and the two must agree: a home body that
+                // reaches such an item bakes its address, and a delta-placed one would be above it.
+                None => table
+                    .home_of_usable(None, &std::collections::BTreeSet::new(), |unit| {
+                        self.placeable(unit as usize)
+                    })
+                    .map(|home| home.unit as usize),
+            },
             // Without a build graph the closure is one home.
             None => Some(0),
         }
@@ -210,22 +215,19 @@ impl<'tcx> Linker<'tcx> {
     /// decides. An instance the rule cannot place is residue and stays in the delta.
     pub(super) fn place(&self, inst: Instance<'tcx>) -> Option<usize> {
         match crate::image::units::current() {
-            Some(table) => match crate::lower::purity::home_of(inst, self.tcx, table) {
-                Some(home) => {
-                    let home = home.unit as usize;
-                    if !self.placeable(home) {
-                        if crate::options::a2_debug() && home < MAX_HOMES {
-                            eprintln!(
-                                "[a2-debug] residue in this program: {} belongs to loaded home {home}",
-                                self.tcx.symbol_name(inst).name
-                            );
-                        }
-                        return None;
-                    }
-                    Some(home)
+            Some(table) => {
+                let inputs = crate::lower::purity::home_inputs(inst, self.tcx, table)?;
+                let home = table.home_of_usable(inputs.def, &inputs.mentioned, |unit| {
+                    self.placeable(unit as usize)
+                });
+                if home.is_none() && crate::options::a2_debug() {
+                    eprintln!(
+                        "[a2-debug] residue in this program: no free home covers {}",
+                        self.tcx.symbol_name(inst).name
+                    );
                 }
-                None => None,
-            },
+                home.map(|home| home.unit as usize)
+            }
             None => classify_purity(inst).is_image().then_some(0),
         }
     }
