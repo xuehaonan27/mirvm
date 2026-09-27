@@ -248,4 +248,7 @@ mode_run() {
     run_check "diag purity" check_diag_purity
     run_check "platform boundary" check_platform_boundary
     print_section_report
+    # A section that failed must fail the case: the report is the record, not the verdict, and a mode
+    # that ends with a printing helper otherwise reports PASS for a red check.
+    [ "$fail" -eq 0 ] || return 1
 }
