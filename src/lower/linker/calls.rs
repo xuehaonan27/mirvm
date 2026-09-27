@@ -3,9 +3,9 @@
 //! and `exported_defs` supplies the rlib symbol set for the native-archive rescue chain.
 //! `impl Linker` sub-block.
 
-use crate::lower::Error;
-
 use super::*;
+use crate::lower::Error;
+use std::collections::hash_map::Entry;
 
 impl<'tcx> Linker<'tcx> {
     /// Maps an instance to a `FuncId`, assigning a new id and enqueuing it for lowering on
@@ -281,12 +281,12 @@ impl<'tcx> Linker<'tcx> {
                 let is_weak = tcx.codegen_fn_attrs(def_id).linkage
                     == Some(rustc_hir::attrs::Linkage::WeakAny);
                 match map.entry(name) {
-                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                    Entry::Occupied(mut e) => {
                         if e.get().1 && !is_weak {
                             e.insert((inst, false));
                         }
                     }
-                    std::collections::hash_map::Entry::Vacant(e) => {
+                    Entry::Vacant(e) => {
                         e.insert((inst, is_weak));
                     }
                 }
