@@ -114,14 +114,38 @@ crate::diag_codes! {
     }
 }
 
-/// Toolchain sysroot baked at compile time (see build.rs); rustc takes it from here.
-fn toolchain_root() -> &'static Path {
-    Path::new(crate::options::build::DEFAULT_SYSROOT)
-}
+/// The pinned toolchain's layout, named once for every caller.
+///
+/// `build.rs` bakes in the sysroot this binary was built against, and every consumer trusts only
+/// that one: a `rustc` on `PATH` may belong to another toolchain, and a proc-macro dylib's compiler
+/// version must match the interpreter session's exactly.
+pub(crate) mod toolchain {
+    use std::path::{Path, PathBuf};
 
-/// The rust-src library/ tree (home of the std workspace crates and vendor/).
-fn library_dir() -> PathBuf {
-    toolchain_root().join("lib/rustlib/src/rust/library")
+    /// The pinned toolchain's root.
+    pub(crate) fn root() -> &'static Path {
+        Path::new(crate::options::build::DEFAULT_SYSROOT)
+    }
+
+    /// The toolchain's own `rustc`, which host-side compilation runs rather than searching `PATH`.
+    pub(crate) fn rustc() -> PathBuf {
+        root().join("bin/rustc")
+    }
+
+    /// The toolchain's own `cargo`.
+    pub(crate) fn cargo() -> PathBuf {
+        root().join("bin/cargo")
+    }
+
+    /// The toolchain's own `rustdoc`.
+    pub(crate) fn rustdoc() -> PathBuf {
+        root().join("bin/rustdoc")
+    }
+
+    /// The rust-src `library/` tree (home of the std workspace crates and `vendor/`).
+    pub(crate) fn std_source() -> PathBuf {
+        root().join("lib/rustlib/src/rust/library")
+    }
 }
 
 /// Location of the stamp file (the content key) inside the sysroot.
@@ -215,7 +239,7 @@ fn stamp_value() -> Option<String> {
 
 /// rustc binary stat string (len + mtime_ns; `None` when absent).
 fn rustc_stat() -> Option<String> {
-    let md = std::fs::metadata(toolchain_root().join("bin/rustc")).ok()?;
+    let md = std::fs::metadata(toolchain::rustc()).ok()?;
     if !md.is_file() {
         return None;
     }
@@ -266,7 +290,7 @@ fn sysroot_rustflags() -> Vec<String> {
 /// rust-src check. There is no separate report for an unreadable sentinel because nothing acts on
 /// one — the only two answers are "this content key" and "cannot say".
 fn library_sentinel() -> Option<String> {
-    let root = library_dir();
+    let root = toolchain::std_source();
     let mut rows: Vec<String> = Vec::new();
     let mut put = |p: &Path, name: String| -> Option<()> {
         let md = std::fs::metadata(p).ok()?;
@@ -365,7 +389,7 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// rename.
 fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
     let target = crate::options::build::HOST;
-    let library = library_dir();
+    let library = toolchain::std_source();
     if !library.join("std/Cargo.toml").is_file() {
         return Err(Error::RustSrcMissing { path: library });
     }
@@ -399,7 +423,7 @@ fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
         &layout,
         &sysroot_profile(),
         &sysroot_rustflags(),
-        toolchain_root(),
+        toolchain::root(),
         &toolchain_stamp(),
         manifest.has_build_script,
         false,

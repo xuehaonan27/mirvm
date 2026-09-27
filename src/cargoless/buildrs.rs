@@ -240,7 +240,7 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     for f in ctx.features {
         env.insert(format!("CARGO_FEATURE_{}", envify(f)), "1".to_string());
     }
-    let sysroot = PathBuf::from(crate::options::build::DEFAULT_SYSROOT);
+    let sysroot = crate::sysroot::toolchain::root();
     let mut put = |k: &str, v: String| {
         env.insert(k.to_string(), v);
     };
@@ -268,8 +268,14 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
             .map(|n| n.get().to_string())
             .unwrap_or_else(|_| "1".into()),
     );
-    put("RUSTC", sysroot.join("bin/rustc").display().to_string());
-    put("RUSTDOC", sysroot.join("bin/rustdoc").display().to_string());
+    put(
+        "RUSTC",
+        crate::sysroot::toolchain::rustc().display().to_string(),
+    );
+    put(
+        "RUSTDOC",
+        crate::sysroot::toolchain::rustdoc().display().to_string(),
+    );
     put("RUST_RECURSION_COUNT", "1".into());
     // Difference from cargo: cargo fills the real cargo path, we fill mirvm's current exe —
     // this difference is observable in build.rs via env!("CARGO")/var("CARGO"), test fixtures do not rely on it
