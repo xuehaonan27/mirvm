@@ -323,6 +323,11 @@ pub fn store_and_wrap(
             Some(Ok(bytes)) => Some(bytes),
             _ => None,
         };
+        // The publish lock is held across the fragment pack and the closure manifest that names it:
+        // a sweep between the two would see fragments no manifest names yet and drop them.
+        let Ok(_publishing) = crate::store::frags::Lock::shared(&crate::store::FRAGS.dir()) else {
+            return degraded(bi);
+        };
         if let (Ok(()), Some(bytes)) = (
             session.publish().map(|published| {
                 if crate::options::a2_debug() {

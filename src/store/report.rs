@@ -415,6 +415,8 @@ pub struct PurgeAction {
 pub struct PurgeReport {
     pub dry_run: bool,
     pub actions: Vec<PurgeAction>,
+    /// What the fragment sweep took back, when the plan collected.
+    pub swept: Option<store::frags::Sweep>,
     pub freed_bytes: u64,
 }
 
@@ -442,7 +444,21 @@ impl PurgeReport {
                 )),
             ]);
         }
-        if self.actions.is_empty() {
+        if let Some(swept) = &self.swept
+            && !swept.is_empty()
+        {
+            table.row(vec![
+                Cell::left(verb(true)),
+                Cell::left("cache/frags"),
+                Cell::left(format!(
+                    "({}, no current-generation manifest names them: {} removed, {} compacted)",
+                    human_bytes(swept.reclaimed),
+                    swept.removed,
+                    swept.compacted
+                )),
+            ]);
+        }
+        if self.actions.is_empty() && self.swept.as_ref().is_none_or(store::frags::Sweep::is_empty) {
             table.row(vec![Cell::left("nothing to be cleared")]);
         }
         out.push_str(&table.render());
@@ -474,19 +490,30 @@ impl PurgeReport {
         let mut out = Writer::document();
         out.boolean("dry_run", self.dry_run);
         out.raw("actions", &json::array(&actions));
+        if let Some(swept) = &self.swept {
+            let mut row = Writer::new();
+            row.number("packs_removed", swept.removed);
+            row.number("packs_compacted", swept.compacted);
+            row.number("reclaimed_bytes", swept.reclaimed);
+            out.raw("swept", &row.finish());
+        }
         out.number("freed_bytes", self.freed_bytes);
         out.finish()
     }
 }
 
 /// Execute cleanup and return the report. `dry_run` lists actions without touching anything.
-pub fn purge(root: &Path, plan: Purge) -> PurgeReport {
+pub fn purge(root: &Path, plan: Purge, swept: Option<store::frags::Sweep>) -> PurgeReport {
     let dry = plan.dry_run;
     let mut report = PurgeReport {
         dry_run: dry,
         actions: Vec::new(),
+        swept,
         freed_bytes: 0,
     };
+    if let Some(swept) = &report.swept {
+        report.freed_bytes += swept.reclaimed;
+    }
     for family in store::FAMILIES {
         let dir = family.dir_in(root);
         match family.shape {
@@ -603,6 +630,7 @@ mod tests {
                 dry_run: true,
                 ..Default::default()
             },
+            None,
         );
         let text = report.text();
         assert!(text.contains("to be deleted"));
@@ -615,6 +643,7 @@ mod tests {
                 stale: true,
                 ..Default::default()
             },
+            None,
         );
         let text = report.text();
         assert!(text.contains("deleted") && !text.contains("to be deleted"));
@@ -653,6 +682,7 @@ mod tests {
                 all: true,
                 ..Default::default()
             },
+            None,
         );
         assert!(!store::SCRIPTS.dir_in(&root).exists());
         assert!(!store::SYSROOT_BUILD.dir_in(&root).exists());
@@ -672,6 +702,7 @@ mod tests {
                 data: true,
                 ..Default::default()
             },
+            None,
         );
         assert!(!sysroot.exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -697,6 +728,7 @@ mod tests {
                 deps: true,
                 ..Default::default()
             },
+            None,
         );
         assert!(report.text().contains("all generations cleared"));
         assert!(!current.exists() && other.exists());

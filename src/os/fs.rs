@@ -36,6 +36,31 @@ pub fn read_fd(fd: i32, buf_addr: u64, len: usize) -> i64 {
     unsafe { libc::read(fd, buf_addr as *mut libc::c_void, len) as i64 }
 }
 
+/// `flock(2)`: take a whole-file advisory lock, shared for a publisher and exclusive for a sweep.
+/// The lock lives on the open descriptor, so it is released when the caller closes it — including
+/// when the process dies, which is what makes it usable as the store's cross-process discipline.
+pub fn flock(fd: i32, exclusive: bool) -> io::Result<()> {
+    let op = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    };
+    if unsafe { libc::flock(fd, op) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Release a `flock(2)` lock before the descriptor closes.
+pub fn unlock(fd: i32) -> io::Result<()> {
+    if unsafe { libc::flock(fd, libc::LOCK_UN) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// `close(2)`: returns the kernel's code, which a caller may ignore but not misread.
 #[cfg(test)]
 pub fn close_fd(fd: i32) -> i32 {
