@@ -13,6 +13,8 @@
 /// `cc` ran and failed, with its output as the detail), `Ambiguous` (two strong definitions of one
 /// symbol, where resolution would depend on native link order and mirvm refuses to guess), and `Io`
 /// (a filesystem or exec step failed, carrying the `io::Error` as its source).
+use std::collections::hash_map::Entry;
+
 #[derive(Debug, thiserror::Error, serde::Serialize)]
 pub(crate) enum Error {
     #[error("{detail}")]
@@ -316,10 +318,10 @@ pub(crate) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), 
         )? {
             let weak = export.weak;
             match owners.entry(export.name.into_string()) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
+                Entry::Vacant(entry) => {
                     entry.insert((shared_object.clone(), weak));
                 }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                Entry::Occupied(mut entry) => {
                     let (previous, previous_weak) = entry.get().clone();
                     let strongs = usize::from(!previous_weak) + usize::from(!weak);
                     if strongs >= 2 {

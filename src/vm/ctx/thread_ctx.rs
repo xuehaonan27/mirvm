@@ -3,6 +3,7 @@
 //! the deferred pthread-key teardown rounds.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::super::ffi::FfiState;
@@ -217,8 +218,8 @@ impl ThreadContexts {
     pub(super) fn attach(&mut self, shared: &Arc<Shared>) -> *mut Ctx {
         let key = shared.id as usize;
         let slot = match self.by_engine.entry(key) {
-            std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => {
                 let slot = Arc::new(CtxSlot::new(shared));
                 shared.register_ctx_slot(&slot);
                 entry.insert(Arc::clone(&slot));
