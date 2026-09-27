@@ -235,8 +235,8 @@ impl<'tcx> Linker<'tcx> {
     /// Activate split (home/delta) lowering: each home's frozen area lands in its spline domain. If that
     /// domain is occupied, fall back to a dynamic base; semantics are unchanged, but the write phase refuses
     /// serialization and self-heals.
-    pub(super) fn activate_split(&mut self, taken_slots: Vec<usize>, loaded_homes: Vec<usize>) {
-        self.split = Some(Split::activate(taken_slots, loaded_homes));
+    pub(super) fn activate_split(&mut self, loaded_homes: Vec<usize>) {
+        self.split = Some(Split::activate(loaded_homes));
     }
 
     /// Reserve an asm-stub slot, returning (AsmStubId, symbol name); the text follows via `set_asm_stub`.

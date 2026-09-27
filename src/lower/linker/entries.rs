@@ -46,22 +46,36 @@ impl<'tcx> Linker<'tcx> {
             self.fn_addrs.insert(addr, fid);
             return Ok(addr);
         }
+        // The entry's home follows the *function*, not the body being lowered: a delta body may take a
+        // home function's address, and an address baked into a published layer has to be one another
+        // process can rebuild, so the current home is the answer only when the function's own home is
+        // the current one.
+        let image_side = id_home(fid).is_some() || fid < self.delta_first_fn;
+        let home = if self.split.is_some() && image_side {
+            id_home(fid).or_else(|| self.home_of_krate(inst.def_id().krate))
+        } else {
+            None
+        };
         let addr = if let Some(s) = &mut self.split {
-            if id_home(fid).is_some() || fid < self.delta_first_fn {
-                // image class, or a base hit whose base has no entry: allocate in the image area for a single
-                // address identity. The delta area is unstable across runs for image bytecode, so it must
-                // never be used there.
-                let a = s.cur().frozen.alloc(8, 16);
-                s.cur().fn_entries.insert(inst, a);
-                a
-            } else {
-                if s.current.is_some() {
-                    panic!(
-                        "A2 closure violation: image instance references delta-class fn entry (classifier missed): {}",
-                        self.tcx.symbol_name(inst).name
-                    );
+            match home {
+                Some(home) => {
+                    let layer = s.home_mut(home);
+                    let a = layer.frozen.alloc(8, 16);
+                    layer.fn_entries.insert(inst, a);
+                    a
                 }
-                self.frozen.alloc(8, 16)
+                // No home can hold it (the covering homes are all loaded, or the instance is delta
+                // class): the delta is the only place left, and a home body reaching it is the
+                // classifier bug the check names.
+                None => {
+                    if s.current.is_some() {
+                        panic!(
+                            "A2 closure violation: image instance references delta-class fn entry (classifier missed): {}",
+                            self.tcx.symbol_name(inst).name
+                        );
+                    }
+                    self.frozen.alloc(8, 16)
+                }
             }
         } else {
             self.frozen.alloc(8, 16)
@@ -99,30 +113,40 @@ impl<'tcx> Linker<'tcx> {
         fid: ir::FuncId,
         sig: ir::ForeignSig,
     ) -> u64 {
+        // As with a data entry: the stub belongs to the function's home, which is not necessarily the
+        // body being lowered.
         let image_side =
             self.split.is_some() && (id_home(fid).is_some() || fid < self.delta_first_fn);
+        let home = if image_side {
+            id_home(fid).or_else(|| self.home_of_krate(inst.def_id().krate))
+        } else {
+            None
+        };
         if let Some(&i) = self.entry_stub_ids.get(&inst) {
-            return if image_side {
-                self.split
+            let addr = match home {
+                Some(home) => self
+                    .split
                     .as_ref()
                     .expect("split")
-                    .cur_ro()
+                    .home(home)
+                    .expect("the stub's home exists")
                     .code_arena
-                    .addr_of(i as u64)
-            } else {
-                self.code_arena.addr_of(i as u64)
+                    .addr_of(i as u64),
+                None => self.code_arena.addr_of(i as u64),
             };
+            return addr;
         }
-        if image_side {
+        if let Some(home) = home {
             let s = self.split.as_mut().expect("split");
-            let i = s.cur().stub_sites.len() as u32;
-            let addr = s.cur().code_arena.addr_of(i as u64);
-            s.cur().stub_sites.push(ir::EntryStubSite {
+            let layer = s.home_mut(home);
+            let i = layer.stub_sites.len() as u32;
+            let addr = layer.code_arena.addr_of(i as u64);
+            layer.stub_sites.push(ir::EntryStubSite {
                 link_addr: ir::LinkAddr(addr),
                 func: fid,
                 sig,
             });
-            s.cur().fn_entries.insert(inst, addr);
+            layer.fn_entries.insert(inst, addr);
             self.entry_stub_ids.insert(inst, i);
             addr
         } else {

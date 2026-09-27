@@ -292,7 +292,7 @@ pub fn store_and_wrap(
         {
             eprintln!("[a2-debug] closure manifest not written: {error}");
         }
-        let manifest_bytes = projected.ok().map(|(records, tables)| {
+        let manifest = projected.ok().map(|(records, tables)| {
             let mut fn_entry_syms = bi
                 .entry_by_sym
                 .iter()
@@ -318,16 +318,16 @@ pub fn store_and_wrap(
                 fn_entry_syms: &fn_entry_syms,
                 static_syms: &static_syms,
             };
-            manifest::encode(&file)
+            manifest::encode(&file).map(|bytes| (bytes, tables))
         });
-        let manifest_bytes = match manifest_bytes {
-            Some(Ok(bytes)) => Some(bytes),
+        let manifest_bytes = match manifest {
+            Some(Ok((bytes, tables))) => Some((bytes, tables)),
             _ => None,
         };
         // The publish lock is held across the fragment pack and the closure manifest that names it:
         // a sweep between the two would see fragments no manifest names yet and drop them.
         let _publishing = crate::store::frags::publish_lock();
-        if let (Ok(()), Some(bytes)) = (
+        if let (Ok(()), Some((bytes, tables))) = (
             session.publish().map(|published| {
                 if crate::options::a2_debug() {
                     eprintln!(
@@ -343,6 +343,9 @@ pub fn store_and_wrap(
                 .parent()
                 .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok());
             if dir_exists && crate::store::publish_bytes(&path, &bytes).is_ok() {
+                // The manifest is written: put the layer's own ids back, so this session keeps
+                // running the layer it just wrote (and the stack it hands to absorb carries them).
+                let _ = tables.restore(&mut bi.module, &unit, &symbols);
                 bi.key = key;
                 return bi;
             }

@@ -175,8 +175,6 @@ pub(crate) fn id_ordinal(id: u32) -> u32 {
 /// One home's lowering state: everything the two-way split kept for its single image, per home. The
 /// delta is not a home — it reuses the main `Linker` fields (queue/funcs/frozen/alloc_addrs/...).
 pub(crate) struct HomeLayer<'tcx> {
-    /// The spline slot this home's frozen and code arenas occupy.
-    slot: usize,
     /// Frozen area.
     frozen: FrozenArena,
     /// Pending-lowering queue (tagged ids).
@@ -216,7 +214,6 @@ impl<'tcx> HomeLayer<'tcx> {
     /// A home whose frozen and code arenas occupy spline slot `slot`.
     fn new(slot: usize) -> Self {
         HomeLayer {
-            slot,
             frozen: FrozenArena::new_image(slot),
             queue: VecDeque::new(),
             funcs: Vec::new(),
@@ -250,20 +247,17 @@ pub(crate) struct Split<'tcx> {
     current: Option<usize>,
     /// How many layers this session's homes produced (the delta is separate).
     populated: usize,
-    /// Spline slots the stack's loaded layers already occupy.
-    taken: Vec<usize>,
     /// Homes whose layer the stack already provides. A loaded layer is immutable: whatever it does
     /// not provide by symbol is residue, never an addition to that home.
     loaded: Vec<usize>,
 }
 
 impl<'tcx> Split<'tcx> {
-    fn activate(taken: Vec<usize>, loaded: Vec<usize>) -> Self {
+    fn activate(loaded: Vec<usize>) -> Self {
         Split {
             homes: Vec::new(),
             current: None,
             populated: 0,
-            taken,
             loaded,
         }
     }
@@ -277,13 +271,6 @@ impl<'tcx> Split<'tcx> {
     pub(crate) fn cur(&mut self) -> &mut HomeLayer<'tcx> {
         let home = self.current.expect("a home body is being lowered");
         self.home_mut(home)
-    }
-
-    /// Read-only access to the home currently being lowered. Every caller is reached only from a home
-    /// body, so a missing current home is an internal inconsistency rather than a condition.
-    pub(crate) fn cur_ro(&self) -> &HomeLayer<'tcx> {
-        let home = self.current.expect("a home body is being lowered");
-        self.home(home).expect("the current home exists")
     }
 
     pub(crate) fn home(&self, index: usize) -> Option<&HomeLayer<'tcx>> {
@@ -308,19 +295,14 @@ impl<'tcx> Split<'tcx> {
             self.homes.resize_with(index + 1, || None);
         }
         if self.homes[index].is_none() {
-            let slot = self.free_slot();
-            self.homes[index] = Some(HomeLayer::new(slot));
+            // The slot is the home's own index: a layer's stack position is the unit's place in
+            // topological order, so a publisher and a loader of the same layer derive the same slot
+            // without either recording the other's — which is what keeps a manifest's baked
+            // cross-layer addresses valid in another process.
+            self.homes[index] = Some(HomeLayer::new(index));
             self.populated += 1;
         }
         self.homes[index].as_mut().expect("just created")
-    }
-
-    fn free_slot(&self) -> usize {
-        let mut used = self.taken.clone();
-        used.extend(self.homes.iter().flatten().map(|home| home.slot));
-        (0..crate::os_arch::addrspace::IMAGE_SPLINE_COUNT)
-            .find(|slot| !used.contains(slot))
-            .expect("the image spline has a free slot")
     }
 
     /// The indices of the homes this session has populated, lowest first.
@@ -568,16 +550,6 @@ fn lower_inner(
         crate::vm::codearena::StubArena::new_at(code_home),
     );
     if split {
-        // The spline slots the stack's loaded layers already occupy: a home this session creates must
-        // take a free one, because a manifest's recorded slot is the address its baked link addresses
-        // point at.
-        let taken = stack
-            .layers()
-            .iter()
-            .filter_map(|layer| {
-                crate::os_arch::addrspace::image_slot(layer.module.frozen.as_ref()?.home())
-            })
-            .collect();
         // The homes the stack already provides: lowering must not create a second layer for one and
         // rewrite a unit's manifest from this program's view of it.
         let loaded = stack
@@ -586,7 +558,7 @@ fn lower_inner(
             .filter_map(|layer| layer.unit)
             .map(|unit| unit as usize)
             .collect();
-        linker.activate_split(taken, loaded);
+        linker.activate_split(loaded);
     }
 
     // Static archives and global_asm/naked `.so` files are materialized and loaded RTLD_NOW|
