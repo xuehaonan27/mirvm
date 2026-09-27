@@ -8,6 +8,7 @@
 //! Each report is data first: `text` and `json` are two renderings of one structure, so a field can
 //! neither exist in one and be missing from the other, nor be computed twice.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::diag::json::{self, Writer};
@@ -110,13 +111,26 @@ impl FamilyStatus {
                 human_bytes(garbage)
             ),
             None => match &self.fragments {
-                Some(inventory) => format!(
-                    "({} packs, {} fragments, {} unique, {} repeated)",
-                    self.items,
-                    inventory.records,
-                    human_bytes(inventory.unique_bytes),
-                    human_bytes(inventory.duplicate_bytes)
-                ),
+                Some(inventory) => {
+                    let mut detail = format!(
+                        "({} packs, {} fragments, {} unique, {} repeated",
+                        self.items,
+                        inventory.records,
+                        human_bytes(inventory.unique_bytes),
+                        human_bytes(inventory.duplicate_bytes)
+                    );
+                    // Liveness is only known when the caller marked the manifests; without a mark the
+                    // line stops before claiming anything about what a sweep would keep.
+                    if let Some(liveness) = &inventory.liveness {
+                        detail.push_str(&format!(
+                            ", {} live, {} dead",
+                            human_bytes(liveness.bytes),
+                            human_bytes(liveness.dead_bytes)
+                        ));
+                    }
+                    detail.push(')');
+                    detail
+                }
                 None => format!("({} items, {})", self.items, self.kind),
             },
         }
@@ -221,6 +235,11 @@ impl Status {
                                     out.number("fragments", inventory.records);
                                     out.number("unique_bytes", inventory.unique_bytes);
                                     out.number("repeated_bytes", inventory.duplicate_bytes);
+                                    if let Some(liveness) = &inventory.liveness {
+                                        out.number("live_fragments", liveness.fragments);
+                                        out.number("live_bytes", liveness.bytes);
+                                        out.number("dead_bytes", liveness.dead_bytes);
+                                    }
                                 }
                             }
                         };
@@ -257,7 +276,10 @@ impl Status {
 }
 
 /// Size every family, group it by lifetime, and report what no family claims.
-pub fn status(root: &Path) -> Status {
+///
+/// `live` is the fragment mark (`image::collect`), or `None` when the caller did not mark: the
+/// fragment family then reports its own size without a liveness split.
+pub fn status(root: &Path, live: Option<&HashSet<[u8; 32]>>) -> Status {
     let mut total = 0u64;
     let mut total_stale = 0u64;
     let mut claimed: Vec<String> = Vec::new();
@@ -278,7 +300,7 @@ pub fn status(root: &Path) -> Status {
                         items: files,
                         generations: None,
                         kind: "content-keyed packs",
-                        fragments: Some(store::frags::inventory()),
+                        fragments: Some(store::frags::inventory_marked(live)),
                     }
                 }
                 Shape::Generation { ext } => {
@@ -686,7 +708,7 @@ mod tests {
     /// and every family in the register appears in both renderings.
     fn status_reports_every_family_and_the_build_id() {
         let root = temp_root("status");
-        let report = status(&root);
+        let report = status(&root, None);
         let text = report.text();
         let first = text.lines().next().unwrap();
         assert!(
@@ -709,7 +731,7 @@ mod tests {
         std::fs::write(root.join("cache/leftover/old.img"), b"old").unwrap();
         std::fs::create_dir_all(root.join("base")).unwrap();
         std::fs::write(root.join("base/stale.img"), b"old").unwrap();
-        let report = status(&root);
+        let report = status(&root, None);
         let text = report.text();
         let json = report.json();
         assert!(text.contains("cache/leftover"), "{text}");

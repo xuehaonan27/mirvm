@@ -117,5 +117,17 @@ frags=$(MIRVM_HOME="$HOME_DIR" "$MIRVM" cache status 2>/dev/null \
 [ -n "$frags" ] && [ "$frags" -gt 0 ] \
     || abort_test "cache status does not report the stored fragments: $(MIRVM_HOME="$HOME_DIR" "$MIRVM" cache status 2>/dev/null | grep frags)"
 
+# The manifest that was just rewritten marks its fragments live: liveness is read from the manifests,
+# so the live/dead split must name exactly the bytes the family's own indexes count as distinct.
+account=$(MIRVM_HOME="$HOME_DIR" "$MIRVM" cache status --json 2>/dev/null)
+live_frags=$(printf '%s' "$account" | sed -n 's/.*"live_fragments":\([0-9]*\).*/\1/p')
+live_bytes=$(printf '%s' "$account" | sed -n 's/.*"live_bytes":\([0-9]*\).*/\1/p')
+dead_bytes=$(printf '%s' "$account" | sed -n 's/.*"dead_bytes":\([0-9]*\).*/\1/p')
+unique_bytes=$(printf '%s' "$account" | sed -n 's/.*"unique_bytes":\([0-9]*\).*/\1/p')
+[ -n "$live_frags" ] && [ "$live_frags" -gt 0 ] && [ "$live_frags" -le "$frags" ] \
+    || abort_test "cache status does not account for live fragments: $account"
+[ "$((live_bytes + dead_bytes))" -eq "$unique_bytes" ] \
+    || abort_test "live+dead does not equal the distinct bytes: $account"
+
 ok "cold write, warm read, edit, bypass, cross-bin sharing and one stored copy of each fragment"
 }

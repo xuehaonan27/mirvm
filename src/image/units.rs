@@ -159,9 +159,13 @@ pub(crate) fn current() -> Option<&'static UnitTable> {
 /// (their readers simply rebuild).
 const KEEP_PER_UNIT: usize = 3;
 
+/// The extension every unit manifest carries. The name is the one place that spells it, so a reader
+/// that walks the family (`image::collect`) cannot disagree with the writer.
+pub(crate) const EXT: &str = "unit";
+
 /// One unit manifest's file name: the unit's key and the digest of the manifest's own bytes.
 fn file_name(unit_key: &str, digest: &str) -> String {
-    format!("{unit_key}-{digest}.unit")
+    format!("{unit_key}-{digest}.{EXT}")
 }
 
 /// Every manifest file for one unit, newest first (mtime, then name for a stable tie break).
@@ -171,14 +175,15 @@ fn manifests_of(dir: &Path, unit_key: &str) -> Vec<(PathBuf, String)> {
     if let Ok(read) = std::fs::read_dir(dir) {
         for entry in read.flatten() {
             let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "unit") {
+            if path.extension().is_none_or(|ext| ext != EXT) {
                 continue;
             }
+            let suffix = format!(".{EXT}");
             let Some(digest) = entry
                 .file_name()
                 .to_str()
                 .and_then(|name| name.strip_prefix(&prefix))
-                .and_then(|rest| rest.strip_suffix(".unit"))
+                .and_then(|rest| rest.strip_suffix(&suffix))
                 .map(str::to_string)
             else {
                 continue;

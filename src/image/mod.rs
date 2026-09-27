@@ -19,6 +19,7 @@
 //! share.
 
 pub(crate) mod base;
+pub(crate) mod collect;
 pub(crate) mod deps;
 pub(crate) mod manifest;
 pub(crate) mod program;
