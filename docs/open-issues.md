@@ -126,6 +126,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   as expected. It went unnoticed because per-commit verification names a handful of modes rather than
   the whole `fast` tier, and this is the first `native-diff` sweep in the platform refactor.
   Needs a stack or a bisect from the JIT builtin path; a `timeout` kill leaves no diagnostic.
+- **E38** `OPEN`: the cargoless resolver cannot read back a lock naming serde 1.0.229. A fresh-mode run
+  writes a lock whose `serde` depends on the newly split-out `serde_core`, and the next (lock-mode) run
+  fails deterministically with "dependency serde_core of serde ...@1.0.229 has no edge assignment
+  record (internal inconsistency)" (`src/cargoless/resolve/units.rs`, also `features.rs`). Repro:
+  clear the materialized project under `build/scripts/<key>`, run `fixtures/cargoless/serde.rs` (it
+  succeeds), run it again (it fails). The defect is the resolver round trip — its own fresh resolution
+  produces a graph its lock reader rejects — not the fixture. Found while measuring the unit home rule.
 
 ## D. Distribution and product
 

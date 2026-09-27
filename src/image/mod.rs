@@ -22,6 +22,7 @@ pub(crate) mod base;
 pub(crate) mod deps;
 pub(crate) mod manifest;
 pub(crate) mod program;
+pub(crate) mod units;
 
 use crate::vm::instance::Instance;
 use crate::vm::ir::{FuncId, LinkAddr, Module, TlsId};

@@ -243,7 +243,7 @@ mod rebase;
 use builtins::engine_builtins;
 pub(crate) use ffi_sig::{canonical_link_name, ffi_kind_of, freeze_c_fnptr_sig};
 use frag_stats::FragStats;
-use purity::{PurityStats, classify_purity};
+use purity::{PurityStats, classify_purity, home_of};
 use rebase::Rebase;
 
 /// Export material of a base-image build session: produced together with the module and not used by
@@ -624,6 +624,7 @@ fn lower_inner(
     // concatenated during absorb, position `delta_first_fn + ordinal` is the absolute FuncId.
     let first = linker.delta_first_fn;
     let mut purity = crate::options::purity_stats().then(PurityStats::default);
+    let mut frag_stats = crate::options::frag_stats().then(FragStats::new);
     if linker.split.is_some() {
         // Split mode: drain both queues alternately until neither produces work. Image-class bodies
         // only ever discover further image-class items (image purity is downward-closed), while delta
@@ -695,6 +696,22 @@ fn lower_inner(
                 classify_purity(*inst).is_image(),
                 "split self-check failed: image instance review is not pure (classifier state error)"
             );
+        }
+        // The home rule's ledger: the unit each image-class instance would belong to, and how much of
+        // the layer that home accounts for. A track without a build graph (Cargo) has no unit table
+        // and records nothing.
+        if let Some(stats) = frag_stats.as_mut()
+            && let Some(table) = crate::image::units::current()
+        {
+            for inst in &s.image_insts {
+                let Some(&id) = linker.ids.get(inst) else {
+                    continue;
+                };
+                let bit = (id & !IMAGE_TAG) as usize;
+                if let Some(body) = s.image_funcs.get(bit).and_then(|body| body.as_ref()) {
+                    stats.home(home_of(*inst, tcx, table), body);
+                }
+            }
         }
         // Function bodies, the export/fn_addrs tables and the entry plan all carry ids and are
         // remapped by the same rule.
@@ -963,11 +980,10 @@ fn lower_inner(
     instance.link_fn_addrs = module.fn_entry_links.iter().copied().collect();
     instance.rebuild_load_map();
     instance.rebuild_fn_addrs();
-    if crate::options::frag_stats() {
+    if let Some(mut stats) = frag_stats {
         let frozen_bytes = |arena: &Option<crate::vm::frozen::FrozenArena>| {
             arena.as_ref().map_or(0, |arena| arena.used())
         };
-        let mut stats = FragStats::new();
         if let Some(image) = &split_image {
             stats.layer(
                 "image",
@@ -976,7 +992,7 @@ fn lower_inner(
             );
         }
         stats.layer("delta", &module.funcs, frozen_bytes(&instance.frozen));
-        stats.dump();
+        stats.dump(stack.key());
     }
     (module, instance, base_exports, split_image)
 }
