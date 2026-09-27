@@ -184,7 +184,11 @@ Fragments carry no generation: they are reached only through manifests, manifest
 and collection is **mark-sweep from current-generation manifests** — refcounts are rejected as
 crash-fragile. `cache purge` marks live fragment ids, rewrites packs whose live ratio is low, and
 deletes prunable manifests (stale generations as today; superseded digests per unit_key beyond a
-small keep-count). Sweep takes an exclusive lock on the family; publishers take it shared. If two
+small keep-count). A pack whose live share stays above half its bytes is left alone: copying it would
+buy back few bytes, so the dead records it keeps are counted until a later sweep folds them. Sweep
+takes an exclusive lock on the family; publishers take it shared, and a publisher holds it across the
+fragment pack *and* the manifest that names it — a sweep between the two writes would see fragments
+no manifest names yet and drop them. If two
 mirvm builds happen to produce byte-identical fragment bytes, the hash collides *correctly* — content
 addressing is self-consistent — so cross-build sharing is free when the encoding is unchanged, and
 never wrong when it is not.
@@ -196,15 +200,15 @@ newest valid manifest, validate exact-equality header material and generation, m
 lowering. The stack becomes `[base, unit_1 … unit_n]` with k by load order; union lookups,
 cumulative offsets, fingerprint prefix-truncation and the key chain are the existing `ImageStack`
 mechanics. During the session the multi-way split lowers only missing homes and publishes them;
-absorb at the end is unchanged.
+absorb at the end is unchanged. The L2 chain grows from `base ⊕ aggregate` to
+`base ⊕ (unit_key, manifest_digest)*`, same mechanism.
 
 A layer the stack provides is **immutable**: the session lowers the homes whose manifest missed and
 never writes into a loaded one, so a home whose layer loaded cannot grow. An instance such a layer
 does not already name — rustc instantiates some dependency generics in the instantiating crate, so
 its mangled name carries this program — is therefore residue in the delta rather than an addition to
 a shared manifest. Without that rule a session that loaded a lower unit would republish it from one
-program's view, and the next run would refuse the manifest it had just written. The L2 chain grows from `base ⊕ aggregate` to `base ⊕ (unit_key,
-manifest_digest)*`, same mechanism.
+program's view, and the next run would refuse the manifest it had just written.
 
 Decode of one function costs postcard + one binding walk (the `rebase.rs` shape: a few table lookups
 per reference). The lazy table amortizes it behind the heat order; the §2.6 baseline gates of the
@@ -261,8 +265,11 @@ parent document are the regression fence.
   warm rerun to write no manifest at all, and diffs the loaded-stack run's guest output against the
   same program with the stack bypassed.
 - **Collection safety**: purge under a concurrent publisher never leaves a manifest referencing a
-  swept fragment (lock discipline §3.4); a manifest referencing a missing fragment is a miss that
-  self-heals, never a runtime error.
+  swept fragment — the mark and the sweep hold the family's exclusive lock, a publisher holds it
+  shared across the fragment pack and the manifest that names it, and a compacted pack is published
+  under its new name before the old file is removed. A manifest referencing a missing fragment is a
+  miss that self-heals, never a runtime error. `frag-collect` gates the cycle in a store of its own:
+  publish, drop the manifests, purge, republish the same packs under the same names.
 
 ## 6. Construction order
 
@@ -285,7 +292,12 @@ deleted and replaced, not phased out.
    a digest instead of overwriting the one a running program pinned; `cache purge --units` covers the
    family. Gated by the §5 equivalence gate, the `deps-image` gate and the `unit-share` gate.
 4. **Collection**: mark-sweep from current-generation manifests, the `--units` flag, the shared/
-   exclusive lock discipline of §3.4, and the live/dead accounting `cache status` will report.
+   exclusive lock discipline of §3.4, and the live/dead accounting `cache status` reports.
+   Implemented: `image::collect` marks a fragment live exactly while a current-generation manifest
+   names it, `store::frags::sweep` drops or compacts packs against that mark under the family's
+   exclusive lock, the unit manifests are a generational family so a manifest another build wrote is
+   pruned, and `cache status` reports the live/dead split — the `frag-collect` gate walks one session
+   through publish, drop, purge and republish.
 5. Extensions, each behind its own measurement: frozen-region chunk dedup; the L2 entry as a
    fragment manifest; heat-order-driven pack layout.
 
