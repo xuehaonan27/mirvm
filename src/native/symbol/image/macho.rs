@@ -17,14 +17,12 @@
 //! leading underscore, because a loader looks a C name up with one applied: the symbol table, which
 //! `nm` and `dladdr` read, and the export trie, which is the only one `dlsym` consults.
 
+use crate::arch::{MACHO_CPU_SUBTYPE, MACHO_CPU_TYPE};
 use crate::native::object::macho::{
     HEADER_SIZE, LC_SEGMENT_64, LC_SYMTAB, MH_MAGIC_64, N_EXT, N_SECT, NLIST_SIZE, SECTION_SIZE,
     SEGMENT_COMMAND_SIZE,
 };
 
-/// `cputype` for arm64, and the subtype meaning "all arm64".
-const CPU_TYPE_ARM64: u32 = 0x0100_000c;
-const CPU_SUBTYPE_ARM64_ALL: u32 = 0;
 /// `filetype`: a dynamically linked shared library.
 const MH_DYLIB: u32 = 6;
 /// The header flags: `MH_NOUNDEFS`, `MH_DYLDLINK`, `MH_TWOLEVEL` and `MH_PIE`. A dylib with no
@@ -401,8 +399,8 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     let command_count = 7u32;
     // mach_header_64
     out.u32(MH_MAGIC_64);
-    out.u32(CPU_TYPE_ARM64);
-    out.u32(CPU_SUBTYPE_ARM64_ALL);
+    out.u32(MACHO_CPU_TYPE);
+    out.u32(MACHO_CPU_SUBTYPE);
     out.u32(MH_DYLIB);
     out.u32(command_count);
     out.u32(commands_len as u32);
@@ -559,6 +557,15 @@ mod tests {
     fn symbol_image() -> (Vec<u8>, usize) {
         let names: Vec<Box<str>> = NAMES.iter().map(|name| Box::from(*name)).collect();
         build(&names).expect("a symbol image")
+    }
+
+    /// The header carries the machine identity the CPU axis declares, not a number this writer
+    /// keeps: a second architecture's identity is that architecture's to state.
+    #[test]
+    fn the_header_names_the_architectures_machine_identity() {
+        let (bytes, _) = symbol_image();
+        assert_eq!(read_u32(&bytes, 4), Some(MACHO_CPU_TYPE));
+        assert_eq!(read_u32(&bytes, 8), Some(MACHO_CPU_SUBTYPE));
     }
 
     /// The writer and the reader are the two halves of one layout: what the first lays down, the
