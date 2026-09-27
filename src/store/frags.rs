@@ -27,12 +27,12 @@
 //! Every read re-hashes the fragment's bytes against the id it was asked for: a corrupted pack is a
 //! miss, never a wrong body.
 //!
-//! **Collection**: a pack holds no liveness of its own. `cache purge --frags` takes the family, and
-//! the mark-sweep that keeps only what a current-generation manifest references arrives with that
-//! manifest layer; until then the family is the unit of removal, the same all-or-nothing contract
-//! the other keyed families have.
+//! **Collection**: a pack holds no liveness of its own. A fragment is live exactly when a
+//! current-generation manifest names it (`image::collect` marks them), which is what
+//! [`inventory_marked`] scores a pack against; until the sweep runs, the family's unit of removal is
+//! the whole family, the same all-or-nothing contract the other keyed families have.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -293,14 +293,29 @@ pub(crate) struct Inventory {
     pub unique_bytes: u64,
     /// Bytes of fragments a later pack stored again.
     pub duplicate_bytes: u64,
+    /// What the manifests keep alive, when the caller marked them.
+    pub liveness: Option<Liveness>,
 }
 
-/// Size the family by its own indexes: distinct fragments, and what repeated publishing cost.
-pub(crate) fn inventory() -> Inventory {
+/// Distinct fragments against the mark: a fragment no current-generation manifest names is dead.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Liveness {
+    /// Distinct fragments the manifests name.
+    pub fragments: u64,
+    /// Their bytes: what a sweep must keep.
+    pub bytes: u64,
+    /// Bytes of distinct fragments no manifest names: what a sweep could take back.
+    pub dead_bytes: u64,
+}
+
+/// Size the family by its own indexes: distinct fragments, and what repeated publishing cost. Each
+/// distinct fragment is additionally scored against `live` when the caller marked the manifests.
+pub(crate) fn inventory_marked(live: Option<&HashSet<[u8; 32]>>) -> Inventory {
     let index = Index::load();
     let mut seen: HashMap<[u8; 32], u32> = HashMap::new();
     let mut inv = Inventory {
         packs: index.packs.len() as u64,
+        liveness: live.map(|_| Liveness::default()),
         ..Default::default()
     };
     for pack in &index.packs {
@@ -310,6 +325,14 @@ pub(crate) fn inventory() -> Inventory {
             *copies += 1;
             if *copies == 1 {
                 inv.unique_bytes += u64::from(*len);
+                if let (Some(live), Some(liveness)) = (live, inv.liveness.as_mut()) {
+                    if live.contains(id) {
+                        liveness.fragments += 1;
+                        liveness.bytes += u64::from(*len);
+                    } else {
+                        liveness.dead_bytes += u64::from(*len);
+                    }
+                }
             } else {
                 inv.duplicate_bytes += u64::from(*len);
             }
