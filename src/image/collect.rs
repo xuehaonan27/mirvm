@@ -25,6 +25,20 @@ pub(crate) fn live_fragments(root: &Path) -> HashSet<[u8; 32]> {
     live
 }
 
+/// Mark and sweep in one locked pass: a fragment no current-generation manifest names is dropped,
+/// and so is a pack that held only those.
+///
+/// The lock is exclusive across the mark *and* the sweep: a publisher that added a manifest in
+/// between would have its fragments look dead here, and its manifest would then name fragments that
+/// are gone. A missing fragment is a miss the cold path rebuilds, never a wrong value, but it is also
+/// a share that was thrown away.
+pub(crate) fn collect(root: &Path) -> std::io::Result<crate::store::frags::Sweep> {
+    let frags = crate::store::FRAGS.dir_in(root);
+    let _sweeping = crate::store::frags::Lock::exclusive(&frags)?;
+    let live = live_fragments(root);
+    crate::store::frags::sweep_in(&frags, &live)
+}
+
 /// Mark one family's manifests. An unreadable or undecodable file is skipped rather than fatal:
 /// collection reads a store other processes write.
 fn mark(dir: &Path, ext: &str, live: &mut HashSet<[u8; 32]>) {

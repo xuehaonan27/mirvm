@@ -300,6 +300,7 @@ build-script-rerun   build-script-rerun   fast  600   fixture=fixtures/cargoless
 deps-image           deps-image           gate  900   fixture=fixtures/cargoless/two-bin-workspace
 frag-share           frag-share           gate  900   fixture=fixtures/frag-sharing
 unit-share           unit-share           gate  900   fixture=fixtures/unit-sharing
+frag-collect         frag-collect         gate  900   fixture=fixtures/unit-sharing
 c-unwind             c-unwind             fast  900   fixture=fixtures/c-unwind-contract
 diagnostics          diagnostics          fast  300   fixture=programs/probe_diagnostic_router_direct.rs;programs/probe_diagnostic_router_script.rs
 prepare              prepare              fast  600   fixture=programs/prepare_clean.rs;programs/prepare_warning.rs

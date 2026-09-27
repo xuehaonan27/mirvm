@@ -70,16 +70,19 @@ impl Table {
                 if index > 0 {
                     out.push_str("  ");
                 }
-                let width = widths[index];
                 // A left-aligned last cell is not padded: trailing spaces are invisible in a
                 // terminal and would have to be reproduced exactly by anything comparing output. A
                 // right-aligned last cell is, so a number still lines up with the column above it.
-                if index + 1 == row.len() && cell.align == Align::Left {
-                    out.push_str(&cell.text);
-                } else if cell.align == Align::Right {
-                    let _ = write!(out, "{:>width$}", cell.text);
-                } else {
-                    let _ = write!(out, "{:<width$}", cell.text);
+                // A row of one cell has no column to line up with and no measured width, so it is
+                // printed as it stands.
+                match widths.get(index).filter(|_| row.len() > 1) {
+                    Some(&width) if cell.align == Align::Right => {
+                        let _ = write!(out, "{:>width$}", cell.text);
+                    }
+                    Some(&width) if index + 1 < row.len() => {
+                        let _ = write!(out, "{:<width$}", cell.text);
+                    }
+                    _ => out.push_str(&cell.text),
                 }
             }
             out.push('\n');
@@ -135,6 +138,18 @@ mod tests {
             table.render(),
             "  a heading that is much longer than any data row\n  aa    1\n  b   100\n"
         );
+    }
+
+    #[test]
+    fn a_row_of_one_cell_is_a_line_of_its_own() {
+        // A note or a heading can be the only row; it has no column width and must not be measured.
+        let mut table = Table::new(2);
+        table.row(vec![Cell::left("nothing to be cleared")]);
+        assert_eq!(table.render(), "  nothing to be cleared\n");
+        let mut mixed = Table::new(0);
+        mixed.row(vec![Cell::left("note")]);
+        mixed.row(vec![Cell::left("aa"), Cell::right("1")]);
+        assert_eq!(mixed.render(), "note\naa  1\n");
     }
 
     #[test]

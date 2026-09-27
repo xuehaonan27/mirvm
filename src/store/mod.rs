@@ -148,7 +148,7 @@ macro_rules! shape_of {
     (pack) => {
         Shape::Pack
     };
-    (generation($ext:literal)) => {
+    (generation($ext:expr)) => {
         Shape::Generation { ext: $ext }
     };
 }
@@ -174,7 +174,7 @@ macro_rules! flag_of {
 /// followed by the key or contract that makes deleting the family safe. `{host}` in a directory name
 /// is resolved by [`Family::path`].
 macro_rules! families {
-    ( $( $class:ident $entry:ident $dir:literal $shape:ident $(($ext:literal))? $( flag($flag:ident) )? ; )* ) => {
+    ( $( $class:ident $entry:ident $dir:literal $shape:ident $(($ext:expr))? $( flag($flag:ident) )? ; )* ) => {
         $(
             #[doc = concat!("`", $dir, "`: one family of the store, declared by the register below.")]
             pub(crate) const $entry: Family = Family {
@@ -201,8 +201,9 @@ families! {
     // content address; a pack is reachable only through the manifests that name its fragments.
     Cache FRAGS           "frags"           pack flag(Frags);
     // owners: image::units — one manifest per crate, content-named by unit key + manifest digest so a
-    // grown unit adds a manifest instead of overwriting the one a running program pinned.
-    Cache UNITS           "units"           keyed flag(Units);
+    // grown unit adds a manifest instead of overwriting the one a running program pinned. Generational
+    // like the closure manifest its format matches: a manifest another build wrote is prunable.
+    Cache UNITS           "units"           generation(crate::image::units::EXT) flag(Units);
     // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // owners: lower::global_asm, pack — materialized `global_asm!`/naked-fn objects; keyed by the

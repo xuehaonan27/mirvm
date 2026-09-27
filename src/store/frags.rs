@@ -60,6 +60,46 @@ fn pack_path(dir: &Path, bytes: &[u8]) -> PathBuf {
     ))
 }
 
+/// The family's publish/collect lock.
+///
+/// A publisher holds it shared across the fragment publish *and* the manifest that names them: a sweep
+/// between those two writes would see a fragment no manifest names yet and drop it, leaving a live
+/// manifest pointing at nothing. A sweep holds it exclusive across its mark and its sweep for the same
+/// reason in the other direction. `flock` releases it when the process dies, so a crash cannot wedge
+/// the family.
+pub(crate) struct Lock {
+    file: std::fs::File,
+}
+
+impl Lock {
+    pub(crate) fn shared(dir: &Path) -> std::io::Result<Lock> {
+        Lock::take(dir, false)
+    }
+
+    pub(crate) fn exclusive(dir: &Path) -> std::io::Result<Lock> {
+        Lock::take(dir, true)
+    }
+
+    fn take(dir: &Path, exclusive: bool) -> std::io::Result<Lock> {
+        std::fs::create_dir_all(dir)?;
+        // The lock's identity is the file, not its contents: it is never written, and a reader that
+        // only opens packs ignores it (its extension is not `.pack`).
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join("lock"))?;
+        crate::os::fs::flock(std::os::fd::AsRawFd::as_raw_fd(&file), exclusive)?;
+        Ok(Lock { file })
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = crate::os::fs::unlock(std::os::fd::AsRawFd::as_raw_fd(&self.file));
+    }
+}
+
 /// One session's fragments, staged before they are published as one pack.
 #[derive(Default)]
 pub(crate) struct Session {
@@ -283,6 +323,76 @@ impl Index {
     }
 }
 
+/// What one sweep took back.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sweep {
+    /// Packs with no live fragment at all.
+    pub removed: u64,
+    /// Packs rewritten with only their live fragments.
+    pub compacted: u64,
+    /// Bytes the family no longer holds.
+    pub reclaimed: u64,
+}
+
+impl Sweep {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.removed == 0 && self.compacted == 0
+    }
+}
+
+/// Drop every fragment no current-generation manifest names.
+///
+/// A pack is the unit of removal but not of liveness: a pack with no live fragment is deleted whole,
+/// and a pack whose live share is at most half its bytes is rewritten with only its live records under
+/// a new content-addressed name — published before the old file is removed, so a reader that has not
+/// seen the removal still finds every live fragment. A mostly live pack is left alone: a copy of it
+/// would buy back few bytes. The caller holds the family's exclusive lock.
+pub(crate) fn sweep_in(dir: &Path, live: &HashSet<[u8; 32]>) -> std::io::Result<Sweep> {
+    let mut sweep = Sweep::default();
+    for pack in Index::load_in(dir).packs {
+        let size = std::fs::metadata(&pack.path).map(|m| m.len()).unwrap_or(0);
+        let live_bytes: u64 = pack
+            .entries
+            .iter()
+            .filter(|entry| live.contains(&entry.0))
+            .map(|entry| u64::from(entry.2))
+            .sum();
+        if live_bytes == 0 {
+            std::fs::remove_file(&pack.path)?;
+            sweep.removed += 1;
+            sweep.reclaimed += size;
+            continue;
+        }
+        let total: u64 = pack
+            .entries
+            .iter()
+            .map(|entry| u64::from(entry.2))
+            .sum();
+        if live_bytes * 2 >= total {
+            continue;
+        }
+        let ids: Vec<[u8; 32]> = pack
+            .entries
+            .iter()
+            .map(|entry| entry.0)
+            .filter(|id| live.contains(id))
+            .collect();
+        let mut kept = HashMap::with_capacity(ids.len());
+        pack.read_into(&ids, &mut kept);
+        // A fragment the pack cannot hand back is kept where it is: compaction must never be the
+        // reason a live fragment disappears.
+        if kept.len() != ids.len() {
+            continue;
+        }
+        let bytes = pack_bytes(&kept.into_iter().collect());
+        crate::store::publish_bytes(&pack_path(dir, &bytes), &bytes)?;
+        std::fs::remove_file(&pack.path)?;
+        sweep.compacted += 1;
+        sweep.reclaimed += size;
+    }
+    Ok(sweep)
+}
+
 /// What the family holds, beyond the bytes on disk.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Inventory {
@@ -390,6 +500,34 @@ mod tests {
             assert_eq!(index.read_many(&[id]).get(&id), Some(&bytes));
         }
         assert!(!index.contains(&crate::vm::ir::frag::id_of(&body(200))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sweep_deletes_dead_packs_and_compacts_mostly_dead_ones() {
+        let dir = tmp("sweep");
+        // Three publishes: one entirely dead, one a quarter live, one three quarters live.
+        write_pack(&dir, &[1, 2, 3, 4]);
+        write_pack(&dir, &[5, 6, 7, 8]);
+        write_pack(&dir, &[9, 10, 11, 12]);
+        let live: HashSet<[u8; 32]> = [5u8, 9, 10, 11]
+            .iter()
+            .map(|tag| crate::vm::ir::frag::id_of(&body(*tag)))
+            .collect();
+
+        let swept = sweep_in(&dir, &live).unwrap();
+        assert_eq!(swept.removed, 1, "the pack with nothing live goes whole");
+        assert_eq!(swept.compacted, 1, "the mostly dead pack is rewritten");
+        assert!(swept.reclaimed > 0);
+        assert_eq!(Index::load_in(&dir).packs.len(), 2);
+        // Every live fragment is still readable, which is the property the rewrite must not break: the
+        // compacted pack is published under its new name before the old file is removed.
+        let ids: Vec<[u8; 32]> = live.iter().copied().collect();
+        assert_eq!(Index::load_in(&dir).read_many(&ids).len(), live.len());
+        // The mostly live pack keeps its dead fragment; a sweep of the same mark has nothing left to
+        // do beyond that.
+        let again = sweep_in(&dir, &live).unwrap();
+        assert!(again.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -453,12 +453,15 @@ pub(crate) fn store(
         return super::deps::degraded(bi);
     };
     // Fragments first: a manifest that names a fragment the store does not hold is a manifest the
-    // loader will refuse.
-    let published = session.publish();
-    if published.is_err() {
+    // loader will refuse. The publish lock is held across both writes: a sweep between them would see
+    // fragments no manifest names yet and drop them.
+    let dir = crate::store::UNITS.dir();
+    let Ok(_publishing) = crate::store::frags::Lock::shared(&crate::store::FRAGS.dir()) else {
+        return super::deps::degraded(bi);
+    };
+    if session.publish().is_err() {
         return super::deps::degraded(bi);
     }
-    let dir = crate::store::UNITS.dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return super::deps::degraded(bi);
     }

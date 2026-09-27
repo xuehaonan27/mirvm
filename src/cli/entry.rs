@@ -187,7 +187,22 @@ pub(super) fn cache_main(
             {
                 plan.stale = true;
             }
-            let report = crate::store::report::purge(&root, plan);
+            // The default purge also collects: a fragment no current-generation manifest names is
+            // dead by construction, and collecting is the whole point of marking them. A named family
+            // stays exactly that family, so the flag means what it says.
+            let swept = plan
+                .stale
+                .then(|| crate::image::collect::collect(&root))
+                .transpose();
+            let report = match swept {
+                Ok(swept) => crate::store::report::purge(&root, plan, swept),
+                Err(error) => {
+                    return Err(crate::error::Error::failure(
+                        Component::Cache,
+                        format!("fragment collection failed: {error}"),
+                    ));
+                }
+            };
             print!("{}", if json { report.json() } else { report.text() });
             Ok(ExitCode::SUCCESS)
         }
