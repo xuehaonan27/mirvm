@@ -12,7 +12,10 @@
 //! live in `program`, and the vocabulary they are written in is split by what it names: [`place`]
 //! is a value and the address it lives at, [`op`] is what is done to it. What remains here is the
 //! inline-asm site, the frozen-address load map, and the unwind action a terminator carries.
+//! [`frag`] is the same body seen as a stored artifact: the canonical form and the fragment id the
+//! fragment store shares.
 
+pub mod frag;
 mod op;
 mod place;
 mod program;

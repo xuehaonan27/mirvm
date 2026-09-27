@@ -236,11 +236,13 @@ pub(crate) mod linker;
 use linker::Linker;
 mod builtins;
 pub(crate) mod ffi_sig;
+mod frag_stats;
 mod main_catch;
 mod purity;
 mod rebase;
 use builtins::engine_builtins;
 pub(crate) use ffi_sig::{canonical_link_name, ffi_kind_of, freeze_c_fnptr_sig};
+use frag_stats::FragStats;
 use purity::{PurityStats, classify_purity};
 use rebase::Rebase;
 
@@ -961,6 +963,21 @@ fn lower_inner(
     instance.link_fn_addrs = module.fn_entry_links.iter().copied().collect();
     instance.rebuild_load_map();
     instance.rebuild_fn_addrs();
+    if crate::options::frag_stats() {
+        let frozen_bytes = |arena: &Option<crate::vm::frozen::FrozenArena>| {
+            arena.as_ref().map_or(0, |arena| arena.used())
+        };
+        let mut stats = FragStats::new();
+        if let Some(image) = &split_image {
+            stats.layer(
+                "image",
+                &image.module.funcs,
+                frozen_bytes(&image.instance.frozen),
+            );
+        }
+        stats.layer("delta", &module.funcs, frozen_bytes(&instance.frozen));
+        stats.dump();
+    }
     (module, instance, base_exports, split_image)
 }
 

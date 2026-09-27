@@ -222,17 +222,19 @@ parent document are the regression fence.
 
 ## 5. Verification
 
-- **Dedup probe before the fragment store is built** (the parent document's "measure before cache
-  design" discipline): a stats mode canonical-hashes split-lowered bodies and reports the share ratio
-  between two adjacent versions of a fixture crate and between two feature sets. That number fixes
-  the sharing-acceptance ratio below, so the gate tests a measured claim instead of an expectation.
+- **Dedup probe** (the parent document's "measure before cache design" discipline): `MIRVM_FRAG_STATS`
+  prints one canonical fragment id per lowered body plus a per-layer summary (bodies → fragments,
+  canonical and frozen bytes, frozen share), and the `frag-share` gate intersects the id sets of two
+  sessions. Measured on `fixtures/frag-sharing`: one changed function keeps 99.4% of the fragments
+  (98.8% of the union), one more feature keeps 99.4% (96.6%). Those numbers are what the
+  sharing-acceptance ratio below asserts.
 - **Unit determinism gate**: one unit built twice (threads 1 and 8, separate sessions) yields one
   manifest digest and one fragment set — the base-image byte-determinism gate, generalized.
 - **Equivalence gate**: cold full lowering versus a warm unit stack must produce byte-identical guest
   output through the existing diff channel, per the L2 acceptance rule.
 - **Sharing acceptance**: two projects with overlapping lockfiles produce one copy of every shared
-  unit; two adjacent versions of the fixture crate share ≥ the probe's predicted fragment ratio;
-  `cache status` reports live/dead fragment bytes and the dedup factor.
+  unit; two adjacent versions of the fixture crate keep ≥ 99% of their fragments (the `frag-share`
+  gate); `cache status` reports live/dead fragment bytes and the dedup factor.
 - **Collection safety**: purge under a concurrent publisher never leaves a manifest referencing a
   swept fragment (lock discipline §3.4); a manifest referencing a missing fragment is a miss that
   self-heals, never a runtime error.
