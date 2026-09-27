@@ -30,8 +30,10 @@
    allocation/guest-TLS inlining cell has not entered.
 7. **T-to-R is an ABI-compatible single switch**: enable the pinned-register ISA flag, lower the
    `get_ctx()` TLS load to a pinned-register read, and save/set/restore at the boundary entry. The flip
-   granularity is the whole JIT code cache recompiled under the new regime, which is free because the
-   cache is in-process volatile and mode B distributes bytecode, not machine code. Layering is never
+   granularity is the whole JIT code cache recompiled under the new regime, which is free because
+   mode B distributes bytecode, not machine code, and the persistent machine-code cache keys on the
+   regime, so a flip only cools that cache
+   ([jit-code-cache-design.md](jit-code-cache-design.md)). Layering is never
    per-function mixing within a process: in T code the pinned register is an ordinary callee-saved
    temporary, while R code assumes it holds the context, so cross-regime calls need wrapping.
 8. **Signal no longer goes through this boundary.** The kernel frame only atomically registers;

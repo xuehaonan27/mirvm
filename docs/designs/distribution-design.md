@@ -117,9 +117,13 @@ adds `data/` — `--all --data` is a full cold start.
 - **L0** — registry and git sources (`~/.cargo`), cross-project, free-ridden from Cargo.
 - **L1** — dependency rlib and MIR-rlib plus fingerprints (`~/.mirvm/build/target/...`), machine-wide shared.
 - **L1.5** — sysroot, native `.so`, asm stubs, script materialization; all content-hash keyed.
+- **L1.7 / L1.8** — per-crate unit manifests and the machine-wide content-addressed fragment store,
+  owned by [dep-sharing-design.md](dep-sharing-design.md).
 - **L2** — the post-mono engine-IR whole-package cache. This is the highest-value gap: it turns the
   load cost paid on every run into "deserialize and run".
-- **L3** — the JIT code cache, forbidden until the CFI/PLT/relocation work lands.
+- **L3** — the JIT machine-code cache, owned by [jit-code-cache-design.md](jit-code-cache-design.md):
+  relocatable per-function artifacts keyed by fragment id × jit-key, unlocked by the relocation
+  choke-point work recorded there.
 
 L2 and the two layers below it that mirror the runtime stack are one module tree: `src/image` holds
 the stack itself (`mod.rs`) beside the three persisted layers (`base.rs`, `deps.rs`, `program.rs`), and
@@ -160,7 +164,8 @@ design.
   everything ahead" assumption stops here; mode B also runs them once at packaging time.
 - Stable MIR is not a serialization format.
 - Runtime toolchain discovery is impossible.
-- The L3 JIT code cache stays forbidden until CFI, PLT and relocation are fixed.
+- The L3 JIT code cache lands only through [jit-code-cache-design.md](jit-code-cache-design.md)'s
+  relocation contract; ad-hoc persistence of JIT output stays forbidden.
 - Full cross-project sharing of the L1 target dir is not delivered beyond same-workspace cross-bin
   smoke.
 
