@@ -462,7 +462,7 @@ pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
             .expect("Cargo rustdoc phase is missing the sysroot option")
             .display()
             .to_string();
-        let builder = crate::options::protocol::doctest_builder()
+        let builder = crate::options::doctest_builder()
             .expect("Cargo rustdoc phase is missing the doctest builder option");
         args = cargo_doctest_rustdoc_args(args, sysroot, builder);
     }

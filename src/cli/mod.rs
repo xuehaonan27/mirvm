@@ -215,8 +215,8 @@ pub fn main() -> ExitCode {
     if first == "__cless-run-root" {
         return crate::cargoless::driver::run_root_recipe(argv);
     }
-    if crate::options::protocol::cargo_session() {
-        if crate::options::protocol::cargo_compiler() {
+    if crate::options::cargo_session() {
+        if crate::options::cargo_compiler() {
             // Cargo's RUSTC slot: first is already the first real rustc argument.
             cargo_shim::phase_compiler(std::iter::once(first).chain(argv));
         }

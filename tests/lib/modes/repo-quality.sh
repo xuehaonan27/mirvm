@@ -43,6 +43,54 @@ check_store_families() {
     fi
 }
 
+# A family's directory is derived where the register says it may be. The `owners:` clause above each
+# line names the module(s) allowed to name `store::CONST` — the writer, plus a reader with a reason to
+# relocate the path — and every other consumer goes through a `Family` it was handed or through the
+# module that owns it. A family line with no clause is itself a failure: the ownership claim cannot be
+# dropped silently.
+check_store_naming() {
+    local bad
+    bad=$(
+        awk '
+            /^families! \{/ { inside = 1; next }
+            /^\}/ { inside = 0 }
+            /^[ \t]*\/\/ owners:/ {
+                line = $0
+                sub(/^[ \t]*\/\/ owners:[ \t]*/, "", line)
+                sub(/[ \t]+—.*$/, "", line)
+                owners = line
+            }
+            inside && /^[ \t]*(Cache|Data|Build|Run)[ \t]+[A-Z_]+[ \t]/ {
+                print $2 "\t" owners
+                owners = ""
+            }
+        ' src/store/mod.rs \
+        | while IFS=$'\t' read -r family owners; do
+            if [ -z "$owners" ]; then
+                printf '%s: the register line above it names no owner\n' "$family"
+                continue
+            fi
+            grep -rn "store::$family\b" src --include='*.rs' | grep -v '^src/store/' \
+            | while IFS=: read -r file line _; do
+                allowed=no
+                for owner in $(printf '%s' "$owners" | tr ',' ' '); do
+                    prefix="src/$(printf '%s' "$owner" | sed 's|::|/|g')"
+                    if [ "$file" = "$prefix.rs" ] || [ "${file#"$prefix"/}" != "$file" ]; then
+                        allowed=yes
+                    fi
+                done
+                [ "$allowed" = yes ] \
+                    || printf '%s:%s names store::%s (owners: %s)\n' "$file" "$line" "$family" "$owners"
+            done
+        done
+    )
+    if [ -n "$bad" ]; then
+        echo "store families named outside the module the register gives them to:" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
 # The pinned toolchain's layout has one owner. `src/options.rs` declares the constant and
 # `src/sysroot.rs` derives the paths from it; a consumer names `sysroot::toolchain::…` rather than
 # joining `bin/rustc` again, which is how one layout came to be spelled in eight modules.
@@ -194,6 +242,7 @@ mode_run() {
     run_check "option readers" check_option_readers
     run_check "toolchain layout" check_toolchain_layout
     run_check "store families" check_store_families
+    run_check "store naming" check_store_naming
     run_check "no anyhow" check_no_anyhow
     run_check "error codes" check_error_codes
     run_check "diag purity" check_diag_purity
