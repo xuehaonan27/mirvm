@@ -5,26 +5,32 @@
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
-    fn frozen_reloc_push(&mut self, image: bool, reloc: ir::FrozenReloc) {
-        if image {
-            self.split
+    fn frozen_reloc_push(&mut self, home: Option<usize>, reloc: ir::FrozenReloc) {
+        match home {
+            Some(home) => self
+                .split
                 .as_mut()
-                .expect("image frozen relocation requires split")
-                .image_frozen_relocs
-                .push(reloc);
-        } else {
-            self.frozen_relocs.push(reloc);
+                .expect("a home frozen relocation requires split")
+                .home_mut(home)
+                .frozen_relocs
+                .push(reloc),
+            None => self.frozen_relocs.push(reloc),
         }
     }
 
-    /// Index of `name` in this side's symbol table; registers it on first sight. The
-    /// image side keeps its own tables in `Split`.
-    pub(super) fn got_intern(&mut self, name: &str, weak: bool, image: bool) -> u32 {
-        let (syms, idx_map) = if image {
-            let s = self.split.as_mut().expect("image got table requires split");
-            (&mut s.image_got_syms, &mut s.image_got_idx)
-        } else {
-            (&mut self.got_syms, &mut self.got_idx)
+    /// Index of `name` in this side's symbol table; registers it on first sight. Each home keeps its
+    /// own tables in `Split`.
+    pub(super) fn got_intern(&mut self, name: &str, weak: bool, home: Option<usize>) -> u32 {
+        let (syms, idx_map) = match home {
+            Some(home) => {
+                let layer = self
+                    .split
+                    .as_mut()
+                    .expect("a home got table requires split")
+                    .home_mut(home);
+                (&mut layer.got_syms, &mut layer.got_idx)
+            }
+            None => (&mut self.got_syms, &mut self.got_idx),
         };
         if let Some(&i) = idx_map.get(name) {
             // Weak/strong merge: one strong reference makes the merged entry strong.
@@ -45,16 +51,17 @@ impl<'tcx> Linker<'tcx> {
         i
     }
 
-    /// Records a fixup site for this side; the image side stores it in `Split`.
-    pub(super) fn got_fixup_push(&mut self, image: bool, f: ir::GotFixup) {
-        if image {
-            self.split
+    /// Records a fixup site for one side; a home stores it in its own layer.
+    pub(super) fn got_fixup_push(&mut self, home: Option<usize>, f: ir::GotFixup) {
+        match home {
+            Some(home) => self
+                .split
                 .as_mut()
-                .expect("image got table requires split")
-                .image_got_fixups
-                .push(f);
-        } else {
-            self.got_fixups.push(f);
+                .expect("a home got table requires split")
+                .home_mut(home)
+                .got_fixups
+                .push(f),
+            None => self.got_fixups.push(f),
         }
     }
 
@@ -63,32 +70,33 @@ impl<'tcx> Linker<'tcx> {
     /// serializable, while the startup phase refills its contents. Opens the cell on
     /// first use, initializes it to `init`, and records a fixup at addend 0.
     pub(super) fn foreign_slot(&mut self, name: &str, init: u64, weak: bool) -> u64 {
-        let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
+        let home = self.split.as_ref().and_then(|s| s.current);
         // Merge before the cache hit: a later strong reference must upgrade the merged
         // entry's weak flag even when it reuses an existing slot.
-        let idx = self.got_intern(name, weak, ctx_image);
-        if let Some(&a) = self.foreign_slots.get(&(name.into(), ctx_image)) {
+        let idx = self.got_intern(name, weak, home);
+        if let Some(&a) = self.foreign_slots.get(&(name.into(), home)) {
             return a;
         }
-        let addr = if ctx_image {
-            self.split
+        let addr = match home {
+            Some(home) => self
+                .split
                 .as_mut()
-                .expect("image context requires split")
-                .image_frozen
-                .alloc(8, 8)
-        } else {
-            self.frozen.alloc(8, 8)
+                .expect("a home context requires split")
+                .home_mut(home)
+                .frozen
+                .alloc(8, 8),
+            None => self.frozen.alloc(8, 8),
         };
         unsafe { *(addr as *mut u64) = init };
         self.got_fixup_push(
-            ctx_image,
+            home,
             ir::GotFixup {
                 addr: ir::LinkAddr(addr),
                 sym: idx,
                 addend: 0,
             },
         );
-        self.foreign_slots.insert((name.into(), ctx_image), addr);
+        self.foreign_slots.insert((name.into(), home), addr);
         addr
     }
 
@@ -129,8 +137,8 @@ impl<'tcx> Linker<'tcx> {
             return None;
         }
         let name = canonical_link_name(self.tcx.symbol_name(inst).name);
-        let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
-        self.foreign_slots.get(&(name.into(), ctx_image)).copied()
+        let home = self.split.as_ref().and_then(|s| s.current);
+        self.foreign_slots.get(&(name.into(), home)).copied()
     }
 
     /// Materializes a memory allocation: allocate an address, copy the bytes, then
@@ -141,23 +149,27 @@ impl<'tcx> Linker<'tcx> {
         &mut self,
         id: AllocId,
         alloc: ConstAllocation<'tcx>,
-        image: bool,
+        home: Option<usize>,
     ) -> Result<u64, crate::lower::Error> {
         let a = alloc.inner();
         let size = a.size().bytes();
         let align = a.align.bytes();
-        let base = if image {
-            let s = self
-                .split
-                .as_mut()
-                .expect("image materialization requires split");
-            let base = s.image_frozen.alloc(size, align);
-            s.image_alloc_addrs.insert(id, base); // allocate before filling (cycle-safe)
-            base
-        } else {
-            let base = self.frozen.alloc(size, align);
-            self.alloc_addrs.insert(id, base); // allocate before filling (cycle-safe)
-            base
+        let base = match home {
+            Some(home) => {
+                let layer = self
+                    .split
+                    .as_mut()
+                    .expect("home materialization requires split")
+                    .home_mut(home);
+                let base = layer.frozen.alloc(size, align);
+                layer.alloc_addrs.insert(id, base); // allocate before filling (cycle-safe)
+                base
+            }
+            None => {
+                let base = self.frozen.alloc(size, align);
+                self.alloc_addrs.insert(id, base); // allocate before filling (cycle-safe)
+                base
+            }
         };
         let bytes = a.inspect_with_uninit_and_ptr_outside_interpreter(0..size as usize);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, size as usize) };
@@ -184,9 +196,9 @@ impl<'tcx> Linker<'tcx> {
             // extern fn) gets a fixup at this word: the startup phase refills it by name,
             // while this process's resolution stays the cold-path initial value.
             if let Some((name, weak)) = self.foreign_alloc_sym.get(&prov.alloc_id()).cloned() {
-                let idx = self.got_intern(&name, weak, image);
+                let idx = self.got_intern(&name, weak, home);
                 self.got_fixup_push(
-                    image,
+                    home,
                     ir::GotFixup {
                         addr: ir::LinkAddr(base + off.bytes()),
                         sym: idx,
@@ -195,7 +207,7 @@ impl<'tcx> Linker<'tcx> {
                 );
             } else if let Some(entry_target) = entry_target {
                 self.frozen_reloc_push(
-                    image,
+                    home,
                     ir::FrozenReloc {
                         at: ir::LinkAddr(base + off.bytes()),
                         target: if entry_target {

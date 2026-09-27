@@ -53,7 +53,9 @@ pub(crate) struct Linker<'tcx> {
     /// emission use this to turn a baked value into a slot.
     pub(crate) foreign_alloc_sym: FxHashMap<AllocId, (Box<str>, bool)>,
     /// (symbol name, image context) → GOT slot real address (slot = ordinary 8-byte cell in this side's frozen area)
-    pub(crate) foreign_slots: std::collections::HashMap<(Box<str>, bool), u64>,
+    /// Foreign GOT slots, keyed by symbol and the home whose frozen area holds the slot (`None` = the
+    /// delta). One symbol can need a slot in more than one domain.
+    pub(crate) foreign_slots: std::collections::HashMap<(Box<str>, Option<usize>), u64>,
     /// Entry-stub code arena and recipe table (the image side lives in `Split`): instance → stub idx. The
     /// stub's domain is determined by the instance class, the same discipline as fn entries.
     pub(crate) code_arena: crate::vm::codearena::StubArena,
@@ -164,28 +166,29 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// Activate split (image/delta) lowering: the image frozen area lands in the spline k=0 domain. If that
+    /// The home a *definition's crate* belongs to: the delta (`None`) for the local crate, a home index
+    /// otherwise. Statics, weak cells, fn entries and TLS carry one identity each, so their placement
+    /// follows the defining crate rather than the referencing context; a reference from a higher home
+    /// finds them through the lower homes' tables.
+    pub(super) fn home_of_krate(&self, krate: rustc_span::def_id::CrateNum) -> Option<usize> {
+        (self.split.is_some() && krate != rustc_hir::def_id::LOCAL_CRATE).then_some(0)
+    }
+
+    /// Which home an instance is lowered in: the delta (`None`) or a home index.
+    ///
+    /// The unit table's home rule (`image::units`, measured by `MIRVM_FRAG_STATS`) becomes this
+    /// placement rule when a session can load and publish per unit; until then the purity classifier
+    /// decides and every homed instance goes to home 0 — the single closure image the manifest
+    /// describes today.
+    pub(super) fn place(&self, inst: Instance<'tcx>) -> Option<usize> {
+        classify_purity(inst).is_image().then_some(0)
+    }
+
+    /// Activate split (home/delta) lowering: each home's frozen area lands in its spline domain. If that
     /// domain is occupied, fall back to a dynamic base; semantics are unchanged, but the write phase refuses
     /// serialization and self-heals.
     pub(super) fn activate_split(&mut self) {
-        self.split = Some(Split {
-            image_frozen: FrozenArena::new_image(0),
-            image_queue: VecDeque::new(),
-            image_funcs: Vec::new(),
-            image_fn_next: 0,
-            image_tls_slots: Vec::new(),
-            image_asm_sites: Vec::new(),
-            image_alloc_addrs: FxHashMap::default(),
-            image_fn_entries: FxHashMap::default(),
-            current_image: false,
-            image_insts: Vec::new(),
-            image_got_syms: Vec::new(),
-            image_got_idx: FxHashMap::default(),
-            image_got_fixups: Vec::new(),
-            image_frozen_relocs: Vec::new(),
-            image_code_arena: crate::vm::codearena::StubArena::new_image(0),
-            image_stub_sites: Vec::new(),
-        });
+        self.split = Some(Split::activate());
     }
 
     /// Reserve an asm-stub slot, returning (AsmStubId, symbol name); the text follows via `set_asm_stub`.
@@ -197,14 +200,14 @@ impl<'tcx> Linker<'tcx> {
     /// `mirvm_asm_xd{k}`. Delta names are decoupled from bit order because that order is only known at wrap-up.
     pub(super) fn reserve_asm_stub(&mut self) -> (ir::AsmStubId, Box<str>) {
         if let Some(s) = &mut self.split {
-            if s.current_image {
-                let j = s.image_asm_sites.len() as ir::AsmStubId;
-                let name: Box<str> = format!("mirvm_asm_xi{j}").into();
-                s.image_asm_sites.push(ir::AsmSite {
+            if let Some(home) = s.current {
+                let j = s.cur().asm_sites.len() as ir::AsmStubId;
+                let name: Box<str> = format!("mirvm_asm_xh{home}_{j}").into();
+                s.cur().asm_sites.push(ir::AsmSite {
                     name: name.clone(),
                     text: String::new(),
                 });
-                return (IMAGE_TAG | j, name);
+                return (home_tag(home, j), name);
             }
             let k = self.delta_first_asm + self.asm_sites.len() as ir::AsmStubId;
             let name: Box<str> = format!("mirvm_asm_xd{k}").into();
@@ -223,12 +226,12 @@ impl<'tcx> Linker<'tcx> {
         (id, name)
     }
     pub(super) fn set_asm_stub(&mut self, id: ir::AsmStubId, text: String) {
-        if id & IMAGE_TAG != 0 {
+        if let Some(home) = id_home(id) {
             let s = self
                 .split
                 .as_mut()
                 .expect("tagged stub id exists only in split mode");
-            s.image_asm_sites[(id & !IMAGE_TAG) as usize].text = text;
+            s.home_mut(home).asm_sites[id_ordinal(id) as usize].text = text;
         } else {
             self.asm_sites[(id - self.delta_first_asm) as usize].text = text;
         }
@@ -259,19 +262,25 @@ impl<'tcx> Linker<'tcx> {
         // In split mode the TLS identity domain follows def_id.krate: non-local goes to the image slot area
         // (a single identity). An image context encountering local TLS violates the purity downward closure
         // (a classifier bug), so reject loudly.
+        let home = self
+            .split
+            .is_some()
+            .then(|| self.home_of_krate(def_id.krate))
+            .flatten();
         if let Some(s) = &mut self.split {
-            if def_id.krate != rustc_hir::def_id::LOCAL_CRATE {
-                let j = s.image_tls_slots.len() as ir::TlsId;
-                s.image_tls_slots.push(ir::TlsSlot {
+            if let Some(home) = home {
+                let layer = s.home_mut(home);
+                let j = layer.tls_slots.len() as ir::TlsId;
+                layer.tls_slots.push(ir::TlsSlot {
                     template: ir::LinkAddr(template),
                     size,
                     align: align as u32,
                 });
-                let id = IMAGE_TAG | j;
+                let id = home_tag(home, j);
                 self.tls_ids.insert(def_id, id);
                 return Ok(id);
             }
-            if s.current_image {
+            if s.current.is_some() {
                 panic!(
                     "A2 closure violation: image instance references local TLS static (classifier missed)"
                 );

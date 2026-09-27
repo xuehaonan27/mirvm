@@ -1,48 +1,55 @@
-//! Rebase: remap the ids a dependency image contributes into the delta namespace while
-//! the image module is absorbed. Function/TLS/asm ids share one shape: a tagged
-//! `TAG|j` becomes `first + j`, an untagged `d >= first` becomes `d + image_count`, and
-//! a base-image id below `first` is left alone.
+//! Rebase: remap the ids a home contributes into the delta namespace while the home's module is
+//! absorbed. Function/TLS/asm ids share one shape: a tagged `home_tag(h, j)` becomes `first[h] + j`,
+//! an untagged id at or above the delta's first id is shifted by the total the homes contributed, and
+//! a base-image id below that stays put.
 
 use super::*;
 
-/// Function/TLS/asm ids are remapped the same way: `TAG|j` -> `first + j`, an untagged
-/// `d >= first` -> `d + image_count`, and a base-image id below `first` stays put.
+/// Per-home rebase: the absolute base each home's ids start at, and the totals the delta shifts by.
 pub(super) struct Rebase {
-    pub(super) first_fn: u32,
-    pub(super) image_fns: u32,
-    pub(super) first_tls: u32,
-    pub(super) image_tls: u32,
-    pub(super) first_asm: u32,
-    pub(super) image_asm: u32,
+    /// Absolute first function/TLS/asm id of each home, indexed by home index.
+    pub(super) first_fn: Vec<u32>,
+    pub(super) first_tls: Vec<u32>,
+    pub(super) first_asm: Vec<u32>,
+    /// Totals the delta's ids shift by (every home that is below it).
+    pub(super) total_fns: u32,
+    pub(super) total_tls: u32,
+    pub(super) total_asm: u32,
 }
 
 impl Rebase {
     pub(super) fn fn_id(&self, id: u32) -> u32 {
-        if id & IMAGE_TAG != 0 {
-            self.first_fn + (id & !IMAGE_TAG)
-        } else if id >= self.first_fn {
-            id + self.image_fns
-        } else {
-            id
+        match id_home(id) {
+            Some(home) => self.first_fn[home] + id_ordinal(id),
+            None if id >= self.delta_first_fn() => id + self.total_fns,
+            None => id,
         }
     }
     pub(super) fn tls_id(&self, id: u32) -> u32 {
-        if id & IMAGE_TAG != 0 {
-            self.first_tls + (id & !IMAGE_TAG)
-        } else if id >= self.first_tls {
-            id + self.image_tls
-        } else {
-            id
+        match id_home(id) {
+            Some(home) => self.first_tls[home] + id_ordinal(id),
+            None if id >= self.delta_first_tls() => id + self.total_tls,
+            None => id,
         }
     }
     pub(super) fn asm_id(&self, id: u32) -> u32 {
-        if id & IMAGE_TAG != 0 {
-            self.first_asm + (id & !IMAGE_TAG)
-        } else if id >= self.first_asm {
-            id + self.image_asm
-        } else {
-            id
+        match id_home(id) {
+            Some(home) => self.first_asm[home] + id_ordinal(id),
+            None if id >= self.delta_first_asm() => id + self.total_asm,
+            None => id,
         }
+    }
+
+    /// The delta's own first ids: where its untagged ids start. They are derived from the totals, so
+    /// the shift above and this threshold cannot disagree.
+    fn delta_first_fn(&self) -> u32 {
+        self.first_fn.first().copied().unwrap_or(0)
+    }
+    fn delta_first_tls(&self) -> u32 {
+        self.first_tls.first().copied().unwrap_or(0)
+    }
+    fn delta_first_asm(&self) -> u32 {
+        self.first_asm.first().copied().unwrap_or(0)
     }
 
     pub(super) fn guest_panic_cleanup(&self, plan: &mut ir::GuestPanicCleanup) {
@@ -131,24 +138,50 @@ impl Rebase {
 mod tests {
     use super::*;
 
+    /// Two homes: home 0 owns ids 10..12, home 1 owns 12..14, and the delta starts at 14.
+    fn rebase() -> Rebase {
+        Rebase {
+            first_fn: vec![10, 12],
+            first_tls: vec![20, 22],
+            first_asm: vec![30, 31],
+            total_fns: 4,
+            total_tls: 3,
+            total_asm: 2,
+        }
+    }
+
     #[test]
-    fn guest_panic_cleanup_rebases_image_and_delta_functions() {
-        let rb = Rebase {
-            first_fn: 10,
-            image_fns: 3,
-            first_tls: 0,
-            image_tls: 0,
-            first_asm: 0,
-            image_asm: 0,
-        };
+    fn home_ids_rebase_to_their_home_and_delta_ids_shift_past_every_home() {
+        let rb = rebase();
+        assert_eq!(rb.fn_id(home_tag(0, 0)), 10);
+        assert_eq!(rb.fn_id(home_tag(0, 1)), 11);
+        assert_eq!(rb.fn_id(home_tag(1, 0)), 12);
+        assert_eq!(rb.fn_id(home_tag(1, 3)), 15);
+        // A base id below the first home stays; the delta's own ids move past both homes.
+        assert_eq!(rb.fn_id(3), 3);
+        assert_eq!(rb.fn_id(14), 18);
+    }
+
+    #[test]
+    fn tls_and_asm_use_their_own_home_bases() {
+        let rb = rebase();
+        assert_eq!(rb.tls_id(home_tag(1, 0)), 22);
+        assert_eq!(rb.tls_id(20), 23);
+        assert_eq!(rb.asm_id(home_tag(0, 0)), 30);
+        assert_eq!(rb.asm_id(30), 32);
+    }
+
+    #[test]
+    fn guest_panic_cleanup_rebases_home_and_delta_functions() {
+        let rb = rebase();
         let mut plan = ir::GuestPanicCleanup {
-            cleanup: IMAGE_TAG | 1,
-            drop_payload: 10,
+            cleanup: home_tag(1, 1),
+            drop_payload: 14,
         };
 
         rb.guest_panic_cleanup(&mut plan);
 
-        assert_eq!(plan.cleanup, 11);
-        assert_eq!(plan.drop_payload, 13);
+        assert_eq!(plan.cleanup, 13);
+        assert_eq!(plan.drop_payload, 18);
     }
 }
