@@ -564,10 +564,7 @@ impl Translator<'_, '_> {
                 let pd = self.place_addr(dst);
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -577,10 +574,7 @@ impl Translator<'_, '_> {
             Stmt::SimdUn { dst, a, .. } => {
                 let pd = self.place_addr(dst);
                 let pa = self.place_addr(a);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -592,10 +586,7 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pc = self.place_addr(c);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -609,10 +600,7 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let ps = self.place_addr(shift);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -622,10 +610,7 @@ impl Translator<'_, '_> {
             Stmt::SimdCast { dst, src, .. } => {
                 let pd = self.place_addr(dst);
                 let ps = self.place_addr(src);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -639,10 +624,7 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pd = self.place_addr(dst);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -656,10 +638,7 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pd = self.place_addr(dst);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -677,10 +656,7 @@ impl Translator<'_, '_> {
                 let pp = self.place_addr(ptrs);
                 let pm = self.place_addr(mask);
                 let pd = self.place_addr(dst);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -693,10 +669,7 @@ impl Translator<'_, '_> {
                 let pv = self.place_addr(values);
                 let pp = self.place_addr(ptrs);
                 let pm = self.place_addr(mask);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -714,10 +687,7 @@ impl Translator<'_, '_> {
                 let (pbase, _) = self.operand(base);
                 let pv = self.place_addr(passthru);
                 let pd = self.place_addr(dst);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -730,10 +700,7 @@ impl Translator<'_, '_> {
                 let pm = self.place_addr(mask);
                 let (pbase, _) = self.operand(base);
                 let pv = self.place_addr(values);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -743,10 +710,7 @@ impl Translator<'_, '_> {
             Stmt::SimdExtractDyn { src, idx, dst, .. } => {
                 let ps = self.place_addr(src);
                 let (i, _) = self.operand(idx);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -762,10 +726,7 @@ impl Translator<'_, '_> {
                 let pd = self.place_addr(dst);
                 let (i, _) = self.operand(idx);
                 let (v, _) = self.operand(val);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -778,10 +739,7 @@ impl Translator<'_, '_> {
                 let pp = self.place_addr(ptrs);
                 let po = self.place_addr(offsets);
                 let pd = self.place_addr(dst);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -791,10 +749,7 @@ impl Translator<'_, '_> {
             Stmt::SimdSplat { dst, val, .. } => {
                 let pd = self.place_addr(dst);
                 let (v, _) = self.operand(val);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -805,10 +760,7 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pd = self.place_addr(dst);
-                let sp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self.site_stmt(st);
                 let z = self.b.ins().iconst(types::I64, 0);
                 let fref = self
                     .module
@@ -820,7 +772,7 @@ impl Translator<'_, '_> {
             // trap is a fallback, because the helper does not return.
             Stmt::Trap(reason) => {
                 let fref = self.module.declare_func_in_func(self.trap, self.b.func);
-                let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);
+                let p = self.site_trap_reason(reason, Some(self.item));
                 let n = self.b.ins().iconst(types::I64, reason.len() as i64);
                 let f = self.b.ins().iconst(types::I64, -1);
                 self.b.ins().call(fref, &[p, n, f]);

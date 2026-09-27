@@ -24,6 +24,19 @@ mod value;
 
 pub(super) struct Translator<'a, 'b> {
     pub(super) shared: &'a Shared,
+    /// The function being built: a site's symbol carries it, so one function's relocation list maps
+    /// back onto that function's sites.
+    pub(super) func: u32,
+    /// Where a site's baked value is published for the module's lookup hook ([`crate::vm::jit::reloc`]).
+    pub(super) values: &'a std::sync::Arc<reloc::Values>,
+    /// The sites this body named, in emission order. Read out after the build.
+    pub(super) sites: Vec<Site>,
+    /// Their module-level data ids, parallel to `sites`.
+    pub(super) site_data: Vec<u32>,
+    /// The block and statement being translated right now: an interior-pointer site names the body
+    /// position it belongs to, so the loader can find it again in the resident body.
+    pub(super) block: u32,
+    pub(super) item: u32,
     /// The domain this body is being compiled for. The PLT hot path bakes the
     /// address of that domain's `slots_fast` into the machine code, so a trace
     /// body can only ever resolve trace callees (and vice versa).
@@ -87,6 +100,80 @@ impl Translator<'_, '_> {
         v
     }
 
+    /// Bake an absolute only this process knows and record where it came from.
+    ///
+    /// Every address a guest body names goes through here — the value is what this process uses now,
+    /// and the recorded site is what a stored entry replays later. A raw `iconst` of an address would
+    /// leave the backend with nothing to report, so the stored entry could not find it.
+    pub(super) fn site(&mut self, site: Site, value: u64) -> Value {
+        let name = reloc::name(self.func, self.sites.len());
+        if let Ok(mut values) = self.values.lock() {
+            values.insert(name.clone().into_boxed_str(), value as usize);
+        }
+        // A preemptible declaration: the module resolves the name through the lookup hook above, and a
+        // name it cannot resolve is a zero rather than a failure of the whole compile.
+        let data = self
+            .module
+            .declare_data(&name, Linkage::Preemptible, false, false)
+            .expect("a site symbol is well formed");
+        self.site_data.push(data.as_u32());
+        self.sites.push(site);
+        let global = self.module.declare_data_in_func(data, self.b.func);
+        self.b.ins().global_value(types::I64, global)
+    }
+
+    /// The statement being translated, for a helper that re-matches it.
+    pub(super) fn site_stmt(&mut self, st: &ir::Stmt) -> Value {
+        self.site(
+            Site::Body(Body::Stmt {
+                block: self.block,
+                item: self.item,
+            }),
+            st as *const ir::Stmt as u64,
+        )
+    }
+
+    /// The statement's rvalue, for the wide helpers that re-match it.
+    pub(super) fn site_rvalue(&mut self, rv: &ir::Rvalue) -> Value {
+        self.site(
+            Site::Body(Body::Rvalue {
+                block: self.block,
+                item: self.item,
+            }),
+            rv as *const ir::Rvalue as u64,
+        )
+    }
+
+    /// The builtin a terminator calls.
+    pub(super) fn site_builtin(&mut self, builtin: &ir::Builtin) -> Value {
+        self.site(
+            Site::Body(Body::Builtin { block: self.block }),
+            builtin as *const ir::Builtin as u64,
+        )
+    }
+
+    /// A foreign call's signature, or the symbol string inside it.
+    pub(super) fn site_foreign_sig(&mut self, part: SigPart, value: u64) -> Value {
+        self.site(
+            Site::Body(Body::ForeignSig {
+                block: self.block,
+                part,
+            }),
+            value,
+        )
+    }
+
+    /// A trap's message: `item` is the statement's index, `None` for a terminator's.
+    pub(super) fn site_trap_reason(&mut self, reason: &str, item: Option<u32>) -> Value {
+        self.site(
+            Site::Body(Body::TrapReason {
+                block: self.block,
+                item,
+            }),
+            reason.as_ptr() as u64,
+        )
+    }
+
     fn var(&mut self, off: u32) -> Variable {
         if let Some(&v) = self.vars.get(&off) {
             return v;
@@ -137,7 +224,7 @@ impl Translator<'_, '_> {
             }
             Operand::AddrImm(addr) => {
                 let runtime = self.shared.instance.resolve_link_addr(*addr);
-                (self.b.ins().iconst(types::I64, runtime as i64), Width::W64)
+                (self.site(Site::Frozen(*addr), runtime), Width::W64)
             }
             Operand::Mem { expr, width } => {
                 let a = self.place_addr(expr);
@@ -273,7 +360,9 @@ impl Translator<'_, '_> {
         for (bi, blk) in body.blocks.iter().enumerate() {
             self.b.switch_to_block(blocks[bi]);
             self.poll_signals();
-            for st in &blk.stmts {
+            self.block = bi as u32;
+            for (item, st) in blk.stmts.iter().enumerate() {
+                self.item = item as u32;
                 self.stmt(st);
             }
             self.term(func, body, &blk.term, &blocks);

@@ -108,6 +108,11 @@ impl<'a> Compiler<'a> {
             self.strict_fail(func);
             return;
         }
+        // Finalize resolved every site's name, and the module caches what it resolved: the values no
+        // longer have to live, and the table must not grow with the process's compile count.
+        reloc::forget(&self.values, func, self.sites.len());
+        self.sites.clear();
+        self.site_data.clear();
         self.register_pending_eh_frames();
         let ranges = self.finalized_symbol_ranges(symbols);
 
@@ -325,6 +330,12 @@ impl<'a> Compiler<'a> {
             };
             let mut tr = Translator {
                 shared: self.shared,
+                func,
+                values: &self.values,
+                sites: Vec::new(),
+                site_data: Vec::new(),
+                block: 0,
+                item: 0,
                 domain: self.domain,
                 module: &mut self.module,
                 b: &mut b,
@@ -360,6 +371,8 @@ impl<'a> Compiler<'a> {
             };
             tr.build(func, body);
             has_try_call = tr.has_try_call;
+            self.sites = std::mem::take(&mut tr.sites);
+            self.site_data = std::mem::take(&mut tr.site_data);
             b.seal_all_blocks();
             b.finalize();
         }
@@ -389,6 +402,24 @@ impl<'a> Compiler<'a> {
             self.pending_unwind.push((id, ui, lsda));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
+        // The site table, read from the backend's relocation list while the code is still in hand. A
+        // recorded site the list does not mention is an absolute nothing could replay, so the two
+        // counts must agree.
+        let placed = {
+            let compiled = cctx.compiled_code()?;
+            reloc::placed(&cctx.func, compiled, &self.sites, &self.site_data)
+        };
+        // A recorded site is not always placed: the optimizer removes a block or a fold, and the
+        // instruction with it, so the two counts are reported rather than compared — what a stored
+        // entry replays is the relocation list, and every relocation that names a site has one.
+        if crate::options::jit_debug() {
+            eprintln!(
+                "mirvm-jit-debug: f{func} {} of {} recorded sites placed",
+                placed.len(),
+                self.sites.len()
+            );
+        }
+        self.shared.jit.record_sites(self.domain, func, placed);
         self.module.clear_context(&mut cctx);
         Some((
             id,

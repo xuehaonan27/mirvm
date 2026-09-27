@@ -131,6 +131,16 @@ pub struct JitState {
     pub guest_code: RwLock<Vec<JitCodeRange>>,
     /// All Cranelift code ranges of this engine, for profiling and integrity checks.
     symbol_ranges: RwLock<Vec<JitSymbolRange>>,
+    /// What each compiled fast body bakes, and where each absolute landed: the table a stored entry
+    /// replays, and what the completeness check compares the recorded sites against.
+    sites: RwLock<Vec<JitSites>>,
+}
+
+/// One compiled body's absolutes ([`crate::vm::jit::reloc`]).
+pub struct JitSites {
+    pub domain: CodeDomain,
+    pub func: u32,
+    pub placed: Vec<super::reloc::Placed>,
 }
 
 impl JitState {
@@ -151,7 +161,37 @@ impl JitState {
             stopping: AtomicBool::new(false),
             guest_code: RwLock::new(Vec::new()),
             symbol_ranges: RwLock::new(Vec::new()),
+            sites: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Record one compiled body's absolutes. A later compilation replaces an earlier one of the same
+    /// function and domain: a body is compiled once per domain, and a recompile must not leave two
+    /// tables for one entry.
+    pub(crate) fn record_sites(
+        &self,
+        domain: CodeDomain,
+        func: u32,
+        placed: Vec<super::reloc::Placed>,
+    ) {
+        let Ok(mut sites) = self.sites.write() else {
+            return;
+        };
+        sites.retain(|entry| !(entry.domain == domain && entry.func == func));
+        sites.push(JitSites {
+            domain,
+            func,
+            placed,
+        });
+    }
+
+    /// How many sites one compiled body's table holds.
+    pub(crate) fn recorded_sites(&self, domain: CodeDomain, func: u32) -> Option<usize> {
+        let sites = self.sites.read().ok()?;
+        sites
+            .iter()
+            .find(|entry| entry.domain == domain && entry.func == func)
+            .map(|entry| entry.placed.len())
     }
 
     /// Publish slots for a code domain. The plain arm returns the `slots`/`slots_fast`

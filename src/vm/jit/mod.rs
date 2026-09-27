@@ -30,6 +30,9 @@ mod frame;
 mod helpers;
 #[cfg(all(test, feature = "cranelift"))]
 mod lsda_probe;
+
+mod reloc;
+pub(crate) use reloc::{Body, SigPart, Site};
 #[cfg(feature = "cranelift")]
 mod translate;
 
