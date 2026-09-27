@@ -456,9 +456,7 @@ pub(crate) fn store(
     // loader will refuse. The publish lock is held across both writes: a sweep between them would see
     // fragments no manifest names yet and drop them.
     let dir = crate::store::UNITS.dir();
-    let Ok(_publishing) = crate::store::frags::Lock::shared(&crate::store::FRAGS.dir()) else {
-        return super::deps::degraded(bi);
-    };
+    let _publishing = crate::store::frags::publish_lock();
     if session.publish().is_err() {
         return super::deps::degraded(bi);
     }

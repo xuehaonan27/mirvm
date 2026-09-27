@@ -83,9 +83,12 @@ impl Lock {
     fn take(dir: &Path, exclusive: bool) -> std::io::Result<Lock> {
         std::fs::create_dir_all(dir)?;
         // The lock's identity is the file, not its contents: it is never written, and a reader that
-        // only opens packs ignores it (its extension is not `.pack`).
+        // only opens packs ignores it (its extension is not `.pack`). Read *and* write, because a
+        // shared lock needs a readable descriptor — NFS enforces that where a local filesystem does
+        // not, and a write-only one fails `LOCK_SH` with `EBADF`.
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(false)
             .open(dir.join("lock"))?;
@@ -97,6 +100,24 @@ impl Lock {
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = crate::os::fs::unlock(std::os::fd::AsRawFd::as_raw_fd(&self.file));
+    }
+}
+
+/// The lock a publisher holds across the fragment pack and the manifest that names it.
+///
+/// A filesystem that cannot lock is not a reason to stop caching: the lock exists so a concurrent
+/// sweep cannot miss a manifest that is being written, and a fragment a sweep takes is a miss the cold
+/// path rebuilds, never a wrong value. So a failure is reported and the publish goes on unlocked — the
+/// sweep itself, which can lose a share, does not proceed without it.
+pub(crate) fn publish_lock() -> Option<Lock> {
+    match Lock::shared(&crate::store::FRAGS.dir()) {
+        Ok(lock) => Some(lock),
+        Err(error) => {
+            if crate::options::a2_debug() {
+                eprintln!("[a2-debug] fragment lock not taken ({error}); publishing unlocked");
+            }
+            None
+        }
     }
 }
 
