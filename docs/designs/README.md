@@ -252,6 +252,8 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 | [c2-rlib-symbols-design.md](c2-rlib-symbols-design.md) | Decided RFC | closing the `.a` → `.so` gap when a symbol's definition lives in a Rust rlib |
 | [modeb-mirvmar-design.md](modeb-mirvmar-design.md) | Implemented | the `.mirvm` container, `pack`/`run`, the machine-code section, multi-Engine instantiation and the embedding surface |
 | [distribution-design.md](distribution-design.md) | Decided RFC | load ingestion, cache layering, toolchain bundling and release form |
+| [dep-sharing-design.md](dep-sharing-design.md) | Decided RFC | fine-grained reuse of lowered dependency products: per-crate image units, the content-addressed fragment store, the home rule, store collection |
+| [jit-code-cache-design.md](jit-code-cache-design.md) | Decided RFC | the persistent JIT machine-code cache: the translator's relocation choke point, relocatable per-function artifacts, load-time linking, adaptive optimization tiers |
 | [d15-cargoless-design.md](d15-cargoless-design.md) | Implemented | resolving and scheduling without cargo: manifests, versions, topology, build scripts, proc-macros |
 | [mirvm-test-cargoless-contract.md](mirvm-test-cargoless-contract.md) | Contract | `mirvm test` for single packages and workspaces with no Cargo process at run time |
 
