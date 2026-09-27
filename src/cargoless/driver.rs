@@ -198,7 +198,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         }
     }
 
-    let cwd = crate::options::protocol::doctest_run_dir()
+    let cwd = crate::options::doctest_run_dir()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let recipe = RootRunRecipe {

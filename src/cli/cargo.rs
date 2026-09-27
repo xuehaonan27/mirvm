@@ -57,7 +57,7 @@ pub(super) fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     // Pack session (mirvm pack passes the output path via MIRVM_PACK through phase_cargo): force
     // the full cold route so the package stays self-contained -- empty image stack plus L2/
     // deps-image bypass. mirvm pack sets both via MIRVM_NO_BASE_IMAGE and MIRVM_NO_DEPS_IMAGE.
-    if let Some(out) = crate::options::protocol::pack() {
+    if let Some(out) = crate::options::pack() {
         return pack_driver(rustc_args, program_argv, out);
     }
     run_driver(
@@ -78,9 +78,9 @@ pub(crate) struct GuestProcessState {
 
 impl GuestProcessState {
     fn from_cargo_runner() -> Self {
-        let cwd = crate::options::protocol::guest_cwd();
-        let caller_sysroot = crate::options::protocol::caller_sysroot();
-        let caller_had_sysroot = crate::options::protocol::caller_sysroot_present();
+        let cwd = crate::options::guest_cwd();
+        let caller_sysroot = crate::options::caller_sysroot();
+        let caller_had_sysroot = crate::options::caller_sysroot_present();
         let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
         for key in [
             crate::options::protocol::CARGO_SESSION,

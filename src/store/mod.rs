@@ -158,9 +158,11 @@ macro_rules! flag_of {
 /// `Class CONST "dir" shape[(ext)] [flag(Flag)];`
 ///
 /// The line declares a [`Family`] const the writers name (`store::CONST.dir()`) and puts it in
-/// [`FAMILIES`], which `status` and `purge` walk. The comment above a line names the module that
-/// writes the family and the key or contract that makes deleting it safe; `{host}` in a directory
-/// name is resolved by [`Family::path`].
+/// [`FAMILIES`], which `status` and `purge` walk. The comment above a line is the family's
+/// ownership, and it opens with the `owners:` clause the `store naming` check reads: the module(s)
+/// allowed to name `store::CONST` — its writer, plus a reader with a reason to relocate the path —
+/// followed by the key or contract that makes deleting the family safe. `{host}` in a directory name
+/// is resolved by [`Family::path`].
 macro_rules! families {
     ( $( $class:ident $entry:ident $dir:literal $shape:ident $(($ext:literal))? $( flag($flag:ident) )? ; )* ) => {
         $(
@@ -179,35 +181,39 @@ macro_rules! families {
 }
 
 families! {
-    // `image::base` — the MIR-rich std base; keyed by build id + sysroot stamp, `build_id` first.
+    // owners: image::base — the MIR-rich std base; keyed by build id + sysroot stamp, `build_id` first.
     Cache BASE            "base"            generation("img") flag(Base);
-    // `image::deps` — the lowered registry dependency closure; keyed by base key + `--extern` stamps.
+    // owners: image::deps — the lowered registry dependency closure; keyed by base key + `--extern` stamps.
     Cache DEPS            "deps"            generation("img") flag(Deps);
-    // `image::program` — one program's post-mono engine IR; keyed by rustc args + dep-info, `build_id` first.
+    // owners: image::program — one program's post-mono engine IR; keyed by rustc args + dep-info, `build_id` first.
     Cache IR              "ir"              generation("bin") flag(Ir);
-    // `lower::asm` — materialized per-site asm stubs; keyed by the generated assembly's content.
+    // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
-    // `lower::global_asm` — materialized `global_asm!`/naked-fn objects; keyed by the final text.
+    // owners: lower::global_asm, pack — materialized `global_asm!`/naked-fn objects; keyed by the
+    // final text. `pack` names the family to rewrite those paths into a package.
     Cache GLOBAL_ASM      "global-asm"      keyed;
-    // `native::artifact::archive` — a PIC `.a` converted into a dlopen-able `.so`; keyed by archive + cc identity.
+    // owners: native::artifact::archive — a PIC `.a` converted into a dlopen-able `.so`; keyed by
+    // archive + cc identity.
     Cache NATIVE_ARCHIVES "native-archives" keyed;
-    // `pack` — native libraries carried inside a `.mirvm`; keyed by their content hash.
+    // owners: pack — native libraries carried inside a `.mirvm`; keyed by their content hash.
     Cache PACKAGE_NATIVE  "package-native"  keyed;
-    // `vm::ir` — the function heat order learned from a package's first runs; keyed by its code.
+    // owners: pack — the function heat order learned from a package's first runs; keyed by its code.
+    // `pack::read` derives the path and `vm::ir` writes the order through it.
     Cache PACKAGE_HEAT    "package-heat"    keyed;
-    // `cargoless::registry` — crate and git sources, read through to `~/.cargo`; fetched, not derived.
+    // owners: cargoless::registry — crate and git sources, read through to `~/.cargo`; fetched, not derived.
     Data  REGISTRY        "registry"        unit;
-    // `sysroot::build_sysroot` — the MIR-rich std; keyed by the toolchain stat + build recipe.
+    // owners: sysroot — the MIR-rich std; keyed by the toolchain stat + build recipe.
     Data  SYSROOT         "sysroot-{host}"  unit;
-    // `cli::frontmatter::script_cache_dir` — materialized frontmatter projects; keyed by script path.
+    // owners: cli::frontmatter — materialized frontmatter projects; keyed by script path.
     Build SCRIPTS         "scripts"         unit flag(Scripts);
-    // `sysroot::build_sysroot` staging; reused across rebuilds, so `--data` keeps it.
+    // owners: sysroot — `build_sysroot` staging; reused across rebuilds, so `--data` keeps it.
     Build SYSROOT_BUILD   "sysroot-build"   unit;
-    // Cargo track, cargoless scheduler and native differential builds; rebuilt from the sources.
+    // owners: options, cli::frontmatter, cargoless::audit, cargoless::schedule, sysroot — the shared
+    // target root of every track; rebuilt from the sources.
     Build TARGET          "target"          unit flag(Target);
-    // `vm::native_instance` — per-Engine copies of required native libraries (glibc keys by path).
+    // owners: vm::native_instance — per-Engine copies of required native libraries (glibc keys by path).
     Run   RUNTIME_NATIVE  "runtime-native"  unit;
-    // `vm::native_instance` — private copies of self-produced objects while lowering opens them.
+    // owners: vm::native_instance — private copies of self-produced objects while lowering opens them.
     Run   LOWER_NATIVE    "lower-native"    unit;
 }
 /// The staging name for `target`.

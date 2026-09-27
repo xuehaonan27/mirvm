@@ -318,23 +318,32 @@ entries! {
         => reads(Option<&'static str>, |o| o.encoded_rustflags_append.as_deref());
 
     /// Route argv into the Cargo wrapper phase.
-    protocol cargo_session            env(protocol::CARGO_SESSION) default("unset");
+    protocol cargo_session            env(protocol::CARGO_SESSION) default("unset")
+        => live(bool, |_| std::env::var_os(protocol::CARGO_SESSION).is_some());
     /// This session occupies Cargo's RUSTC slot rather than the wrapper slot.
-    protocol cargo_compiler           env(protocol::CARGO_COMPILER) default("unset");
+    protocol cargo_compiler           env(protocol::CARGO_COMPILER) default("unset")
+        => live(bool, |_| std::env::var_os(protocol::CARGO_COMPILER).is_some());
     /// Emit a .mirvm package to this path instead of executing.
-    protocol pack                     env(protocol::PACK) default("unset");
+    protocol pack                     env(protocol::PACK) default("unset")
+        => live(Option<std::path::PathBuf>, |_| std::env::var_os(protocol::PACK).map(std::path::PathBuf::from));
     /// Caller directory to enter before guest execution.
-    protocol guest_cwd                env(protocol::GUEST_CWD) default("unset");
+    protocol guest_cwd                env(protocol::GUEST_CWD) default("unset")
+        => live(Option<std::path::PathBuf>, |_| std::env::var_os(protocol::GUEST_CWD).map(std::path::PathBuf::from));
     /// The caller's own sysroot, echoed back into the guest environment.
-    protocol caller_sysroot           env(protocol::CALLER_SYSROOT) default("unset");
+    protocol caller_sysroot           env(protocol::CALLER_SYSROOT) default("unset")
+        => live(Option<std::ffi::OsString>, |_| std::env::var_os(protocol::CALLER_SYSROOT));
     /// Whether the caller had MIRVM_SYSROOT set (1/0).
-    protocol caller_sysroot_present   env(protocol::CALLER_SYSROOT_PRESENT) default("unset");
+    protocol caller_sysroot_present   env(protocol::CALLER_SYSROOT_PRESENT) default("unset")
+        => live(bool, |_| std::env::var_os(protocol::CALLER_SYSROOT_PRESENT).is_some_and(|value| value == "1"));
     /// Doctest builder launcher path.
-    protocol doctest_builder          env(protocol::DOCTEST_BUILDER) default("unset");
+    protocol doctest_builder          env(protocol::DOCTEST_BUILDER) default("unset")
+        => live(Option<String>, |_| std::env::var(protocol::DOCTEST_BUILDER).ok());
     /// Doctest working directory.
-    protocol doctest_run_dir          env(protocol::DOCTEST_RUN_DIR) default("unset");
+    protocol doctest_run_dir          env(protocol::DOCTEST_RUN_DIR) default("unset")
+        => live(Option<std::path::PathBuf>, |_| std::env::var_os(protocol::DOCTEST_RUN_DIR).map(std::path::PathBuf::from));
     /// `hold` = a build's own compiler diagnostics wait for its outcome; `live` = they print at once.
-    protocol build_log                env(protocol::BUILD_LOG) default("live");
+    protocol build_log                env(protocol::BUILD_LOG) default("live")
+        => live(Option<String>, |_| std::env::var(protocol::BUILD_LOG).ok());
 
     /// Print the entry function's MIR and exit.
     user     dump_mir                 cli("--dump-mir", "Run") flag default("off");
@@ -755,11 +764,13 @@ fn threads_from(raw: Option<&str>) -> Result<String, Error> {
 
 // ===== internal protocol =====
 
-/// Variables one mirvm process sets for another. Declared here so each name exists once in the
-/// tree; the register rows above point at these constants.
+/// Variables one mirvm process sets for another, and the writing half of their lifecycle.
+///
+/// Each name is declared once here and pointed at by its register row above, which is also where the
+/// value is read from. This module writes them onto a child's `Command`, and answers the one question
+/// that is about a value rather than about it being present (`build_log_hold`).
 pub mod protocol {
-    use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
 
     pub const CARGO_SESSION: &str = "MIRVM_CARGO_SESSION";
@@ -771,38 +782,6 @@ pub mod protocol {
     pub const DOCTEST_BUILDER: &str = "MIRVM_DOCTEST_BUILDER";
     pub const DOCTEST_RUN_DIR: &str = "MIRVM_DOCTEST_RUN_DIR";
     pub const BUILD_LOG: &str = "MIRVM_BUILD_LOG";
-
-    pub fn cargo_session() -> bool {
-        std::env::var_os(CARGO_SESSION).is_some()
-    }
-
-    pub fn cargo_compiler() -> bool {
-        std::env::var_os(CARGO_COMPILER).is_some()
-    }
-
-    pub fn pack() -> Option<PathBuf> {
-        std::env::var_os(PACK).map(PathBuf::from)
-    }
-
-    pub fn guest_cwd() -> Option<PathBuf> {
-        std::env::var_os(GUEST_CWD).map(PathBuf::from)
-    }
-
-    pub fn caller_sysroot() -> Option<OsString> {
-        std::env::var_os(CALLER_SYSROOT)
-    }
-
-    pub fn caller_sysroot_present() -> bool {
-        std::env::var_os(CALLER_SYSROOT_PRESENT).is_some_and(|value| value == "1")
-    }
-
-    pub fn doctest_builder() -> Option<String> {
-        std::env::var(DOCTEST_BUILDER).ok()
-    }
-
-    pub fn doctest_run_dir() -> Option<PathBuf> {
-        std::env::var_os(DOCTEST_RUN_DIR).map(PathBuf::from)
-    }
 
     pub fn set_cargo_session(cmd: &mut Command) {
         cmd.env(CARGO_SESSION, "1");
@@ -841,8 +820,11 @@ pub mod protocol {
     }
 
     /// Whether this process holds a guest build's compiler diagnostics back.
+    ///
+    /// The predicate view of the `build_log` row, where the variable and its read are declared; this
+    /// only names the value that means "hold".
     pub fn build_log_hold() -> bool {
-        std::env::var(BUILD_LOG).is_ok_and(|value| value == "hold")
+        super::build_log().is_some_and(|value| value == "hold")
     }
 }
 
