@@ -38,9 +38,11 @@ use super::manifest;
 
 /// The unit view of the layer being stored or loaded: its own id ranges and fixed domains, which is
 /// what makes a binding's local half identical on both sides.
-fn unit_of(
+pub(crate) fn unit_of(
+    below: &[manifest::LayerRanges],
     prefix: crate::vm::verify::Prefix,
     module: &ir::Module,
+    home: usize,
     frozen: (u64, u64),
 ) -> manifest::Unit {
     manifest::Unit {
@@ -48,12 +50,17 @@ fn unit_of(
         tls: (prefix.tls as u32, module.tls.len() as u32),
         asm: (prefix.asm as u32, module.asm_sites.len() as u32),
         frozen,
-        // The image's entry stubs live in its own code spline slot, one 16 GiB step wide.
+        // A layer's entry stubs live in its own code spline slot, one 16 GiB step wide.
         code: (
-            super::image_code_home(),
+            crate::os_arch::addrspace::image_code_addr(home) as u64,
             crate::os_arch::addrspace::IMAGE_CODE_STEP as u64,
         ),
+        layers: Vec::new(),
+        self_layer: 0,
     }
+    // The layer map decides which ids this unit owns and which it has to name as symbols; the ids it
+    // holds itself start where the last layer below ends.
+    .above(below)
 }
 
 /// Whether the deps-image cache is bypassed. The cache is on by default and the only knob is
@@ -162,7 +169,13 @@ pub fn try_load(
         tls: base.module.tls.len(),
         asm: base.module.asm_sites.len(),
     };
-    let unit = unit_of(prefix, &f.module, frozen);
+    // The base is the whole stack below the closure: its ids are named by symbols, and the closure's
+    // own ids start after them.
+    let base_range = (
+        (0, base.module.funcs.len() as u32),
+        (0, base.module.tls.len() as u32),
+    );
+    let unit = unit_of(&[base_range], prefix, &f.module, 0, frozen);
     let symbols = manifest::Symbols::of(std::iter::once(base));
     // The bodies come back from the fragment store, then the id-bearing tables from the canonical
     // form: a missing fragment or an unresolvable symbol is a miss, never a partial layer.
@@ -208,6 +221,8 @@ pub fn try_load(
         key,
         module,
         instance,
+        // A closure image stands for the whole closure, not for one unit of a table.
+        unit: None,
     })
 }
 
@@ -256,7 +271,8 @@ pub fn store_and_wrap(
             .frozen
             .as_ref()
             .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64));
-        let Some(unit) = frozen_home.map(|frozen| unit_of(below.prefix, &bi.module, frozen)) else {
+        let Some(unit) = frozen_home.map(|frozen| unit_of(&[], below.prefix, &bi.module, 0, frozen))
+        else {
             return degraded(bi);
         };
         let symbols = manifest::Symbols::of(stack.layers());
@@ -334,7 +350,7 @@ pub fn store_and_wrap(
 /// A layer the store cannot hold: the key degrades to a process-unique placeholder, which makes the L2
 /// key chain invalid across runs rather than a false hit (the in-memory absorb for this run is
 /// unaffected).
-fn degraded(mut bi: crate::image::BaseImage) -> crate::image::BaseImage {
+pub(crate) fn degraded(mut bi: crate::image::BaseImage) -> crate::image::BaseImage {
     bi.key = format!("a2-unstable-{}", std::process::id());
     bi
 }

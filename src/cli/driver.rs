@@ -39,7 +39,7 @@ pub(crate) fn pack_driver(
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
         stack: crate::image::ImageStack::empty(),
-        split_image: None,
+        split_images: Vec::new(),
         session_fp: None,
         deps_image_loaded: false,
         pack_out: Some(out),
@@ -194,7 +194,9 @@ struct MirvmCallbacks {
     stack: crate::image::ImageStack,
     /// Split image produced by `lower_program` when the deps image is enabled and a base image is
     /// present; pushed onto the stack and absorbed at the end of `run_driver`.
-    split_image: Option<crate::lower::SplitImage>,
+    /// One layer per home the session populated, with the home's index (the unit's, or 0 for the
+    /// closure track).
+    split_images: Vec<(usize, crate::lower::SplitImage)>,
     /// Lowering fingerprint of this session (recorded in `after_analysis`; used when `split_image`
     /// wraps a stack layer).
     session_fp: Option<(bool, bool, bool)>,
@@ -318,17 +320,25 @@ impl Callbacks for MirvmCallbacks {
             // into the delta keeps semantics unchanged (one id space, the classic non-split path)
             // and keeps L2 usable for pure-std programs.
             let want_split = !crate::image::deps::bypassed()
-                && !self.deps_image_loaded
                 && !self.stack.is_empty()
-                && self
-                    .stack
-                    .key()
-                    .is_some_and(|bk| crate::image::deps::pre_key(&self.rustc_args, bk).is_some());
-            let (module, instance, split_image) =
+                && match crate::image::units::current() {
+                    // With a build graph the split is what homes instances to units, whether or not
+                    // this session had to lower any of them.
+                    Some(_) => true,
+                    // Without one the closure is the single home, and it needs key material a
+                    // dependency-free program does not have.
+                    None => {
+                        !self.deps_image_loaded
+                            && self.stack.key().is_some_and(|bk| {
+                                crate::image::deps::pre_key(&self.rustc_args, bk).is_some()
+                            })
+                    }
+                };
+            let (module, instance, split_images) =
                 crate::lower::lower_program(tcx, &self.stack, want_split);
             self.module = Some(module);
             self.instance = Some(instance);
-            self.split_image = split_image;
+            self.split_images = split_images;
             self.timing.lower = Some(t_lower.elapsed());
             // Pack fork: write the `.mirvm` package instead of executing, at the same clean
             // snapshot point as the L2 store; a failure aborts loudly instead of degrading silently.
@@ -352,25 +362,31 @@ impl Callbacks for MirvmCallbacks {
                     }
                 }
             }
-            // The split artifact is written to disk before it is pushed onto the stack: the key
-            // chain then contains the image key, so L2 delta entries carry the complete chain (a
-            // delta embeds the image absolutely; recording under a wrong chain would mean
-            // mismatched loads later).
-            if let Some(img) = self.split_image.take() {
+            // The split artifacts are written to disk before they are pushed onto the stack: the key
+            // chain then contains each layer's key, so L2 delta entries carry the complete chain (a
+            // delta embeds the layers absolutely; recording under a wrong chain would mean mismatched
+            // loads later). A track with a unit table publishes one manifest per home, in home
+            // (topological) order so the chain is the same whichever subset a session had to lower; a
+            // track without one publishes the closure manifest.
+            for (home, img) in std::mem::take(&mut self.split_images) {
                 let base_key = self
                     .stack
                     .key()
                     .expect("split implies a base image is present")
                     .to_string();
-                // The image is published only if it verifies against the stack below it, which is
-                // the same predicate the loader applies.
-                let bi = crate::image::deps::store_and_wrap(
-                    &self.rustc_args,
-                    &base_key,
-                    fp,
-                    &self.stack,
-                    img,
-                );
+                // A layer is published only if it verifies against the stack below it, which is the
+                // same predicate the loader applies.
+                let bi = if crate::image::units::current().is_some() {
+                    crate::image::units::store(home as u32, &self.stack, fp, img)
+                } else {
+                    crate::image::deps::store_and_wrap(
+                        &self.rustc_args,
+                        &base_key,
+                        fp,
+                        &self.stack,
+                        img,
+                    )
+                };
                 self.stack.push(bi);
             }
             // L2 entry: the clean snapshot before the guest runs (argv is not finalized yet). Any
@@ -682,17 +698,40 @@ pub(crate) fn run_driver(
     } else {
         crate::image::base::ensure()
     };
-    // Deps-image load before the compiler runs: not bypassed + a base image is present. On a hit
-    // it is pushed onto the stack, so the key chain then contains the image key and L2 delta
-    // entries can be recorded again.
+    // Layer load before the compiler runs: not bypassed + a base image is present. A hit is pushed
+    // onto the stack, so the key chain then contains the layer's key and L2 delta entries can be
+    // recorded again. A track with a unit table loads one manifest per unit in topological order, so
+    // each one's symbols resolve against what is already below it; a unit without a usable manifest
+    // is lowered by this session and published for the next one.
     let mut deps_image_loaded = false;
-    if !dump_mir
-        && !crate::image::deps::bypassed()
-        && let Some(base) = stack.base_image()
-        && let Some(bi) = crate::image::deps::try_load(&rustc_args, base)
-    {
-        deps_image_loaded = true;
-        stack.push(bi);
+    if !dump_mir && !crate::image::deps::bypassed() {
+        match crate::image::units::current() {
+            Some(table) => {
+                let base_key = stack.base_image().map(|base| base.key.clone());
+                if let Some(base_key) = base_key {
+                    for index in 0..table.len() as u32 {
+                        let layer = {
+                            let base = stack.base_image().expect("checked above");
+                            crate::image::units::try_load(index, base, &stack, &base_key)
+                        };
+                        if let Some(layer) = layer {
+                            if crate::options::a2_debug() {
+                                eprintln!("[a2-debug] layer loaded: {}", layer.key);
+                            }
+                            stack.push(layer);
+                        }
+                    }
+                }
+            }
+            None => {
+                if let Some(base) = stack.base_image()
+                    && let Some(bi) = crate::image::deps::try_load(&rustc_args, base)
+                {
+                    deps_image_loaded = true;
+                    stack.push(bi);
+                }
+            }
+        }
     }
     let base_key = stack.key().map(str::to_owned);
     // L2 warm path: a hit skips the entire rustc session (frontend + metadata + mono + lower).
@@ -774,7 +813,7 @@ pub(crate) fn run_driver(
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
         stack,
-        split_image: None,
+        split_images: Vec::new(),
         session_fp: None,
         deps_image_loaded,
         pack_out: None,

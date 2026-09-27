@@ -47,10 +47,15 @@ pub(crate) enum SymbolKind {
     Entry,
 }
 
-/// The id ranges and fixed domains one unit occupies, in the session that stores it (publish) or the
+/// The id ranges and fixed domains one layer occupies, in the session that stores it (publish) or the
 /// process that loads it. Both callers build it from the same rules, which is what makes a binding's
 /// local half identical on both sides.
-#[derive(Clone, Copy, Debug)]
+///
+/// `layers` is what tells an id's *owner* apart from "inside this session's home": a function of this
+/// unit that a loaded manifest already provided is a hit whose id lies in that loaded layer's range,
+/// and it is still this unit's function. Each entry is `(absolute start, count)` from the bottom up;
+/// `self_layer` indexes this unit's own.
+#[derive(Clone, Debug)]
 pub(crate) struct Unit {
     /// Absolute id ranges of this unit's own functions, TLS slots and asm stubs.
     pub funcs: (u32, u32),
@@ -59,6 +64,55 @@ pub(crate) struct Unit {
     /// The unit's own frozen region and code arena: `(home, len)`.
     pub frozen: (u64, u64),
     pub code: (u64, u64),
+    /// The function and TLS ranges of every layer below and this unit's own, bottom first.
+    pub layers: Vec<((u32, u32), (u32, u32))>,
+    /// Index of this unit's own entry in `layers`.
+    pub self_layer: usize,
+}
+
+/// One layer's function and TLS ranges in the absolute id space of a session.
+pub(crate) type LayerRanges = ((u32, u32), (u32, u32));
+
+impl Unit {
+    /// The layer map of a unit that sits above `below` (every layer of the stack, bottom first): its
+    /// own ids start where the last layer below ends.
+    pub(crate) fn above(mut self, below: &[LayerRanges]) -> Unit {
+        // `own` holds this unit's own ranges as recorded in its image; only the start moves, to the
+        // end of the last layer below. With no layer below, the image's own start is already right
+        // (the first home of a session).
+        let shift = |last: Option<&LayerRanges>, own: (u32, u32), pick: fn(&LayerRanges) -> (u32, u32)| {
+            let (start, len) = own;
+            let start = match last {
+                Some(range) => pick(range).0 + pick(range).1,
+                None => start,
+            };
+            (start, len)
+        };
+        let (funcs, tls) = (
+            shift(below.last(), self.funcs, |r| r.0),
+            shift(below.last(), self.tls, |r| r.1),
+        );
+        self.layers = below.to_vec();
+        self.layers.push((funcs, tls));
+        self.self_layer = self.layers.len() - 1;
+        self.funcs = funcs;
+        self.tls = tls;
+        self
+    }
+
+    /// Which layer owns `id` in `space`, and the ordinal inside it.
+    fn owner(&self, space: Space, id: u32) -> Option<(usize, u32)> {
+        self.layers
+            .iter()
+            .enumerate()
+            .find_map(|(index, ranges)| {
+                let (start, len) = match space {
+                    Space::Func => ranges.0,
+                    Space::Tls => ranges.1,
+                };
+                id.checked_sub(start).filter(|at| at < &len).map(|at| (index, at))
+            })
+    }
 }
 
 /// The symbol tables of the layers below a unit.
@@ -222,13 +276,23 @@ pub(crate) fn project_module(
     module.funcs.drain_into(&mut bodies);
     let mut records = Vec::with_capacity(bodies.len());
     let mut failure = None;
-    for body in &bodies {
+    for (index, body) in bodies.iter().enumerate() {
         match project(body, unit, symbols) {
             Ok(projected) => {
                 records.push(projected.record);
                 session.add(projected.bytes);
             }
             Err(error) => {
+                if crate::options::a2_debug() {
+                    let name: &str = module
+                        .function_names
+                        .get(index)
+                        .map_or("<unnamed>", |name| name);
+                    eprintln!(
+                        "[a2-debug] project failed at record {index} of {} ({name}): {error}",
+                        bodies.len()
+                    );
+                }
                 failure = Some(error);
                 break;
             }
@@ -314,11 +378,11 @@ pub(crate) fn project_owned(
     unit: &Unit,
     symbols: &Symbols,
 ) -> Result<Owned, String> {
-    let (start, len) = match space {
-        Space::Func => unit.funcs,
-        Space::Tls => unit.tls,
-    };
-    if let Some(local) = id.checked_sub(start).filter(|at| *at < len) {
+    // An id this unit owns is local, whether it came from this session's lowering or from a loaded
+    // manifest of the same unit; only another layer's id becomes a symbol.
+    if let Some((owner, local)) = unit.owner(space, id)
+        && owner == unit.self_layer
+    {
         return Ok(Owned::Local(local));
     }
     let target = match space {
@@ -635,7 +699,10 @@ mod tests {
             asm: (200, 1),
             frozen: (0x6a00_0000_0000, 0x1000),
             code: (0x6e00_0000_0000, 0x1000),
+            layers: Vec::new(),
+            self_layer: 0,
         }
+        .above(&[])
     }
 
     fn static_place(addr: u64) -> PlaceExpr {
@@ -782,8 +849,9 @@ mod tests {
         let moved = Unit {
             funcs: (60, 4),
             tls: (105, 2),
-            ..unit
-        };
+            ..unit.clone()
+        }
+        .above(&[]);
         let (exports, tls) = tables.restore(&mut module, &moved, &symbols).unwrap();
         assert_eq!(exports["mine"], 61);
         assert_eq!(exports["theirs"], 7);

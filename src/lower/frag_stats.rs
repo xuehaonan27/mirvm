@@ -28,7 +28,7 @@ struct Home {
 
 #[derive(Default)]
 struct Layer {
-    name: &'static str,
+    name: String,
     bodies: u64,
     canonical_bytes: u64,
     /// The frozen bytes stored beside the fragments: a layer's data, which no fragment contains.
@@ -66,9 +66,9 @@ impl FragStats {
 
     /// Record one stored layer. A body that cannot be encoded is skipped: it could not become a
     /// fragment either.
-    pub(super) fn layer(&mut self, name: &'static str, funcs: &ir::FuncTable, frozen_bytes: u64) {
+    pub(super) fn layer(&mut self, name: &str, funcs: &ir::FuncTable, frozen_bytes: u64) {
         let mut layer = Layer {
-            name,
+            name: name.to_string(),
             frozen_bytes,
             ..Default::default()
         };

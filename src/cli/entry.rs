@@ -147,6 +147,7 @@ pub(super) fn cache_main(
             "--base" => plan.base = true,
             "--ir" => plan.ir = true,
             "--frags" => plan.frags = true,
+            "--units" => plan.units = true,
             "--scripts" => plan.scripts = true,
             "--target" => plan.target = true,
             "--all" => plan.all = true,

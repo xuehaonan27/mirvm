@@ -97,6 +97,7 @@ pub(crate) enum FamilyFlag {
     Deps,
     Ir,
     Frags,
+    Units,
     Scripts,
     Target,
 }
@@ -199,6 +200,9 @@ families! {
     // owners: store::frags — the shared canonical function bodies every manifest references by
     // content address; a pack is reachable only through the manifests that name its fragments.
     Cache FRAGS           "frags"           pack flag(Frags);
+    // owners: image::units — one manifest per crate, content-named by unit key + manifest digest so a
+    // grown unit adds a manifest instead of overwriting the one a running program pinned.
+    Cache UNITS           "units"           keyed flag(Units);
     // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // owners: lower::global_asm, pack — materialized `global_asm!`/naked-fn objects; keyed by the
