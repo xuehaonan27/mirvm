@@ -135,8 +135,8 @@ pub struct JitState {
 
 impl JitState {
     pub fn new(fn_count: usize) -> Self {
-        let enabled = crate::options::get().jit();
-        let threshold = crate::options::get().jit_threshold;
+        let enabled = crate::options::jit();
+        let threshold = crate::options::jit_threshold();
         JitState {
             slots: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
             slots_fast: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
@@ -145,7 +145,7 @@ impl JitState {
             counters: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
             enabled,
             threshold,
-            sync: crate::options::get().jit_sync,
+            sync: crate::options::jit_sync(),
             queue: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
             stopping: AtomicBool::new(false),

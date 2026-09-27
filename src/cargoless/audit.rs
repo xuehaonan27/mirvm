@@ -189,7 +189,7 @@ fn cargo_accepts_lock(
     if !fetch.status.success() {
         let tail = String::from_utf8_lossy(&fetch.stderr);
         let tail = tail.lines().last().unwrap_or("").to_string();
-        if crate::options::get().deps_audit_keep {
+        if crate::options::deps_audit_keep() {
             eprintln!("audit scratch dir kept: {}", dir.display());
         } else {
             let _ = std::fs::remove_dir_all(&dir);
@@ -209,7 +209,7 @@ fn cargo_accepts_lock(
             tail.lines().last().unwrap_or("")
         )
     };
-    if crate::options::get().deps_audit_keep {
+    if crate::options::deps_audit_keep() {
         eprintln!("audit scratch dir kept: {}", dir.display());
     } else {
         let _ = std::fs::remove_dir_all(&dir);

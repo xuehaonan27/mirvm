@@ -157,7 +157,7 @@ pub fn stop(shared: &Shared) {
 }
 
 pub(super) fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: CodeDomain) {
-    let dbg = crate::options::get().jit_debug;
+    let dbg = crate::options::jit_debug();
     let mut c = Compiler::with_domain(&shared, domain);
     while let Ok(func) = rx.recv() {
         if shared.jit.stopping.load(Ordering::Acquire) {

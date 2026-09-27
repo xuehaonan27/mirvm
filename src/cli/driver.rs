@@ -227,7 +227,7 @@ fn print_phase_timing(
     total: std::time::Duration,
     force: bool,
 ) {
-    if !force && !crate::options::get().timing {
+    if !force && !crate::options::timing() {
         return;
     }
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
@@ -593,7 +593,7 @@ struct GuestStackStartError {
 fn on_guest_stack<R: Send + 'static>(
     f: impl FnOnce() -> R + Send + 'static,
 ) -> Result<R, GuestStackStartError> {
-    let reserve = match crate::options::get().stack_size() {
+    let reserve = match crate::options::stack_size() {
         Some(s) => parse_stack_size(&s).map_err(|error| GuestStackStartError {
             message: error.to_string(),
             exit_code: i32::from(error.exit_code()),

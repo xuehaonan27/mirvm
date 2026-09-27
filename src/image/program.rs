@@ -35,7 +35,7 @@ struct Header {
 }
 
 fn disabled() -> bool {
-    crate::options::get().no_ir_cache
+    crate::options::no_ir_cache()
 }
 
 fn entry_path(rustc_args: &[String]) -> PathBuf {

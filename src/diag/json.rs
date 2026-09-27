@@ -13,16 +13,6 @@ use super::Diagnostic;
 /// The document version. A consumer may reject a version it does not know before reading further.
 const VERSION: u8 = 1;
 
-/// Whether `MIRVM_OUTPUT` selects machine output.
-///
-/// Read live rather than snapshotted: the command line writes its decision into the same variable
-/// (the `--stack-size`/`--jit` discipline), and a diagnostic can be emitted before the parser has
-/// seen the flag.
-pub(super) fn enabled() -> bool {
-    std::env::var_os(crate::options::env_var_name("output_format"))
-        .is_some_and(|value| value == "json")
-}
-
 /// Assemble one JSON object.
 pub(crate) struct Writer {
     out: String,

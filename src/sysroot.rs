@@ -164,10 +164,7 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// with a delta compiled against another puts two copies of the language runtime in a single module,
 /// which is exactly the shape `verify` refuses as two main panic boundaries.
 pub(crate) fn effective_dir() -> PathBuf {
-    crate::options::get()
-        .sysroot
-        .clone()
-        .unwrap_or_else(|| crate::store::SYSROOT.dir())
+    crate::options::sysroot().unwrap_or_else(|| crate::store::SYSROOT.dir())
 }
 
 /// Ensure the MIR-rich sysroot exists and return its path.
@@ -182,7 +179,7 @@ pub(crate) fn effective_dir() -> PathBuf {
 /// the caller's to provide, and mirvm neither writes into it nor replaces it.
 pub fn ensure_sysroot() -> Result<PathBuf, Error> {
     let sysroot_dir = crate::store::SYSROOT.dir();
-    if let Some(chosen) = crate::options::get().sysroot.clone() {
+    if let Some(chosen) = crate::options::sysroot() {
         return Ok(chosen);
     }
     if let Some(want) = stamp_value()

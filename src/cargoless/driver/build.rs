@@ -113,7 +113,7 @@ pub fn compile_plan(
 /// (fallback to 1 if unavailable). **=1 dispatch order matches the serial topo order bit-for-bit — differential debugging anchor,
 /// pinned**. Illegal values (non-positive integers) are loudly rejected and exit.
 fn cless_jobs() -> usize {
-    match crate::options::get().cless_jobs() {
+    match crate::options::cless_jobs() {
         Ok(jobs) => jobs,
         // This phase cannot propagate a failure to the command boundary yet; the value is rejected
         // loudly either way, and the error carries its own class and message.
@@ -504,7 +504,7 @@ fn rerun_gate(
         dep_links_reran,
         &env_get,
     );
-    if crate::options::get().debug_bldrs {
+    if crate::options::debug_bldrs() {
         eprintln!("bldrs {} {pkg} {why}", if rerun { "run" } else { "skip" });
     }
     if !rerun {

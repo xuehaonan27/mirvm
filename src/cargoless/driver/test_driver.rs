@@ -265,8 +265,8 @@ fn prepare_test_package(
         _ => None,
     };
 
-    let sysroot = match crate::options::get().sysroot.clone() {
-        Some(p) => p,
+    let sysroot = match crate::options::sysroot() {
+        Some(p) => p.to_path_buf(),
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {

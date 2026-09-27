@@ -71,7 +71,7 @@ pub(super) fn pack_main(
     let out = out.unwrap_or_else(default_out);
     let out_abs = std::path::absolute(&out).unwrap_or(out);
 
-    let deps_self = match crate::options::get().deps()? {
+    let deps_self = match crate::options::deps()? {
         crate::options::DepsTrack::Own => true,
         crate::options::DepsTrack::Cargo => false,
     };
@@ -106,7 +106,7 @@ pub(super) fn pack_main(
     }
 
     // Plain single file: pack_driver directly (same args as run form 3)
-    let sysroot = match crate::options::get().sysroot.clone() {
+    let sysroot = match crate::options::sysroot() {
         Some(path) => path.display().to_string(),
         None => crate::sysroot::ensure_sysroot()?.display().to_string(),
     };
@@ -136,7 +136,7 @@ pub(super) fn cache_main(
     args: impl Iterator<Item = String>,
 ) -> Result<ExitCode, crate::error::Error> {
     use crate::diag::Component;
-    let root = crate::options::get().home.clone();
+    let root = crate::options::home().to_path_buf();
     let mut plan = crate::store::report::Purge::default();
     let mut sub = None;
     for a in args {
@@ -160,7 +160,7 @@ pub(super) fn cache_main(
             }
         }
     }
-    let json = crate::options::get().output_format()? == crate::options::OutputFormat::Json;
+    let json = crate::options::output_format()? == crate::options::OutputFormat::Json;
     match sub.as_deref() {
         Some("status") => {
             let report = crate::store::report::status(&root);
@@ -520,7 +520,7 @@ pub(super) fn run_main(
     // Default = self zero-cargo own scheduling (cargoless::driver); =cargo uses the long-term
     // cargo three-phase compat track (user fallback + behavioral differential); any other value
     // is rejected loudly
-    let deps_self = match crate::options::get().deps()? {
+    let deps_self = match crate::options::deps()? {
         crate::options::DepsTrack::Own => true,
         crate::options::DepsTrack::Cargo => false,
     };
@@ -606,12 +606,9 @@ pub(super) fn run_main(
     }
 
     // Form 3: plain single file, zero-cargo fast path
-    let sysroot = match sysroot.or_else(|| {
-        crate::options::get()
-            .sysroot
-            .as_deref()
-            .map(|path| path.display().to_string())
-    }) {
+    let sysroot = match sysroot
+        .or_else(|| crate::options::sysroot().map(|path| path.display().to_string()))
+    {
         Some(sysroot) => sysroot,
         None => crate::sysroot::ensure_sysroot()?.display().to_string(),
     };

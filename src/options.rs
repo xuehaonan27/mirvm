@@ -150,15 +150,39 @@ macro_rules! attr_of {
     };
 }
 
+/// Emits one accessor from a register row's reader clause.
+///
+/// The clause carries both the signature and the read, so the function has no body of its own; what
+/// distinguishes a snapshot reader from a live one is only what its closure does.
+macro_rules! accessor {
+    ($doc:literal, $field:ident, $ty:ty, $read:expr) => {
+        #[doc = $doc]
+        pub fn $field() -> $ty {
+            let read: fn(&'static Options) -> $ty = $read;
+            read(get())
+        }
+    };
+}
+
 /// Declares the register, one entry per line:
 ///
-/// `identity field = [env("NAME")] [cli("--flag")] [alias("-x")] [scope("Run")] default("..") doc("..");`
+/// `identity field [env("NAME")] [cli("--flag")] [alias("-x")] [scope("Run")] default("..") => read;`
 ///
 /// The identity is `user`, `dev`, `test` or `protocol`. A protocol entry names its variable through
 /// [`protocol`], so a parent-to-child variable is spelled once in the tree. Every entry carries a doc
 /// comment and a `default`; `flag` marks a command-line spelling that takes no value.
+///
+/// The reader clause is the only way an option becomes readable, and it is what generates the
+/// accessor: `=> reads(TYPE, |o| ..)` answers the value this process resolved at first use, while
+/// `=> live(TYPE, |o| ..)` evaluates the closure on every call. An option the command line overrides
+/// after startup has to be `live`, because the parser settles it by exporting the very variable its
+/// child processes inherit, and its readers have to see what a child sees. A row without the clause —
+/// a spelling that exists only on a command line, or an internal protocol variable — generates no
+/// accessor at all.
 macro_rules! entries {
-    ( $( #[doc = $doc:literal] $kind:ident $field:ident $( $attr:ident $( ( $($arg:expr),* ) )? )* ; )* ) => {
+    ( $( #[doc = $doc:literal] $kind:ident $field:ident
+         $( $attr:ident $( ( $($arg:expr),* ) )? )*
+         $( => reads ( $rty:ty, $r:expr ) )? $( => live ( $lty:ty, $l:expr ) )? ; )* ) => {
         /// The register: every external input mirvm defines, in declaration order.
         pub fn entries() -> &'static [Entry] {
             static REGISTER: std::sync::OnceLock<Vec<Entry>> = std::sync::OnceLock::new();
@@ -182,70 +206,106 @@ macro_rules! entries {
                 out
             })
         }
+
+        // One accessor per row that declares a reader. The register is the only place an option can
+        // be declared, so the read surface cannot drift from it.
+        $(
+            $( accessor!($doc, $field, $rty, $r); )?
+            $( accessor!($doc, $field, $lty, $l); )?
+        )*
     };
 }
 
 entries! {
     /// Local store root: cache/ (deletable), data/ (expensive to lose), build/ (project space), run/ (process scratch).
-    user     home                     env("MIRVM_HOME") default("$HOME/.mirvm");
+    user home                     env("MIRVM_HOME") default("$HOME/.mirvm")
+        => reads(&'static std::path::Path, |o| &o.home);
     /// Relocate the Cargo track's target directory (the shared dependency store) out of `build/`.
-    user     target_dir               env("MIRVM_TARGET_DIR") default("$MIRVM_HOME/build/target/mirvm");
+    user target_dir               env("MIRVM_TARGET_DIR") default("$MIRVM_HOME/build/target/mirvm")
+        => reads(&'static std::path::Path, |o| &o.target_dir);
     /// MIR-rich sysroot; equivalent to --sysroot. Default: build and cache one.
-    user     sysroot                  env("MIRVM_SYSROOT") cli("--sysroot", "Run") default("auto-built");
+    user sysroot                  env("MIRVM_SYSROOT") cli("--sysroot", "Run") default("auto-built")
+        => live(Option<std::path::PathBuf>, |_| read_sysroot());
     /// Guest main execution stack reservation; accepts a k/m/g suffix, range 1m..=1t.
-    user     stack_size               env("MIRVM_STACK_SIZE") cli("--stack-size", "Run") default("1g");
+    user stack_size               env("MIRVM_STACK_SIZE") cli("--stack-size", "Run") default("1g")
+        => live(Option<String>, |_| read_stack_size());
     /// Method-level JIT; `off` runs the pure interpreter (differential benchmark).
-    user     jit                      env("MIRVM_JIT") cli("--jit", "Run") default("on");
+    user jit                      env("MIRVM_JIT") cli("--jit", "Run") default("on")
+        => live(bool, |_| read_jit());
     /// JIT compilation trigger threshold (diagnostic).
-    user     jit_threshold            env("MIRVM_JIT_THRESHOLD") default("1000");
+    user jit_threshold            env("MIRVM_JIT_THRESHOLD") default("1000")
+        => reads(u32, |o| o.jit_threshold);
     /// Compile on the enqueueing thread and fail loudly; makes a forced threshold observable.
-    user     jit_sync                 env("MIRVM_JIT_SYNC") default("off");
+    user jit_sync                 env("MIRVM_JIT_SYNC") default("off")
+        => reads(bool, |o| o.jit_sync);
     /// Print JIT helper frequency statistics at process exit.
-    user     jit_stats                env("MIRVM_JIT_STATS") default("off");
+    user jit_stats                env("MIRVM_JIT_STATS") default("off")
+        => reads(bool, |o| o.jit_stats);
     /// Build frontmatter/script projects with --locked.
-    user     cargo_locked             env("MIRVM_CARGO_LOCKED") default("off");
+    user cargo_locked             env("MIRVM_CARGO_LOCKED") default("off")
+        => reads(bool, |o| o.cargo_locked);
     /// `self` = zero-cargo own scheduling; `cargo` = the Cargo compatibility track.
-    user     deps                     env("MIRVM_DEPS") default("self");
+    user deps                     env("MIRVM_DEPS") default("self")
+        => live(Result<DepsTrack, Error>, |_| read_deps());
     /// Cargoless compilation concurrency; =1 is the serial differential anchor.
-    user     cless_jobs               env("MIRVM_CLESS_JOBS") default("available parallelism");
+    user cless_jobs               env("MIRVM_CLESS_JOBS") default("available parallelism")
+        => live(Result<usize, Error>, |_| read_cless_jobs());
     /// rustc frontend threads for the compile session: off | sync | 0..=256.
-    user     threads                  env("MIRVM_THREADS") default("off");
+    user threads                  env("MIRVM_THREADS") default("off")
+        => live(Result<String, Error>, |_| read_threads());
     /// Write the phase ledger (frontend/lower/engine/total) to stderr.
-    user     timing                   env("MIRVM_TIMING") default("off");
+    user timing                   env("MIRVM_TIMING") default("off")
+        => reads(bool, |o| o.timing);
     /// Bypass the L2 engine-IR cache (read and write).
-    user     no_ir_cache              env("MIRVM_NO_IR_CACHE") default("off");
+    user no_ir_cache              env("MIRVM_NO_IR_CACHE") default("off")
+        => reads(bool, |o| o.no_ir_cache);
     /// Bypass the pre-lowered std base image (full cold lowering).
-    user     no_base_image            env("MIRVM_NO_BASE_IMAGE") default("off");
+    user no_base_image            env("MIRVM_NO_BASE_IMAGE") default("off")
+        => reads(bool, |o| o.no_base_image);
     /// Bypass the dependency image.
-    user     no_deps_image            env("MIRVM_NO_DEPS_IMAGE") default("off");
+    user no_deps_image            env("MIRVM_NO_DEPS_IMAGE") default("off")
+        => reads(bool, |o| o.no_deps_image);
     /// Disable registry HTTP; resolve from the local cache only and fail loudly on a miss.
-    user     offline                  env("MIRVM_OFFLINE") default("off");
+    user offline                  env("MIRVM_OFFLINE") default("off")
+        => live(bool, |_| read_offline());
     /// `mirvm pack`: carry machine code out of line and rematerialize it on load.
-    user     pack_no_mc               env("MIRVM_PACK_NO_MC") default("off");
+    user pack_no_mc               env("MIRVM_PACK_NO_MC") default("off")
+        => reads(bool, |o| o.pack_no_mc);
 
     /// Log the JIT compiler thread's receive/publish flow.
-    dev      jit_debug                env("MIRVM_JIT_DEBUG") default("off");
+    dev jit_debug                env("MIRVM_JIT_DEBUG") default("off")
+        => reads(bool, |o| o.jit_debug);
     /// Dump CLIF for functions whose compilation fails.
-    dev      jit_debug_dump           env("MIRVM_JIT_DEBUG_DUMP") default("off");
+    dev jit_debug_dump           env("MIRVM_JIT_DEBUG_DUMP") default("off")
+        => reads(bool, |o| o.jit_debug_dump);
     /// Log build-script scheduling.
-    dev      debug_bldrs              env("MIRVM_DEBUG_BLDRS") default("off");
+    dev debug_bldrs              env("MIRVM_DEBUG_BLDRS") default("off")
+        => reads(bool, |o| o.debug_bldrs);
     /// Log resolver feature unification.
-    dev      debug_unify              env("MIRVM_DEBUG_UNIFY") default("off");
+    dev debug_unify              env("MIRVM_DEBUG_UNIFY") default("off")
+        => reads(bool, |o| o.debug_unify);
     /// `mirvm deps audit`: keep the scratch tree instead of cleaning it up.
-    dev      deps_audit_keep          env("MIRVM_DEPS_AUDIT_KEEP") default("off");
+    dev deps_audit_keep          env("MIRVM_DEPS_AUDIT_KEEP") default("off")
+        => reads(bool, |o| o.deps_audit_keep);
     /// Log native-archive symbol resolution.
-    dev      c2_debug                 env("MIRVM_C2_DEBUG") default("off");
+    dev c2_debug                 env("MIRVM_C2_DEBUG") default("off")
+        => reads(bool, |o| o.c2_debug);
     /// Log dependency-image pre-key computation.
-    dev      a2_debug                 env("MIRVM_A2_DEBUG") default("off");
+    dev a2_debug                 env("MIRVM_A2_DEBUG") default("off")
+        => reads(bool, |o| o.a2_debug);
     /// Print lowering purity statistics.
-    dev      purity_stats             env("MIRVM_PURITY_STATS") default("off");
+    dev purity_stats             env("MIRVM_PURITY_STATS") default("off")
+        => reads(bool, |o| o.purity_stats);
     /// Trace guest syscalls.
-    dev      syscall_trace            env("MIRVM_SYSCALL_TRACE") default("off");
+    dev syscall_trace            env("MIRVM_SYSCALL_TRACE") default("off")
+        => reads(bool, |o| o.syscall_trace);
     /// Print the fault RIP on SIGSEGV to locate a JIT code crash site.
-    dev      segv_dump                env("MIRVM_SEGV_DUMP") default("off");
+    dev segv_dump                env("MIRVM_SEGV_DUMP") default("off")
+        => reads(bool, |o| o.segv_dump);
 
     /// Encoded rustflags appended inside the compiler wrapper; set by the differential suite.
-    test     encoded_rustflags_append env("MIRVM_ENCODED_RUSTFLAGS_APPEND") default("empty");
+    test encoded_rustflags_append env("MIRVM_ENCODED_RUSTFLAGS_APPEND") default("empty")
+        => reads(Option<&'static str>, |o| o.encoded_rustflags_append.as_deref());
 
     /// Route argv into the Cargo wrapper phase.
     protocol cargo_session            env(protocol::CARGO_SESSION) default("unset");
@@ -309,9 +369,11 @@ entries! {
     /// `log export` filter: a sequence number or a START:END range.
     user     log_sequence             cli("--sequence", "Log") default("unset");
     /// Machine output: reports as one JSON document, diagnostics as one JSON object per line.
-    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Prepare Pack Capture Cache Deps Options") flag default("text");
+    user output_format            env("MIRVM_OUTPUT") cli("--json", "Run Prepare Pack Capture Cache Deps Options") flag default("text")
+        => live(Result<OutputFormat, Error>, |_| read_output_format());
     /// The quietest diagnostic that still prints: error | warning | note | info | debug.
-    user     log_level                env("MIRVM_LOG") cli("--verbose", "-v", "Run Prepare") flag default("warning");
+    user log_level                env("MIRVM_LOG") cli("--verbose", "-v", "Run Prepare") flag default("warning")
+        => live(Result<crate::diag::Severity, Error>, |_| read_log_level());
     /// Internal: forwarded capture directory for the Cargo runner form.
     user     mirvm_capture_directory  cli("--mirvm-capture-directory", "Internal") default("unset");
 }
@@ -474,62 +536,37 @@ pub enum OutputFormat {
 
 /// Every external input mirvm defines, resolved from the environment.
 ///
-/// Everything here is fixed for the lifetime of the process except `jit`, `stack_size`, `offline`
-/// and `output_format`: the command line overrides those by writing the very variable its child
-/// processes inherit, so their accessors read it live instead of snapshotting it.
-pub struct Options {
-    /// `MIRVM_HOME`: local store root.
-    pub home: PathBuf,
-    /// `MIRVM_TARGET_DIR`: the unified Cargo target directory.
-    pub target_dir: PathBuf,
-    /// `MIRVM_SYSROOT`: the MIR-rich sysroot, when the caller named one.
-    pub sysroot: Option<PathBuf>,
-    /// `MIRVM_JIT_THRESHOLD`: compilation trigger, 1000 when unset or unusable.
-    pub jit_threshold: u32,
-    /// `MIRVM_JIT_SYNC`: compile on the enqueueing thread so failures terminate loudly.
-    pub jit_sync: bool,
-    /// `MIRVM_JIT_STATS`: print helper frequency statistics at exit.
-    pub jit_stats: bool,
-    /// `MIRVM_CARGO_LOCKED`: build frontmatter/script projects with `--locked`.
-    pub cargo_locked: bool,
-    /// `MIRVM_TIMING`: write the phase ledger to stderr.
-    pub timing: bool,
-    /// `MIRVM_NO_IR_CACHE`: bypass the L2 engine-IR cache.
-    pub no_ir_cache: bool,
-    /// `MIRVM_NO_BASE_IMAGE`: bypass the pre-lowered std base image.
-    pub no_base_image: bool,
-    /// `MIRVM_NO_DEPS_IMAGE`: bypass the dependency image.
-    pub no_deps_image: bool,
-    /// `MIRVM_PACK_NO_MC`: carry machine code out of line in a package.
-    pub pack_no_mc: bool,
-    /// `MIRVM_DEPS_AUDIT_KEEP`: keep the `mirvm deps audit` scratch tree.
-    pub deps_audit_keep: bool,
-    /// `MIRVM_ENCODED_RUSTFLAGS_APPEND`: extra rustflags for the compiler wrapper.
-    pub encoded_rustflags_append: Option<String>,
-    /// `MIRVM_JIT_DEBUG`: log the JIT compiler thread's receive/publish flow.
-    pub jit_debug: bool,
-    /// `MIRVM_JIT_DEBUG_DUMP`: dump CLIF for functions whose compilation fails.
-    pub jit_debug_dump: bool,
-    /// `MIRVM_DEBUG_BLDRS`: log build-script scheduling.
-    pub debug_bldrs: bool,
-    /// `MIRVM_DEBUG_UNIFY`: log resolver feature unification.
-    pub debug_unify: bool,
-    /// `MIRVM_C2_DEBUG`: log native-archive symbol resolution.
-    pub c2_debug: bool,
-    /// `MIRVM_A2_DEBUG`: log dependency-image pre-key computation.
-    pub a2_debug: bool,
-    /// `MIRVM_PURITY_STATS`: print lowering purity statistics.
-    pub purity_stats: bool,
-    /// `MIRVM_SYSCALL_TRACE`: trace guest syscalls.
-    pub syscall_trace: bool,
-    /// `MIRVM_SEGV_DUMP`: print the fault RIP on SIGSEGV.
-    pub segv_dump: bool,
+/// Private to this module: the register rows are the one surface that reads it, so an option has one
+/// place to state its default, how it is read, and how a call site spells it.
+struct Options {
+    home: PathBuf,
+    target_dir: PathBuf,
+    jit_threshold: u32,
+    jit_sync: bool,
+    jit_stats: bool,
+    cargo_locked: bool,
+    timing: bool,
+    no_ir_cache: bool,
+    no_base_image: bool,
+    no_deps_image: bool,
+    pack_no_mc: bool,
+    deps_audit_keep: bool,
+    encoded_rustflags_append: Option<String>,
+    jit_debug: bool,
+    jit_debug_dump: bool,
+    debug_bldrs: bool,
+    debug_unify: bool,
+    c2_debug: bool,
+    a2_debug: bool,
+    purity_stats: bool,
+    syscall_trace: bool,
+    segv_dump: bool,
 }
 
 static OPTIONS: LazyLock<Options> = LazyLock::new(Options::load);
 
-/// This process's resolved options.
-pub fn get() -> &'static Options {
+/// This process's resolved options, the private half of the accessors below.
+fn get() -> &'static Options {
     &OPTIONS
 }
 
@@ -549,9 +586,6 @@ impl Options {
         Self {
             home,
             target_dir,
-            sysroot: raw("sysroot")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from),
             jit_threshold: raw("jit_threshold")
                 .and_then(|value| value.parse().ok())
                 .filter(|&threshold| threshold > 0)
@@ -578,89 +612,115 @@ impl Options {
             segv_dump: flag("segv_dump"),
         }
     }
+}
 
-    /// `MIRVM_JIT` / `--jit`. Absent means on.
-    pub fn jit(&self) -> bool {
-        match raw("jit") {
-            Some(value) => !(value == "off" || value == "0"),
-            None => true,
-        }
+/// The `MIRVM_JIT` reader: absent means on.
+fn read_jit() -> bool {
+    match raw("jit") {
+        Some(value) => !(value == "off" || value == "0"),
+        None => true,
     }
+}
 
-    /// `MIRVM_STACK_SIZE` / `--stack-size`, unparsed: the caller owns the diagnostic. An empty value
-    /// is returned as-is so the parser can reject it, matching the pre-register behavior.
-    pub fn stack_size(&self) -> Option<String> {
-        raw("stack_size")
+/// The `MIRVM_STACK_SIZE` reader, unparsed: the caller owns the diagnostic. An empty value is
+/// returned as-is so the parser can reject it, matching the pre-register behavior.
+fn read_stack_size() -> Option<String> {
+    raw("stack_size")
+}
+
+/// The `MIRVM_SYSROOT` reader: the sysroot in effect, which `--sysroot` writes after startup.
+///
+/// Everything that names a sysroot has to agree on it — the compiler session, the stamp, the base
+/// image and the dependency fingerprint — so this is read live rather than resolved at first use.
+fn read_sysroot() -> Option<std::path::PathBuf> {
+    raw("sysroot")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// The `MIRVM_OFFLINE` reader.
+fn read_offline() -> bool {
+    flag("offline")
+}
+
+/// The `MIRVM_DEPS` reader.
+fn read_deps() -> Result<DepsTrack, Error> {
+    match raw("deps").as_deref() {
+        None | Some("self") => Ok(DepsTrack::Own),
+        Some("cargo") => Ok(DepsTrack::Cargo),
+        Some(other) => Err(Error::DepsTrack {
+            env: env_var_name("deps"),
+            value: other.to_string(),
+        }),
     }
+}
 
-    /// `MIRVM_OFFLINE`.
-    pub fn offline(&self) -> bool {
-        flag("offline")
+/// The `MIRVM_OUTPUT` mapping: `text` is the default and an unknown word is the caller's to report.
+fn output_from(value: Option<&str>) -> Result<OutputFormat, Error> {
+    match value {
+        None | Some("") | Some("text") => Ok(OutputFormat::Text),
+        Some("json") => Ok(OutputFormat::Json),
+        Some(other) => Err(Error::OutputFormat {
+            env: env_var_name("output_format"),
+            value: other.to_string(),
+        }),
     }
+}
 
-    /// `MIRVM_DEPS`.
-    pub fn deps(&self) -> Result<DepsTrack, Error> {
-        match raw("deps").as_deref() {
-            None | Some("self") => Ok(DepsTrack::Own),
-            Some("cargo") => Ok(DepsTrack::Cargo),
-            Some(other) => Err(Error::DepsTrack {
-                env: env_var_name("deps"),
-                value: other.to_string(),
+/// The `MIRVM_OUTPUT` reader.
+fn read_output_format() -> Result<OutputFormat, Error> {
+    output_from(raw("output_format").as_deref())
+}
+
+/// Whether `MIRVM_OUTPUT` selects machine output.
+///
+/// The total form, for a reader that cannot report a bad value: [`crate::diag`] renders a diagnostic
+/// before the parser has seen the flag, and there an unknown word is text like any other.
+pub fn machine_output() -> bool {
+    matches!(
+        output_from(raw("output_format").as_deref()),
+        Ok(OutputFormat::Json)
+    )
+}
+
+/// The `MIRVM_LOG` reader: the quietest diagnostic that still prints.
+///
+/// The names are [`crate::diag::Severity`]'s own vocabulary, so a severity this register accepts is
+/// one the emitter can render, and an unknown word is rejected rather than silently read as the
+/// default.
+fn read_log_level() -> Result<crate::diag::Severity, Error> {
+    match raw("log_level").as_deref() {
+        None | Some("") => Ok(crate::diag::Severity::Warning),
+        Some(name) => crate::diag::Severity::from_name(name).ok_or_else(|| Error::LogLevel {
+            env: env_var_name("log_level"),
+            value: name.to_string(),
+        }),
+    }
+}
+
+/// The `MIRVM_CLESS_JOBS` reader, defaulting to the available parallelism.
+fn read_cless_jobs() -> Result<usize, Error> {
+    match raw("cless_jobs") {
+        None => Ok(std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)),
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if n >= 1 => Ok(n),
+            _ => Err(Error::ClessJobs {
+                env: env_var_name("cless_jobs"),
+                value: raw,
             }),
-        }
+        },
     }
+}
 
-    /// `MIRVM_OUTPUT` / `--json`.
-    pub fn output_format(&self) -> Result<OutputFormat, Error> {
-        match raw("output_format").as_deref() {
-            None | Some("") | Some("text") => Ok(OutputFormat::Text),
-            Some("json") => Ok(OutputFormat::Json),
-            Some(other) => Err(Error::OutputFormat {
-                env: env_var_name("output_format"),
-                value: other.to_string(),
-            }),
-        }
-    }
-
-    /// `MIRVM_LOG` / `--verbose`: the quietest diagnostic that still prints.
-    ///
-    /// The names are [`crate::diag::Severity`]'s own vocabulary, so a severity this register
-    /// accepts is one the emitter can render, and an unknown word is rejected rather than silently
-    /// read as the default.
-    pub(crate) fn log_level(&self) -> Result<crate::diag::Severity, Error> {
-        match raw("log_level").as_deref() {
-            None | Some("") => Ok(crate::diag::Severity::Warning),
-            Some(name) => crate::diag::Severity::from_name(name).ok_or_else(|| Error::LogLevel {
-                env: env_var_name("log_level"),
-                value: name.to_string(),
-            }),
-        }
-    }
-
-    /// `MIRVM_CLESS_JOBS`, defaulting to the available parallelism.
-    pub fn cless_jobs(&self) -> Result<usize, Error> {
-        match raw("cless_jobs") {
-            None => Ok(std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)),
-            Some(raw) => match raw.parse::<usize>() {
-                Ok(n) if n >= 1 => Ok(n),
-                _ => Err(Error::ClessJobs {
-                    env: env_var_name("cless_jobs"),
-                    value: raw,
-                }),
-            },
-        }
-    }
-
-    /// The `-Zthreads=` argument for one compiler session, from `MIRVM_THREADS`.
-    ///
-    /// `off`/unset maps to `-Zthreads=1`: on the pinned toolchain that parses back to "no thread
-    /// pool", so it is a no-op today, but it fixes this session's thread count regardless of rustc's
-    /// own default, which upstream is moving to two frontend threads.
-    pub fn threads_arg(&self) -> Result<String, Error> {
-        threads_from(raw("threads").as_deref())
-    }
+/// The `MIRVM_THREADS` reader: the `-Zthreads=` argument for one compiler session.
+///
+/// `off`/unset maps to `-Zthreads=1`: on the pinned toolchain that parses back to "no thread pool",
+/// so it is a no-op today, but it fixes this session's thread count regardless of rustc's own
+/// default, which upstream is moving to two frontend threads.
+fn read_threads() -> Result<String, Error> {
+    threads_from(raw("threads").as_deref())
 }
 
 /// The `MIRVM_THREADS` mapping, split out so the table can be exercised without touching the
@@ -1042,38 +1102,37 @@ mod tests {
 
     #[test]
     fn resolved_options_read_registered_fields() {
-        // Every field funnels through `lookup`, which panics on an unregistered field; touching them
-        // here turns a typo into a test failure rather than a silent fallback.
-        let options = get();
-        let _ = &options.home;
-        let _ = &options.target_dir;
-        let _ = &options.sysroot;
-        let _ = options.jit();
-        let _ = options.jit_threshold;
-        let _ = options.jit_sync;
-        let _ = options.jit_stats;
-        let _ = options.cargo_locked;
-        let _ = options.deps();
-        let _ = options.cless_jobs();
-        let _ = options.threads_arg();
-        let _ = options.timing;
-        let _ = options.no_ir_cache;
-        let _ = options.no_base_image;
-        let _ = options.no_deps_image;
-        let _ = options.offline();
-        let _ = options.pack_no_mc;
-        let _ = options.jit_debug;
-        let _ = options.jit_debug_dump;
-        let _ = options.debug_bldrs;
-        let _ = options.debug_unify;
-        let _ = options.deps_audit_keep;
-        let _ = options.c2_debug;
-        let _ = options.a2_debug;
-        let _ = options.purity_stats;
-        let _ = options.syscall_trace;
-        let _ = options.segv_dump;
-        let _ = &options.encoded_rustflags_append;
-        let _ = options.stack_size();
+        // Every accessor funnels through `lookup`, which panics on an unregistered field; touching
+        // them here turns a typo into a test failure rather than a silent fallback.
+        let _ = super::home();
+        let _ = super::target_dir();
+        let _ = super::sysroot();
+        let _ = super::jit();
+        let _ = super::jit_threshold();
+        let _ = super::jit_sync();
+        let _ = super::jit_stats();
+        let _ = super::cargo_locked();
+        let _ = super::deps();
+        let _ = super::cless_jobs();
+        let _ = super::threads();
+        let _ = super::timing();
+        let _ = super::no_ir_cache();
+        let _ = super::no_base_image();
+        let _ = super::no_deps_image();
+        let _ = super::offline();
+        let _ = super::pack_no_mc();
+        let _ = super::jit_debug();
+        let _ = super::jit_debug_dump();
+        let _ = super::debug_bldrs();
+        let _ = super::debug_unify();
+        let _ = super::deps_audit_keep();
+        let _ = super::c2_debug();
+        let _ = super::a2_debug();
+        let _ = super::purity_stats();
+        let _ = super::syscall_trace();
+        let _ = super::segv_dump();
+        let _ = super::encoded_rustflags_append();
+        let _ = super::stack_size();
     }
 
     #[test]

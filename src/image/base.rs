@@ -49,7 +49,7 @@ struct BaseFile {
 }
 
 fn disabled() -> bool {
-    crate::options::get().no_base_image
+    crate::options::no_base_image()
 }
 
 /// (base image path, sysroot stamp). `None` when the stamp is unavailable (sysroot not

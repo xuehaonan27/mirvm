@@ -282,7 +282,7 @@ fn count_objects(key: &str, rows: &[(String, usize)]) -> String {
 pub fn print(module: &Module) {
     let survey = survey(module);
     let json = matches!(
-        crate::options::get().output_format(),
+        crate::options::output_format(),
         Ok(crate::options::OutputFormat::Json)
     );
     print!("{}", if json { survey.json() } else { survey.text() });

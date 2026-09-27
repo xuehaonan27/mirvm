@@ -302,7 +302,7 @@ pub fn emit(diagnostic: &dyn Diagnostic) {
 /// The help block that belongs to a failure. Machine mode already carries it as a field, so writing
 /// it here as well would put prose in the middle of a JSONL stream.
 fn write_usage(diagnostic: &dyn Diagnostic) {
-    if json::enabled() {
+    if crate::options::machine_output() {
         return;
     }
     if let Some(usage) = diagnostic.usage() {
@@ -319,7 +319,7 @@ pub fn emit_direct(diagnostic: &dyn Diagnostic) {
     }
     let line = render(diagnostic);
     let _ = std::io::stderr().write_all(line.as_bytes());
-    if !json::enabled()
+    if !crate::options::machine_output()
         && let Some(usage) = diagnostic.usage()
     {
         let _ = std::io::stderr().write_all(usage.as_bytes());
@@ -341,7 +341,7 @@ pub fn render_line(diagnostic: &dyn Diagnostic) -> String {
 
 /// Render one diagnostic in the mode `MIRVM_OUTPUT` selects.
 fn render(diagnostic: &dyn Diagnostic) -> String {
-    if json::enabled() {
+    if crate::options::machine_output() {
         json::line(diagnostic)
     } else {
         text(diagnostic)
