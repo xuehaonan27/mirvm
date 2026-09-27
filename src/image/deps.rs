@@ -63,7 +63,7 @@ struct DepsFileRef<'a> {
 /// Whether the deps-image cache is bypassed. The cache is on by default and the only knob is
 /// `MIRVM_NO_DEPS_IMAGE=1` (diagnostics / two-state cross-check).
 pub fn bypassed() -> bool {
-    crate::options::get().no_deps_image
+    crate::options::no_deps_image()
 }
 
 /// Pre-key material: the paths in `--extern name=path` (two-arg form) and `--extern=name=path` (single-arg
@@ -119,7 +119,7 @@ pub(crate) fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, 
         ));
     }
     let key = key.digest();
-    if crate::options::get().a2_debug {
+    if crate::options::a2_debug() {
         eprintln!("[a2-debug] pre-key={key} externs={paths:?}");
     }
     Some((key, stamps))

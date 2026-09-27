@@ -35,7 +35,7 @@ impl<'a> Compiler<'a> {
         if !admit(self.shared, body) {
             // Staying interpreted is the intended outcome for a non-admitted function,
             // not a failure; strict mode only records the set. Gated by MIRVM_JIT_DEBUG.
-            if jit.sync && crate::options::get().jit_debug {
+            if jit.sync && crate::options::jit_debug() {
                 eprintln!(
                     "mirvm-jit-strict: f{func} not admitted ({})",
                     self.shared.module.funcs[func as usize].name
@@ -157,7 +157,7 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if crate::options::get().jit_debug {
+            if crate::options::jit_debug() {
                 eprintln!("mirvm-jit-debug: guarded entry define failed: {e:#?}");
             }
             return None;
@@ -252,7 +252,7 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if crate::options::get().jit_debug {
+            if crate::options::jit_debug() {
                 eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
             return None;
@@ -364,10 +364,10 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if crate::options::get().jit_debug {
+            if crate::options::jit_debug() {
                 eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
-            if crate::options::get().jit_debug_dump {
+            if crate::options::jit_debug_dump() {
                 eprintln!(
                     "mirvm-jit-debug: CLIF dump of failed function f{func}:\n{}",
                     cctx.func.display()
@@ -454,7 +454,7 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if crate::options::get().jit_debug {
+            if crate::options::jit_debug() {
                 eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
             return None;

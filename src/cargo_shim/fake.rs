@@ -81,7 +81,7 @@ pub(super) fn write_fake_outputs(rustc: &Path, args: &[String], info: &CrateRunI
             }
         }
         // The same MIR sysroot as target dependencies (required to resolve use std::*)
-        if let Some(sysroot) = crate::options::get().sysroot.as_deref() {
+        if let Some(sysroot) = crate::options::sysroot() {
             cmd.arg("--sysroot").arg(sysroot);
         }
         cmd.stdout(std::process::Stdio::null());
@@ -219,9 +219,7 @@ pub fn parse_runner_invocation(
     // by the guest, at which point the user's environment has already dropped every internal
     // variable by contract. The sidecar recipe recorded the build environment that produced
     // the launcher, so it is the fallback both paths share without user intervention.
-    let sysroot = crate::options::get()
-        .sysroot
-        .as_deref()
+    let sysroot = crate::options::sysroot()
         .map(|path| path.display().to_string())
         .or_else(|| {
             info.env.iter().find_map(|(key, value)| {

@@ -119,8 +119,8 @@ fn exec(mut cmd: Command) -> ! {
 }
 
 fn cargo_target_dir() -> PathBuf {
-    let mut target_dir = crate::options::get().target_dir.clone();
-    if let Some(encoded) = crate::options::get().encoded_rustflags_append.as_deref() {
+    let mut target_dir = crate::options::target_dir().to_path_buf();
+    if let Some(encoded) = crate::options::encoded_rustflags_append() {
         let hash = crate::utils::content::fnv1a(encoded.as_bytes());
         target_dir = target_dir
             .join("mirvm-append-rustflags")
@@ -236,10 +236,10 @@ fn cargo_project_command(
     // for config/workspace discovery, so carry the original directory to the
     // runner and apply it only when guest execution begins.
     crate::options::protocol::set_guest_cwd(&mut cmd, guest_cwd);
-    match crate::options::get().sysroot.as_deref() {
+    match crate::options::sysroot() {
         Some(value) => {
             crate::options::protocol::set_caller_sysroot_present(&mut cmd, true);
-            crate::options::protocol::set_caller_sysroot(&mut cmd, value);
+            crate::options::protocol::set_caller_sysroot(&mut cmd, &value);
         }
         None => {
             crate::options::protocol::set_caller_sysroot_present(&mut cmd, false);
@@ -336,7 +336,7 @@ pub fn phase_cargo(
         }
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
-    let locked = crate::options::get().cargo_locked;
+    let locked = crate::options::cargo_locked();
     // On this track Cargo is the preparer: `cargo build` produces the dependency artifacts and the
     // crate's own metadata, and Cargo's fingerprints make the following run a no-op for everything
     // but the runner's own lowering session.
@@ -381,7 +381,7 @@ pub fn phase_cargo_test(
         }
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
-    let locked = crate::options::get().cargo_locked;
+    let locked = crate::options::cargo_locked();
     let (rustdoc, doctest_builder) = ensure_cargo_doctest_tools(project_dir, &self_exe)
         .unwrap_or_else(|error| {
             eprintln!("mirvm: {error}");
@@ -458,9 +458,7 @@ fn cargo_doctest_rustdoc_args(
 pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
     let mut args: Vec<String> = argv.collect();
     if args.iter().any(|arg| arg == "--test") {
-        let sysroot = crate::options::get()
-            .sysroot
-            .as_deref()
+        let sysroot = crate::options::sysroot()
             .expect("Cargo rustdoc phase is missing the sysroot option")
             .display()
             .to_string();
@@ -491,10 +489,7 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     let _rustc_name = argv.next();
     let rustc = crate::sysroot::toolchain::rustc();
     let mut args: Vec<String> = argv.collect();
-    append_encoded_rustflags(
-        &mut args,
-        crate::options::get().encoded_rustflags_append.as_deref(),
-    );
+    append_encoded_rustflags(&mut args, crate::options::encoded_rustflags_append());
 
     let is_info_query =
         arg_flag_value(&args, "--print").is_some() || args.iter().any(|a| a == "-vV");
@@ -544,9 +539,7 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     // all carried .rcgu.o, ~100MB total). metadata-only rlibs are still produced through
     // rustc's default link path, and DepCallbacks supplies the post-mono const-eval error
     // surface explicitly (cli.rs).
-    let sysroot = crate::options::get()
-        .sysroot
-        .as_deref()
+    let sysroot = crate::options::sysroot()
         .expect("wrapper phase is missing the sysroot option")
         .display()
         .to_string();

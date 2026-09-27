@@ -125,7 +125,7 @@ impl Family {
     /// The family directory in this process's store: what every writer uses, so the path is spelled
     /// in the register and nowhere else.
     pub(crate) fn dir(&self) -> PathBuf {
-        self.dir_in(&crate::options::get().home)
+        self.dir_in(crate::options::home())
     }
 }
 

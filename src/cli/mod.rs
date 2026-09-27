@@ -93,7 +93,7 @@ static PARALLEL_FRONTEND_ARG: std::sync::OnceLock<String> = std::sync::OnceLock:
 /// subprocess, whose stderr is captured into `build.log` and whose failure the parent deliberately
 /// treats as "no base image, lower cold" — a rejection there would be silent.
 pub(crate) fn validate_parallel_frontend_arg() -> Result<(), crate::options::Error> {
-    let arg = crate::options::get().threads_arg()?;
+    let arg = crate::options::threads()?;
     let _ = PARALLEL_FRONTEND_ARG.set(arg);
     Ok(())
 }
@@ -153,7 +153,7 @@ pub(crate) fn usage() -> String {
 
 pub fn main() -> ExitCode {
     // Troubleshooting knob: print fault RIP on SIGSEGV to locate JIT code crash site.
-    if crate::options::get().segv_dump {
+    if crate::options::segv_dump() {
         crate::os::signal::install_segv_dump();
     }
     // Rejected before any dispatch: the flag reaches every compiler session, and one injection
@@ -163,12 +163,12 @@ pub fn main() -> ExitCode {
     }
     // Same place, same reason: the output mode is read by the emitter itself, so it is validated
     // once here rather than silently falling back to text at every call site.
-    if let Err(error) = crate::options::get().output_format() {
+    if let Err(error) = crate::options::output_format() {
         return crate::error::Error::from(error).report();
     }
     // And the same for how much mirvm says: the threshold is read by `diag` at every call site,
     // including the ones that run before a command exists, so it is resolved once here.
-    match crate::options::get().log_level() {
+    match crate::options::log_level() {
         Ok(severity) => crate::diag::set_min_severity(severity),
         Err(error) => return crate::error::Error::from(error).report(),
     }
@@ -305,7 +305,7 @@ fn options_main(args: impl Iterator<Item = String>) -> Result<ExitCode, crate::e
             }
         }
     }
-    if crate::options::get().output_format()? == crate::options::OutputFormat::Json {
+    if crate::options::output_format()? == crate::options::OutputFormat::Json {
         println!("{}", crate::options::render_json());
     } else {
         println!("{}", crate::options::version());
@@ -474,7 +474,7 @@ fn test_main(argv: impl Iterator<Item = String>) -> Result<ExitCode, crate::erro
         project.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
 
-    match crate::options::get().deps()? {
+    match crate::options::deps()? {
         // Diverges: the Cargo track replaces this process with cargo's.
         crate::options::DepsTrack::Cargo => {
             cargo_shim::phase_cargo_test(&dir, &before, &harness_args)

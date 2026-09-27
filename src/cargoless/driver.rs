@@ -451,8 +451,8 @@ fn drive(
     }
 
     // 3. sysroot: the option takes priority, otherwise self-built (same measure as the CLI run path)
-    let sysroot = match crate::options::get().sysroot.clone() {
-        Some(p) => p,
+    let sysroot = match crate::options::sysroot() {
+        Some(p) => p.to_path_buf(),
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {

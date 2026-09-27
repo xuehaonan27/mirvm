@@ -183,7 +183,7 @@ pub fn memcmp_addr() -> *const u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     let args: &[u64] = unsafe { std::slice::from_raw_parts(args, 6) };
-    if crate::options::get().syscall_trace {
+    if crate::options::syscall_trace() {
         // Direct sink: this is an `extern "C"` entry on the guest syscall path, where taking the
         // capture tee's lock is unsafe. The trace is a dev knob, so its absence from a capture's
         // `diagnostics.log` is intentional.

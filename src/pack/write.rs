@@ -54,7 +54,7 @@ pub(crate) fn write_package(
     // also enters the MC section for in-process loading; MIRVM_PACK_NO_MC=1 only switches the load
     // method and no longer breaks the package's self-containment.
     let ga_prefix = crate::store::GLOBAL_ASM.dir().display().to_string();
-    let no_mc = crate::options::get().pack_no_mc;
+    let no_mc = crate::options::pack_no_mc();
     let mut libs = Vec::new();
     let mut mc_entries = Vec::new();
     for p in &module.required_native_libs {

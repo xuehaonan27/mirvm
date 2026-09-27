@@ -552,7 +552,7 @@ fn rescue_with_rlib_symbols(
             }
         }
     }
-    if crate::options::get().c2_debug {
+    if crate::options::c2_debug() {
         eprintln!("c2-debug: undefs={undefs:?} hit={}", hit.len());
     }
     if hit.is_empty() {
