@@ -620,10 +620,7 @@ impl Translator<'_, '_> {
                 // Lane bitmask; at 64 bits or fewer no masking is needed, as in the interpreter
                 // body.
                 let pa = self.place_addr(a);
-                let rp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let rp = self.site_rvalue(rv);
                 let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
                 let call = self.b.ins().call(fref, &[rp, pa]);
                 self.b.inst_results(call)[0]
@@ -631,10 +628,7 @@ impl Translator<'_, '_> {
             R::SimdReduce { a, .. } => {
                 // bool 0/1, the same as the interpreter body's `acc as u64`.
                 let pa = self.place_addr(a);
-                let rp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let rp = self.site_rvalue(rv);
                 let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
                 let call = self.b.ins().call(fref, &[rp, pa]);
                 self.b.inst_results(call)[0]
@@ -643,10 +637,7 @@ impl Translator<'_, '_> {
                 // Scalar bit pattern at the lane width; the interpreter body already masks each
                 // op back to lw, and this masks to the same width.
                 let pa = self.place_addr(a);
-                let rp = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let rp = self.site_rvalue(rv);
                 let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
                 let call = self.b.ins().call(fref, &[rp, pa]);
                 let r = self.b.inst_results(call)[0];

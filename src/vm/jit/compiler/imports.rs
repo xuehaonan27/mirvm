@@ -75,6 +75,14 @@ impl<'a> Compiler<'a> {
         for (n, p) in math_symbols() {
             jb.symbol(n, p as *const u8);
         }
+        // The values the translator bakes: a site is emitted as a named `global_value`, and the module
+        // resolves that name through this hook when it applies the relocation at finalize. Per
+        // compiler, so two Engines in one process never answer for each other's sites.
+        let values = std::sync::Arc::new(reloc::Values::default());
+        jb.symbol_lookup_fn({
+            let values = std::sync::Arc::clone(&values);
+            Box::new(move |name: &str| reloc::lookup(&values, name))
+        });
         let mut module = JITModule::new(jb);
 
         let mut sig_c2i = module.make_signature();
@@ -274,6 +282,9 @@ impl<'a> Compiler<'a> {
             poll_signals,
             host_syscall_trace,
             pending_unwind: Vec::new(),
+            values,
+            sites: Vec::new(),
+            site_data: Vec::new(),
             #[cfg(test)]
             fail_after_symbol: None,
         };

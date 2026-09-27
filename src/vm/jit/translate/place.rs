@@ -87,10 +87,10 @@ impl Translator<'_, '_> {
     pub(super) fn place_addr(&mut self, pe: &ir::PlaceExpr) -> Value {
         let mut addr = match pe.base {
             ir::PlaceBase::Local(off) => self.addr_of_local(off),
-            ir::PlaceBase::Static(a) => self
-                .b
-                .ins()
-                .iconst(types::I64, self.shared.instance.resolve_link_addr(a) as i64),
+            ir::PlaceBase::Static(a) => {
+                let runtime = self.shared.instance.resolve_link_addr(a);
+                self.site(Site::Frozen(a), runtime)
+            }
         };
         for step in pe.steps.iter() {
             match step {

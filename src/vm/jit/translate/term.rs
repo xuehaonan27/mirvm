@@ -110,7 +110,7 @@ impl Translator<'_, '_> {
                         }
                         let (et, ok, pad) = self.prepare_cleanup(sig0);
                         let fref = self.module.declare_func_in_func(self.c2i, self.b.func);
-                        let fv = self.b.ins().iconst(types::I64, *callee as i64);
+                        let fv = self.site(Site::Func(*callee), u64::from(*callee));
                         let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                         let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                         let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
@@ -140,7 +140,7 @@ impl Translator<'_, '_> {
                         let fref = self
                             .module
                             .declare_func_in_func(self.call_terminate, self.b.func);
-                        let fv = self.b.ins().iconst(types::I64, *callee as i64);
+                        let fv = self.site(Site::Func(*callee), u64::from(*callee));
                         let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                         let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                         let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
@@ -168,7 +168,7 @@ impl Translator<'_, '_> {
                             let fref = self
                                 .module
                                 .declare_func_in_func(self.call_main_catch, self.b.func);
-                            let fv = self.b.ins().iconst(types::I64, *callee as i64);
+                            let fv = self.site(Site::Func(*callee), u64::from(*callee));
                             let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                             let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                             let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
@@ -190,7 +190,13 @@ impl Translator<'_, '_> {
                                     [*callee as usize]
                                     as *const std::sync::atomic::AtomicU64
                                     as i64;
-                                let ap = self.b.ins().iconst(types::I64, slot_addr);
+                                let ap = self.site(
+                                    Site::Slot {
+                                        domain: self.domain,
+                                        func: *callee,
+                                    },
+                                    slot_addr as u64,
+                                );
                                 let fp =
                                     self.b
                                         .ins()
@@ -237,7 +243,7 @@ impl Translator<'_, '_> {
                                     3,
                                 ));
                                 let fref = self.module.declare_func_in_func(self.c2i, self.b.func);
-                                let fv = self.b.ins().iconst(types::I64, *callee as i64);
+                                let fv = self.site(Site::Func(*callee), u64::from(*callee));
                                 let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                                 let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                                 let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
@@ -335,7 +341,7 @@ impl Translator<'_, '_> {
                         .as_ref()
                         .map_or(0, |s| s as *const ir::ForeignSig as i64),
                 );
-                let fv = self.b.ins().iconst(types::I64, func as i64);
+                let fv = self.site(Site::Func(func), u64::from(func));
                 if let UnwindAction::Cleanup(bb) = unwind {
                     // try_call: the ok block writes back and then jumps to target; the pad jumps to
                     // the IR cleanup block.
@@ -402,9 +408,11 @@ impl Translator<'_, '_> {
                         }
                     }
                 }
-                let stub_addr = self.b.ins().iconst(
-                    types::I64,
-                    self.shared.instance.asm_stub_addrs[*stub as usize] as i64,
+                // An asm stub's address is materialized per process, so the site names the stub rather
+                // than the address a previous process happened to place it at.
+                let stub_addr = self.site(
+                    Site::Stub(*stub),
+                    self.shared.instance.asm_stub_addrs[*stub as usize],
                 );
                 let mut s = self.module.make_signature();
                 s.params.push(AbiParam::new(types::I64));
@@ -460,15 +468,13 @@ impl Translator<'_, '_> {
                 let fref = self
                     .module
                     .declare_func_in_func(self.call_foreign, self.b.func);
-                let sp = self.b.ins().iconst(types::I64, sym.as_ptr() as i64);
+                let sp = self.site_foreign_sig(SigPart::Symbol, sym.as_ptr() as u64);
                 let sl = self.b.ins().iconst(types::I64, sym.len() as i64);
-                let sg = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, sig as *const ir::ForeignSig as i64);
+                let sg =
+                    self.site_foreign_sig(SigPart::Signature, sig as *const ir::ForeignSig as u64);
                 let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                 let nv = self.b.ins().iconst(types::I64, av.len() as i64);
-                let fv = self.b.ins().iconst(types::I64, func as i64);
+                let fv = self.site(Site::Func(func), u64::from(func));
                 macro_rules! foreign_write_back {
                     ($r:expr) => {
                         let r = $r;
@@ -572,14 +578,11 @@ impl Translator<'_, '_> {
                     let fref = self
                         .module
                         .declare_func_in_func(self.call_builtin, self.b.func);
-                    let bp = self
-                        .b
-                        .ins()
-                        .iconst(types::I64, builtin as *const ir::Builtin as i64);
+                    let bp = self.site_builtin(builtin);
                     let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                     let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                     let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
-                    let fv = self.b.ins().iconst(types::I64, func as i64);
+                    let fv = self.site(Site::Func(func), u64::from(func));
                     let mut sig0 = self.module.make_signature();
                     for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
@@ -611,7 +614,7 @@ impl Translator<'_, '_> {
                     }
                     let fref = self.module.declare_func_in_func(self.alloc, self.b.func);
                     let tv = self.b.ins().iconst(types::I64, tag);
-                    let fv = self.b.ins().iconst(types::I64, func as i64);
+                    let fv = self.site(Site::Func(func), u64::from(func));
                     let call = self
                         .b
                         .ins()
@@ -652,14 +655,11 @@ impl Translator<'_, '_> {
                     let fref = self
                         .module
                         .declare_func_in_func(self.call_builtin, self.b.func);
-                    let bp = self
-                        .b
-                        .ins()
-                        .iconst(types::I64, builtin as *const ir::Builtin as i64);
+                    let bp = self.site_builtin(builtin);
                     let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                     let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                     let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
-                    let fv = self.b.ins().iconst(types::I64, func as i64);
+                    let fv = self.site(Site::Func(func), u64::from(func));
                     // The Terminate flag, with the same catch_unwind + abort semantics as
                     // elsewhere.
                     let term = self.b.ins().iconst(
@@ -702,7 +702,7 @@ impl Translator<'_, '_> {
                 let fref = self
                     .module
                     .declare_func_in_func(self.unreachable, self.b.func);
-                let fv = self.b.ins().iconst(types::I64, func as i64);
+                let fv = self.site(Site::Func(func), u64::from(func));
                 self.b.ins().call(fref, &[fv]);
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }
@@ -711,9 +711,9 @@ impl Translator<'_, '_> {
             // error code 70.
             Terminator::Trap(reason) => {
                 let fref = self.module.declare_func_in_func(self.trap, self.b.func);
-                let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);
+                let p = self.site_trap_reason(reason, None);
                 let n = self.b.ins().iconst(types::I64, reason.len() as i64);
-                let fv = self.b.ins().iconst(types::I64, func as i64);
+                let fv = self.site(Site::Func(func), u64::from(func));
                 self.b.ins().call(fref, &[p, n, fv]);
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }

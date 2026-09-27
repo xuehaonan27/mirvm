@@ -99,6 +99,13 @@ struct Compiler<'a> {
     /// (clif id, unwind info, LSDA bytes of a try_call function) accumulated for this
     /// batch; all of it is registered together after finalize.
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
+    /// The values this compiler's sites baked, by site name ([`reloc`]).
+    values: std::sync::Arc<reloc::Values>,
+    /// The sites of the body being compiled, in emission order.
+    sites: Vec<Site>,
+    /// Their module-level data ids, parallel to `sites`: how a relocation's target maps back to the
+    /// site it belongs to.
+    site_data: Vec<u32>,
     #[cfg(test)]
     fail_after_symbol: Option<JitSymbolRole>,
 }
@@ -182,6 +189,9 @@ pub(super) fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: 
                 );
             } else {
                 eprintln!("mirvm-jit-debug: f{func} release={ok}");
+            }
+            if let Some(sites) = shared.jit.recorded_sites(domain, func) {
+                eprintln!("mirvm-jit-debug: f{func} {sites} recorded sites");
             }
         }
     }
