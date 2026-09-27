@@ -228,6 +228,14 @@ pub(crate) struct File {
     /// A unit manifest's key (`build id ⊕ base key ⊕ rlib stamp`); `None` for a closure manifest,
     /// whose key material is the `--extern` stamps.
     pub unit_key: Option<String>,
+    /// The function, TLS and asm counts of each layer this manifest was written above, in order.
+    ///
+    /// A layer's own ids start where that stack ends, and a canonical binding's ordinal is resolved
+    /// against those boundaries, so the *layout* of the stack below — not just the symbols it offers —
+    /// is part of what makes a manifest valid. The counts are what the layout is: a unit's ids and its
+    /// slot are its position and its own size, and neither changes when a lower manifest is rewritten,
+    /// which is why this is the invariant rather than the digest chain.
+    pub below: Vec<(u32, u32, u32)>,
     /// The frozen/code spline slot the layer's arenas were built in (`0` for a closure manifest).
     pub home: usize,
     pub lowering_fp: (bool, bool, bool),
@@ -247,6 +255,7 @@ pub(crate) struct FileRef<'a> {
     pub build_id: &'a str,
     pub base_key: &'a str,
     pub unit_key: Option<&'a str>,
+    pub below: &'a [(u32, u32, u32)],
     pub home: usize,
     pub lowering_fp: (bool, bool, bool),
     pub extern_stamps: &'a [crate::utils::content::FileStamp],
@@ -556,6 +565,39 @@ fn project_target(target: Target, unit: &Unit, symbols: &Symbols) -> Result<Bind
             .name_of(other)
             .ok_or_else(|| format!("no symbol names {other:?}, which this unit does not own")),
     }
+}
+
+/// The first frozen relocation whose target lies in a dependency-image spline slot that is not this
+/// layer's own — the one shape a stored layer cannot carry.
+///
+/// A layer's slot is its position in the unit table of the program that built it, and that position
+/// is a property of that program's dependency graph, not of the crate: a layer that points into a
+/// sibling slot is therefore only valid above the exact stack it was written over, which is more than
+/// a manifest claims. The base and delta regions are fixed addresses and always portable, and so is
+/// the layer's own slot, which the manifest records.
+pub(crate) fn cross_layer_target(module: &crate::vm::ir::Module, home: usize) -> Option<u64> {
+    use crate::vm::ir::FrozenRelocTarget;
+    let other = |target: u64| {
+        let slot = crate::os_arch::addrspace::image_slot(target as usize)
+            .or_else(|| crate::os_arch::addrspace::image_code_slot(target as usize))?;
+        (slot != home).then_some(target)
+    };
+    // Every table of the serialized module that holds a bare link address: a relocation's target, a
+    // TLS template, and a GOT slot. Bodies and the id-bearing tables are canonical (`Tables`), but
+    // these three are stored as they are, so they are what the layer has to be able to explain.
+    module
+        .frozen_relocs
+        .iter()
+        .find_map(|reloc| match reloc.target {
+            FrozenRelocTarget::Frozen(addr) | FrozenRelocTarget::Entry(addr) => other(addr.0),
+        })
+        .or_else(|| module.tls.iter().find_map(|slot| other(slot.template.0)))
+        .or_else(|| {
+            module
+                .got_fixups
+                .iter()
+                .find_map(|fixup| other(fixup.addr.0))
+        })
 }
 
 /// One function's fragment bytes and bindings, turned back into the body the runtime needs.

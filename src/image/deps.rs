@@ -309,6 +309,9 @@ pub fn store_and_wrap(
                 build_id: crate::options::build::BUILD_ID,
                 base_key,
                 unit_key: None,
+                // A closure manifest is the whole stack above the base, and the base key is checked
+                // exactly; there is no prefix of layers to lay out.
+                below: &[],
                 home: 0,
                 lowering_fp: fp,
                 extern_stamps: &stamps,

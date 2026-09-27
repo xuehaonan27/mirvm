@@ -252,6 +252,16 @@ pub(crate) fn try_load(
     None
 }
 
+/// One layer's (functions, TLS slots, asm stubs): the size that fixes where the next layer's ids
+/// start and how the ranges an ordinal resolves against are laid out.
+fn layer_counts(layer: &super::BaseImage) -> (u32, u32, u32) {
+    (
+        layer.module.funcs.len() as u32,
+        layer.module.tls.len() as u32,
+        layer.module.asm_sites.len() as u32,
+    )
+}
+
 fn load_one(
     index: u32,
     path: &Path,
@@ -290,6 +300,15 @@ fn load_one(
         reason("key mismatch");
         return None;
     }
+    let below: Vec<(u32, u32, u32)> = stack.layers().iter().map(layer_counts).collect();
+    if f.below != below {
+        reason("built above a different stack layout");
+        return None;
+    }
+    if f.home != index as usize {
+        reason("its recorded slot is not its place in this program's units");
+        return None;
+    }
     if f.lowering_fp != base.lowering_fp {
         reason("built with a different lowering fingerprint");
         return None;
@@ -315,6 +334,14 @@ fn load_one(
         reason("no frozen region");
         return None;
     };
+    // A relocation to another layer's slot was baked against the stack the manifest was written over:
+    // that stack's layout is not what this one has, so the manifest is a miss rather than a guess.
+    if let Some(target) = manifest::cross_layer_target(&f.module, f.home) {
+        reason(&format!(
+            "a frozen relocation targets another layer at {target:#x}"
+        ));
+        return None;
+    }
     let unit_view = super::deps::unit_of(
         &stack.layer_ranges(),
         stack.below().prefix,
@@ -328,6 +355,28 @@ fn load_one(
     if let Err(error) = manifest::rehydrate_module(&mut f.module, &f.funcs, &unit_view, &symbols) {
         reason(&error);
         return None;
+    }
+    // The layer must be the one its records describe: re-projecting a body has to reproduce the
+    // fragment id and the binding list the manifest stores. This is the writer's own predicate run
+    // again on the loaded side, and it is what refuses a layer whose absolute addresses or ids were
+    // baked against another stack — a body whose ids had been shifted would project to different
+    // bindings, and the manifest it produced would be plausible everywhere except at run time.
+    {
+        for (body, record) in f.module.funcs.iter().zip(&f.funcs) {
+            match manifest::project(body, &unit_view, &symbols) {
+                Ok(projected)
+                    if projected.record.fragment == record.fragment
+                        && projected.record.bindings == record.bindings => {}
+                Ok(_) => {
+                    reason("a body does not project back to its record");
+                    return None;
+                }
+                Err(error) => {
+                    reason(&error);
+                    return None;
+                }
+            }
+        }
     }
     let tls_by_sym = match f.tables.restore(&mut f.module, &unit_view, &symbols) {
         Ok((_, tls)) => tls,
@@ -406,16 +455,27 @@ pub(crate) fn store(
     // fixed base — any slot will do, because the manifest records which one (its `home`) and the
     // loader restores it there.
     let publishable = entry::snapshot_is_publishable(&bi.module, &bi.instance, None);
-    let cacheable =
-        publishable && crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
+    // A layer that points into another layer's slot would be refused on load, so it is not written in
+    // the first place.
+    let portable = bi
+        .module
+        .frozen
+        .as_ref()
+        .and_then(|snapshot| crate::os_arch::addrspace::image_slot(snapshot.home()))
+        .is_none_or(|home| manifest::cross_layer_target(&bi.module, home).is_none());
+    let cacheable = publishable
+        && portable
+        && crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
     if !cacheable {
         if crate::options::a2_debug() {
             eprintln!(
                 "[a2-debug] unit {unit_key} not stored: {}",
-                if publishable {
-                    "verification against the stack below failed"
-                } else {
+                if !publishable {
                     "snapshot is not in its spline slot"
+                } else if !portable {
+                    "a frozen relocation targets another layer"
+                } else {
+                    "verification against the stack below failed"
                 }
             );
         }
@@ -478,6 +538,7 @@ pub(crate) fn store(
         build_id: crate::options::build::BUILD_ID,
         base_key: &base.key,
         unit_key: Some(&unit_key),
+        below: &stack.layers().iter().map(layer_counts).collect::<Vec<_>>(),
         home,
         lowering_fp: fp,
         extern_stamps: std::slice::from_ref(&stamp),

@@ -134,6 +134,20 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   succeeds), run it again (it fails). The defect is the resolver round trip — its own fresh resolution
   produces a graph its lock reader rejects — not the fixture. Found while measuring the unit home rule.
 
+- **E39** `OPEN`: a stored unit layer is not yet safe to run in the session that loads it. A program
+  that reuses its own unit manifests (cold run, then a warm one) runs *wrong code* rather than missing:
+  `c_argon2.rs` prints its first line and then panics with "index out of bounds: the len is 16 but the
+  index is 116788750712856" inside the guest, and the value is a frozen address of one of the session's
+  layers. The split path is sound (`MIRVM_NO_DEPS_IMAGE=1` and `MIRVM_NO_UNIT_LOAD=1` both run the same
+  program correctly), the manifest round trip is self-consistent (a loaded layer re-projects, body by
+  body, to exactly the records that were written), and the layer's own ids, bindings, TLS templates and
+  frozen relocations are all checked; what remains unaccounted for is a value that reaches a guest index.
+  Repro: `rm cache/units/* cache/deps/*`, run `programs/c_argon2.rs` (clean, publishes 7 units), run it
+  again (panics). `c_p256.rs` fails the same way; `unit-share` and `deps-image` still pass, so the
+  simple case round-trips. The layout is now pinned in the manifest header (`below`: each layer's
+  function/TLS/asm counts, plus `home == load index`), which rules out a reordered or resized prefix and
+  is what makes the remaining defect a single, reproducible one.
+
 ## D. Distribution and product
 
 - **D2** `UNSCHEDULED`: release form and naming — miri-style first, JDK-style self-contained tarball
