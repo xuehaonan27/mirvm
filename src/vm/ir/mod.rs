@@ -75,11 +75,14 @@ pub struct LoadMap {
 }
 
 impl LoadMap {
+    /// A frozen arena's whole mapped region, not only its used prefix: an artifact may hold a pointer
+    /// one past the end of the last allocation (a slice's end pointer), and that address is in the
+    /// arena even though no byte was written there.
     pub fn add_frozen(&mut self, arena: &super::frozen::FrozenArena) {
         self.ranges.push(LoadRange {
             link_start: arena.link_base(),
             runtime_start: arena.runtime_base(),
-            len: arena.used(),
+            len: arena.mapped_len(),
         });
     }
 

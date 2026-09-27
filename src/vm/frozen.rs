@@ -235,6 +235,13 @@ impl FrozenArena {
         })
     }
 
+    /// How much of the region is mapped: the whole fixed slot, not just the used prefix. A pointer
+    /// one past the end of the last allocation is legal in Rust (a slice's end pointer), and the
+    /// address it holds is still inside this arena.
+    pub fn mapped_len(&self) -> u64 {
+        FROZEN_CAP as u64
+    }
+
     /// Snapshot = the used prefix (clean-state responsibility lies with the caller: snapshot before the guest runs).
     pub fn snapshot(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.base, self.used) }
