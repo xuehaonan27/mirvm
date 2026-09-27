@@ -38,8 +38,10 @@ contracts are its siblings in `docs/designs/`.
 - **Images and caches** — a byte-deterministic std base image plus a deps manifest make warm runs load
   instead of re-lower. The manifest stores each dependency function as a fragment in the shared
   content-addressed `cache/frags` store plus the binding table that gives that fragment's ordinals
-  meaning, so identical bodies are stored once machine-wide. An image stack of `[std base, deps…]`
-  carries multi-source lookup, cumulative
+  meaning, so identical bodies are stored once machine-wide. On the cargoless track the closure is
+  split by crate: `cache/units` holds one content-named manifest per unit (keyed by build id, base key
+  and rlib stamp), a stack `[std base, unit…]` serves two programs that share a dependency, and a layer
+  the stack provides is never rewritten. An image stack carries multi-source lookup, cumulative
   offsets and a key chain, and an L2 post-mono engine-IR cache serializes a whole frozen region at
   fixed logical addresses. `MIRVM_TIMING` prints a phase ledger.
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the

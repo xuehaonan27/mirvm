@@ -196,7 +196,14 @@ newest valid manifest, validate exact-equality header material and generation, m
 lowering. The stack becomes `[base, unit_1 … unit_n]` with k by load order; union lookups,
 cumulative offsets, fingerprint prefix-truncation and the key chain are the existing `ImageStack`
 mechanics. During the session the multi-way split lowers only missing homes and publishes them;
-absorb at the end is unchanged. The L2 chain grows from `base ⊕ aggregate` to `base ⊕ (unit_key,
+absorb at the end is unchanged.
+
+A layer the stack provides is **immutable**: the session lowers the homes whose manifest missed and
+never writes into a loaded one, so a home whose layer loaded cannot grow. An instance such a layer
+does not already name — rustc instantiates some dependency generics in the instantiating crate, so
+its mangled name carries this program — is therefore residue in the delta rather than an addition to
+a shared manifest. Without that rule a session that loaded a lower unit would republish it from one
+program's view, and the next run would refuse the manifest it had just written. The L2 chain grows from `base ⊕ aggregate` to `base ⊕ (unit_key,
 manifest_digest)*`, same mechanism.
 
 Decode of one function costs postcard + one binding walk (the `rebase.rs` shape: a few table lookups
@@ -248,6 +255,11 @@ parent document are the regression fence.
   the store grew by no pack at all; two adjacent versions of the fixture crate keep ≥ 99% of their
   fragments (the `frag-share` gate); `cache status` reports the family's fragments, unique bytes and
   repeated bytes, which is the dedup factor until manifests make live/dead accounting possible.
+- **Unit sharing gate**: two programs with overlapping closures — one on `memchr`, one on `memchr` and
+  `itoa` — must produce one manifest for the shared unit. `unit-share` has the first program publish
+  it, requires the second to load what the first wrote and to publish only its own unit, requires a
+  warm rerun to write no manifest at all, and diffs the loaded-stack run's guest output against the
+  same program with the stack bypassed.
 - **Collection safety**: purge under a concurrent publisher never leaves a manifest referencing a
   swept fragment (lock discipline §3.4); a manifest referencing a missing fragment is a miss that
   self-heals, never a runtime error.
@@ -267,12 +279,11 @@ deleted and replaced, not phased out.
    tracks use the same format and key material as before, so behaviour is unchanged.
 3. **Per-crate units as manifests** on the cargoless track: the reserved build path wired as a
    multi-way split with the home rule, symbolic cross-unit edges, `cache/units/`, k by load order.
-   The split is already per home and the home rule is already the placement rule, so what this step
-   still needs is the canonical tables of §3.3 — a unit manifest whose tables keep absolute ids or
-   link addresses is refused by the loader above any stack but its own — plus content-named manifests
-   (a grown unit adds a digest instead of overwriting the one a running program pinned) and the
-   `--units` purge flag. Gated by the §5 equivalence gate and a sharing gate: two programs with
-   overlapping closures must load each other's units rather than lower them again.
+   Implemented: the split is per home and the home rule is its placement rule; the id-bearing tables
+   are canonical (§3.3), so a unit is readable above any stack that satisfies its symbols; manifests
+   are content-named (`<unit_key>-<digest>.unit`, the newest three kept per unit) so a grown unit adds
+   a digest instead of overwriting the one a running program pinned; `cache purge --units` covers the
+   family. Gated by the §5 equivalence gate, the `deps-image` gate and the `unit-share` gate.
 4. **Collection**: mark-sweep from current-generation manifests, the `--units` flag, the shared/
    exclusive lock discipline of §3.4, and the live/dead accounting `cache status` will report.
 5. Extensions, each behind its own measurement: frozen-region chunk dedup; the L2 entry as a
@@ -280,21 +291,17 @@ deleted and replaced, not phased out.
 
 ## 7. Open items
 
-- Residue is two cases. An instance that mentions the local crate, or that spans units no closure
-  covers, stays in the delta (v1). The third case is measured: instances that name no unit at all —
-  std residue the base lacks, which every closure covers — are 227 of the 288 image bodies in the
-  `serde_json` fixture (196 fragments) and 400 of 400 in a one-dependency closure. They currently land
-  in the first unit whose closure covers them, which costs unit-manifest size rather than sharing
-  (the fragments are shared either way). A base-owned home for them — the adaptive-base direction of
-  open-issues D9 — would take them out of every unit manifest, and the same split machinery hosts
-  either choice, so the decision is left to this ledger.
-- The unit store's first prototype (a stash, not landed) reached cross-program sharing with the
-  canonical tables: two programs whose closures overlap load each other's unit, and the fit is
-  verified. What it did not reach is a settled unit written by a session that had *loaded* a lower
-  unit: that manifest is refused on the next run, so the unit is lowered again and republished with a
-  new digest. The suspected remaining half is the one §3.3 still lists — cross-layer *addresses* in the
-  tables (a frozen relocation whose target lives below, a layer's own slot assumptions) — and it is to
-  be diagnosed before the store lands, not guessed at.
+- Residue stays in the delta (v1) in three cases: an instance that mentions the local crate, one that
+  spans units no closure covers, and one whose mangled name carries this program as its instantiating
+  crate (§3.5). The last is measured at 2 of memchr's 218 bodies; it is the price of the loaded layer
+  being immutable, and it grows only with how much rustc chooses to instantiate locally.
+- The fourth case is measured and still open: instances that name no unit at all — std residue the base
+  lacks, which every closure covers — are 227 of the 288 image bodies in the `serde_json` fixture (196
+  fragments) and 400 of 400 in a one-dependency closure. They land in the first unit whose closure
+  covers them, which costs unit-manifest size rather than sharing (the fragments are shared either
+  way). A base-owned home for them — the adaptive-base direction of open-issues D9 — would take them
+  out of every unit manifest, and the same split machinery hosts either choice, so the decision is left
+  to this ledger.
 - Binding-walk cost on the warm path is unmeasured; if it erodes the L2 gate, the counter-move is
   caching bound bodies in the L2 entry (space traded back for time, per program).
 - open-issues G5 asks whether cross-project sharing is needed at all and whether tainted images
