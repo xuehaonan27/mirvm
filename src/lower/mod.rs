@@ -175,7 +175,9 @@ pub(crate) fn id_ordinal(id: u32) -> u32 {
 /// One home's lowering state: everything the two-way split kept for its single image, per home. The
 /// delta is not a home — it reuses the main `Linker` fields (queue/funcs/frozen/alloc_addrs/...).
 pub(crate) struct HomeLayer<'tcx> {
-    /// Frozen area (spline domain k = this home's index).
+    /// The spline slot this home's frozen and code arenas occupy.
+    slot: usize,
+    /// Frozen area.
     frozen: FrozenArena,
     /// Pending-lowering queue (tagged ids).
     queue: VecDeque<(ir::FuncId, Instance<'tcx>)>,
@@ -211,10 +213,11 @@ pub(crate) struct HomeLayer<'tcx> {
 }
 
 impl<'tcx> HomeLayer<'tcx> {
-    /// A home whose frozen and code arenas occupy spline slot `index`.
-    fn new(index: usize) -> Self {
+    /// A home whose frozen and code arenas occupy spline slot `slot`.
+    fn new(slot: usize) -> Self {
         HomeLayer {
-            frozen: FrozenArena::new_image(index),
+            slot,
+            frozen: FrozenArena::new_image(slot),
             queue: VecDeque::new(),
             funcs: Vec::new(),
             fn_next: 0,
@@ -227,7 +230,7 @@ impl<'tcx> HomeLayer<'tcx> {
             got_idx: FxHashMap::default(),
             got_fixups: Vec::new(),
             frozen_relocs: Vec::new(),
-            code_arena: crate::vm::codearena::StubArena::new_image(index),
+            code_arena: crate::vm::codearena::StubArena::new_image(slot),
             stub_sites: Vec::new(),
         }
     }
@@ -235,6 +238,11 @@ impl<'tcx> HomeLayer<'tcx> {
 
 /// Split-lowering state: one layer per home that has instances, plus which home the body being
 /// lowered belongs to (`None` = the delta, whose state is the `Linker`'s own).
+///
+/// A home's *index* is its unit's (the id tag and the manifest key), but the *spline slot* its arenas
+/// occupy is chosen from the slots the loaded layers left free: a manifest records the slot its baked
+/// link addresses point at, so a loaded layer keeps its recorded slot and a fresh home takes the
+/// first free one.
 pub(crate) struct Split<'tcx> {
     /// Indexed by home index; `None` for a home this session has not populated.
     homes: Vec<Option<HomeLayer<'tcx>>>,
@@ -242,15 +250,27 @@ pub(crate) struct Split<'tcx> {
     current: Option<usize>,
     /// How many layers this session's homes produced (the delta is separate).
     populated: usize,
+    /// Spline slots the stack's loaded layers already occupy.
+    taken: Vec<usize>,
+    /// Homes whose layer the stack already provides. A loaded layer is immutable: whatever it does
+    /// not provide by symbol is residue, never an addition to that home.
+    loaded: Vec<usize>,
 }
 
 impl<'tcx> Split<'tcx> {
-    fn activate() -> Self {
+    fn activate(taken: Vec<usize>, loaded: Vec<usize>) -> Self {
         Split {
             homes: Vec::new(),
             current: None,
             populated: 0,
+            taken,
+            loaded,
         }
+    }
+
+    /// Whether the stack already provides this home's layer.
+    fn is_loaded(&self, home: usize) -> bool {
+        self.loaded.contains(&home)
     }
 
     /// The home currently being lowered. Every caller is reached only from a home body.
@@ -281,17 +301,26 @@ impl<'tcx> Split<'tcx> {
         })
     }
 
-    /// The home's layer, created on first use (its arenas take spline slot `index`).
+    /// The home's layer, created on first use with the first spline slot no loaded layer and no
+    /// existing home occupies.
     pub(crate) fn home_mut(&mut self, index: usize) -> &mut HomeLayer<'tcx> {
         if self.homes.len() <= index {
             self.homes.resize_with(index + 1, || None);
         }
-        let slot = &mut self.homes[index];
-        if slot.is_none() {
-            *slot = Some(HomeLayer::new(index));
+        if self.homes[index].is_none() {
+            let slot = self.free_slot();
+            self.homes[index] = Some(HomeLayer::new(slot));
             self.populated += 1;
         }
-        slot.as_mut().expect("just created")
+        self.homes[index].as_mut().expect("just created")
+    }
+
+    fn free_slot(&self) -> usize {
+        let mut used = self.taken.clone();
+        used.extend(self.homes.iter().flatten().map(|home| home.slot));
+        (0..crate::os_arch::addrspace::IMAGE_SPLINE_COUNT)
+            .find(|slot| !used.contains(slot))
+            .expect("the image spline has a free slot")
     }
 
     /// The indices of the homes this session has populated, lowest first.
@@ -342,6 +371,8 @@ impl SplitImage {
             key: "a2-inmem".into(),
             module: self.module,
             instance: self.instance,
+            // The layer this session just lowered; the driver records which unit it was for.
+            unit: None,
         }
     }
 }
@@ -388,13 +419,12 @@ pub fn lower_program(
 ) -> (
     ir::Module,
     crate::vm::instance::Instance,
-    Option<SplitImage>,
+    Vec<(usize, SplitImage)>,
 ) {
-    // The split decision (enabled, bypassed, already loaded this session, base present) is made by
-    // the caller in cli.
-    let (module, instance, _, split_image) =
+    // The split decision (enabled, bypassed, base present) is made by the caller in cli.
+    let (module, instance, _, split_images) =
         lower_inner(tcx, stack, FrozenArena::new(), false, false, split);
-    (module, instance, split_image)
+    (module, instance, split_images)
 }
 
 /// Base-image build lowering (synthetic empty main): empty stack, frozen area in the base domain,
@@ -523,7 +553,7 @@ fn lower_inner(
     ir::Module,
     crate::vm::instance::Instance,
     Option<BaseExports>,
-    Option<SplitImage>,
+    Vec<(usize, SplitImage)>,
 ) {
     let typing_env = TypingEnv::fully_monomorphized();
     // The stub code area shares its domain with the frozen area. `frozen.home()` records which
@@ -538,7 +568,25 @@ fn lower_inner(
         crate::vm::codearena::StubArena::new_at(code_home),
     );
     if split {
-        linker.activate_split();
+        // The spline slots the stack's loaded layers already occupy: a home this session creates must
+        // take a free one, because a manifest's recorded slot is the address its baked link addresses
+        // point at.
+        let taken = stack
+            .layers()
+            .iter()
+            .filter_map(|layer| {
+                crate::os_arch::addrspace::image_slot(layer.module.frozen.as_ref()?.home())
+            })
+            .collect();
+        // The homes the stack already provides: lowering must not create a second layer for one and
+        // rewrite a unit's manifest from this program's view of it.
+        let loaded = stack
+            .layers()
+            .iter()
+            .filter_map(|layer| layer.unit)
+            .map(|unit| unit as usize)
+            .collect();
+        linker.activate_split(taken, loaded);
     }
 
     // Static archives and global_asm/naked `.so` files are materialized and loaded RTLD_NOW|
@@ -808,40 +856,51 @@ fn lower_inner(
         p.dump();
     }
 
-    // ===== Split mode: rebase ids and assemble the home module =====
-    let mut split_image = None;
+    // ===== Split mode: rebase ids and assemble one module per home =====
+    let mut split_images: Vec<(usize, SplitImage)> = Vec::new();
     if let Some(mut s) = linker.split.take() {
         let mut populated = s.take_populated();
-        assert!(
-            populated.len() <= 1 && populated.first().is_none_or(|(home, _)| *home == 0),
-            "the placement rule still yields one closure home; publishing per unit is the step that lifts this"
-        );
-        if let Some((_home, mut layer)) = populated.pop() {
-            let home_fns = layer.funcs.len() as u32;
-            let home_tls = layer.tls_slots.len() as u32;
-            let home_asm = layer.asm_sites.len() as u32;
-            let rb = Rebase {
-                first_fn: vec![first],
-                first_tls: vec![linker.delta_first_tls],
-                first_asm: vec![linker.delta_first_asm],
-                total_fns: home_fns,
-                total_tls: home_tls,
-                total_asm: home_asm,
-            };
-            // Self-check: every instance the placement put in a home must still pass the purity
-            // review. A misclassification here is a value-level error, not a shape error.
+        // Absolute id bases in home (load) order: a home starts after everything below it, and the
+        // delta starts after all of them.
+        let max_home = populated.last().map_or(0, |(home, _)| *home);
+        let mut first_fn = vec![first; max_home + 1];
+        let mut first_tls = vec![linker.delta_first_tls; max_home + 1];
+        let mut first_asm = vec![linker.delta_first_asm; max_home + 1];
+        let (mut next_fn, mut next_tls, mut next_asm) =
+            (first, linker.delta_first_tls, linker.delta_first_asm);
+        for (home, layer) in &populated {
+            first_fn[*home] = next_fn;
+            first_tls[*home] = next_tls;
+            first_asm[*home] = next_asm;
+            next_fn += layer.funcs.len() as u32;
+            next_tls += layer.tls_slots.len() as u32;
+            next_asm += layer.asm_sites.len() as u32;
+        }
+        let rb = Rebase {
+            total_fns: next_fn - first,
+            total_tls: next_tls - linker.delta_first_tls,
+            total_asm: next_asm - linker.delta_first_asm,
+            first_fn,
+            first_tls,
+            first_asm,
+        };
+        // Self-check: every instance the placement put in a home must still pass the purity review. A
+        // misclassification here is a value-level error, not a shape error.
+        for (_, layer) in &populated {
             for inst in &layer.insts {
                 assert!(
                     classify_purity(*inst).is_image(),
                     "split self-check failed: home instance review is not pure (classifier state error)"
                 );
             }
-            // The home rule's ledger: the unit each instance would belong to under the unit table's
-            // rule, and how much of the layer that home accounts for. A track without a build graph
-            // (Cargo) has no unit table and records nothing.
-            if let Some(stats) = frag_stats.as_mut()
-                && let Some(table) = crate::image::units::current()
-            {
+        }
+        // The home rule's ledger: which unit each instance belongs to (the placement rule itself when
+        // a table exists, the unit rule's answer otherwise), and how much of the layer each home
+        // accounts for.
+        if let Some(stats) = frag_stats.as_mut()
+            && let Some(table) = crate::image::units::current()
+        {
+            for (_, layer) in &populated {
                 for inst in &layer.insts {
                     let Some(&id) = linker.ids.get(inst) else {
                         continue;
@@ -852,53 +911,73 @@ fn lower_inner(
                     }
                 }
             }
-            // Function bodies, the export/fn_addrs tables and the entry plan all carry ids and are
-            // remapped by the same rule.
+        }
+        // Function bodies, the export/fn_addrs tables and the entry plan all carry ids and are
+        // remapped by the same rule, which knows every home's base.
+        for (_, layer) in populated.iter_mut() {
             for b in layer.funcs.iter_mut().flatten() {
                 rb.body(b);
-            }
-            for b in funcs.iter_mut().flatten() {
-                rb.body(b);
-            }
-            for v in module.exports.values_mut() {
-                *v = rb.fn_id(*v);
-            }
-            for v in linker.fn_addrs.values_mut() {
-                *v = rb.fn_id(*v);
-            }
-            // Entry-stub recipes carry FuncIds and follow the same rule.
-            for site in linker.entry_stub_sites.iter_mut() {
-                site.func = rb.fn_id(site.func);
             }
             for site in layer.stub_sites.iter_mut() {
                 site.func = rb.fn_id(site.func);
             }
-            // The custom-allocator shims are FuncIds too. Missing this remap routes the runtime to a
-            // stale, shifted FuncId, so `call_guest` lands in the wrong body.
-            if let Some(shims) = custom_alloc_shims.as_mut() {
-                shims.alloc = rb.fn_id(shims.alloc);
-                shims.dealloc = rb.fn_id(shims.dealloc);
-                shims.realloc = rb.fn_id(shims.realloc);
-                shims.alloc_zeroed = rb.fn_id(shims.alloc_zeroed);
-            }
-            rb.guest_panic_cleanup(&mut guest_panic_cleanup);
-            for v in linker.ids.values_mut() {
-                *v = rb.fn_id(*v);
-            }
-            for v in linker.tls_ids.values_mut() {
-                *v = rb.tls_id(*v);
-            }
-            let mut entry = entry;
-            if let Some(e) = entry.as_mut() {
-                e.lang_start = rb.fn_id(e.lang_start);
-            }
-            let entry = entry;
-            module.entry = entry;
+        }
+        for b in funcs.iter_mut().flatten() {
+            rb.body(b);
+        }
+        for v in module.exports.values_mut() {
+            *v = rb.fn_id(*v);
+        }
+        for v in linker.fn_addrs.values_mut() {
+            *v = rb.fn_id(*v);
+        }
+        for site in linker.entry_stub_sites.iter_mut() {
+            site.func = rb.fn_id(site.func);
+        }
+        // The custom-allocator shims are FuncIds too. Missing this remap routes the runtime to a
+        // stale, shifted FuncId, so `call_guest` lands in the wrong body.
+        if let Some(shims) = custom_alloc_shims.as_mut() {
+            shims.alloc = rb.fn_id(shims.alloc);
+            shims.dealloc = rb.fn_id(shims.dealloc);
+            shims.realloc = rb.fn_id(shims.realloc);
+            shims.alloc_zeroed = rb.fn_id(shims.alloc_zeroed);
+        }
+        rb.guest_panic_cleanup(&mut guest_panic_cleanup);
+        for v in linker.ids.values_mut() {
+            *v = rb.fn_id(*v);
+        }
+        for v in linker.tls_ids.values_mut() {
+            *v = rb.tls_id(*v);
+        }
+        let mut entry = entry;
+        if let Some(e) = entry.as_mut() {
+            e.lang_start = rb.fn_id(e.lang_start);
+        }
+        let entry = entry;
+        module.entry = entry;
+        // fn_addrs is split by address domain, not value domain: whatever physically lives in a home's
+        // frozen area (`fn_entries` covers its instances plus every supplementary entry) travels with
+        // that home. A supplementary entry has a base-domain FuncId but lives in the home's area;
+        // leaving it on the builder's delta side means the consumer never registers that baked address
+        // in its runtime reverse-lookup table (absorb only merges the layers' fn_addrs, and the
+        // consumer's own fn_entry_addr reuse branch does not register either), so indirect calls
+        // through it fail with "not a known fn entry".
+        let home_entry_addrs: std::collections::HashSet<u64> = populated
+            .iter()
+            .flat_map(|(_, layer)| layer.fn_entries.values().copied())
+            .collect();
+        module.fn_entry_links = linker
+            .fn_addrs
+            .iter()
+            .filter(|(a, _)| !home_entry_addrs.contains(a))
+            .map(|(&a, &id)| (ir::LinkAddr(a), id))
+            .collect();
 
-            // Exports are split by value domain: ids below `first` belong to the base and stay on the
-            // delta side.
-            let home_lo = first;
-            let home_hi = first + home_fns;
+        for (home, layer) in populated {
+            let home_fns = layer.funcs.len() as u32;
+            let home_tls = layer.tls_slots.len() as u32;
+            let home_lo = rb.first_fn[home];
+            let home_hi = home_lo + home_fns;
             let in_home = |id: &ir::FuncId| *id >= home_lo && *id < home_hi;
             let home_exports: std::collections::HashMap<Box<str>, ir::FuncId> = module
                 .exports
@@ -906,27 +985,13 @@ fn lower_inner(
                 .filter(|(_, id)| in_home(id))
                 .map(|(s, id)| (s.clone(), *id))
                 .collect();
-            module.exports.retain(|_, id| !in_home(id));
-            // fn_addrs is split by address domain, not value domain: whatever physically lives in the
-            // home's frozen area (`fn_entries` covers its instances plus every supplementary entry)
-            // travels with the home. A supplementary entry has a base-domain FuncId but lives in the
-            // home's area; leaving it on the builder's delta side means the consumer never registers
-            // that baked address in its runtime reverse-lookup table (absorb only merges the layer's
-            // fn_addrs, and the consumer's own fn_entry_addr reuse branch does not register either), so
-            // indirect calls through it fail with "not a known fn entry".
-            let home_entry_addrs: std::collections::HashSet<u64> =
+            let layer_entry_addrs: std::collections::HashSet<u64> =
                 layer.fn_entries.values().copied().collect();
             let home_fn_addrs: std::collections::HashMap<u64, ir::FuncId> = linker
                 .fn_addrs
                 .iter()
-                .filter(|(a, _)| home_entry_addrs.contains(a))
+                .filter(|(a, _)| layer_entry_addrs.contains(a))
                 .map(|(a, id)| (*a, *id))
-                .collect();
-            module.fn_entry_links = linker
-                .fn_addrs
-                .iter()
-                .filter(|(a, _)| !home_entry_addrs.contains(a))
-                .map(|(&a, &id)| (ir::LinkAddr(a), id))
                 .collect();
             let home_module = ir::Module {
                 exports: home_exports,
@@ -942,13 +1007,9 @@ fn lower_inner(
                 tls: layer.tls_slots,
                 asm_sites: layer.asm_sites,
                 frozen: layer.frozen.to_snapshot().ok(),
-                // GOT tables travel with the home module; load/absorb merges them into the delta
-                // module by name and renumbers the symbol indices.
                 foreign_syms: layer.got_syms,
                 got_fixups: layer.got_fixups,
                 frozen_relocs: layer.frozen_relocs,
-                // Entry-stub recipes travel with the file; code-area handles are rebuilt per domain at
-                // runtime.
                 entry_stub_sites: layer.stub_sites,
                 ..Default::default()
             };
@@ -965,10 +1026,7 @@ fn lower_inner(
             home_instance.rebuild_load_map();
             home_instance.rebuild_fn_addrs();
             // Home export material, shaped like `BaseExports` and free of any `tcx` dependency on the
-            // loader side. The fn-entry, static and TLS indexes contain home items only. Fn entries use
-            // the home-area entry table as their authority, which includes entries that are
-            // supplementary-built in the home area, so the loader keeps one symbol identity per
-            // function and materializes exactly one copy.
+            // loader side. The fn-entry, static and TLS indexes contain home items only.
             let fn_entry_syms = layer
                 .fn_entries
                 .iter()
@@ -983,7 +1041,7 @@ fn lower_inner(
                     (Box::from(sym), addr)
                 })
                 .collect();
-            let tls_first = rb.first_tls[0];
+            let tls_first = rb.first_tls[home];
             let tls_syms = linker
                 .tls_ids
                 .iter()
@@ -993,13 +1051,16 @@ fn lower_inner(
                     (Box::from(sym), id)
                 })
                 .collect();
-            split_image = Some(SplitImage {
-                module: home_module,
-                instance: home_instance,
-                fn_entry_syms,
-                static_syms,
-                tls_syms,
-            });
+            split_images.push((
+                home,
+                SplitImage {
+                    module: home_module,
+                    instance: home_instance,
+                    fn_entry_syms,
+                    static_syms,
+                    tls_syms,
+                },
+            ));
             // The delta-side tls_slots/asm_sites already hold delta slots only: home slots live in the
             // home's layer and have been moved out with SplitImage.
         }
@@ -1089,7 +1150,7 @@ fn lower_inner(
         .frozen
         .as_ref()
         .and_then(|arena| arena.to_snapshot().ok());
-    if split_image.is_none() {
+    if split_images.is_empty() {
         module.fn_entry_links = linker
             .fn_addrs
             .into_iter()
@@ -1097,12 +1158,12 @@ fn lower_inner(
             .collect();
     }
     module.tls = linker.tls_slots;
-    // Delta side of the GOT; the image side already left with `split_image`.
+    // Delta side of the GOT; each home's side already left with its layer.
     module.foreign_syms = linker.got_syms;
     module.got_fixups = linker.got_fixups;
     module.frozen_relocs = linker.frozen_relocs;
-    // This domain's entry-stub recipes and code-area handle; the image side already left with
-    // `split_image`.
+    // This domain's entry-stub recipes and code-area handle; each home's side already left with its
+    // layer.
     module.entry_stub_sites = linker.entry_stub_sites;
     instance.entry_stubs = linker.code_arena;
     // The custom-allocator shim is program-level and always lives on the delta side (the shim is
@@ -1110,7 +1171,7 @@ fn lower_inner(
     // dependency image routes through it at runtime.
     module.custom_alloc_shims = custom_alloc_shims;
     module.guest_panic_cleanup = Some(guest_panic_cleanup);
-    if split_image.is_none() {
+    if split_images.is_empty() {
         module.entry = entry;
     }
     instance.link_fn_addrs = module.fn_entry_links.iter().copied().collect();
@@ -1120,9 +1181,16 @@ fn lower_inner(
         let frozen_bytes = |arena: &Option<crate::vm::frozen::FrozenArena>| {
             arena.as_ref().map_or(0, |arena| arena.used())
         };
-        if let Some(image) = &split_image {
+        for (home, image) in &split_images {
+            // A home's layer is named by its unit when the track has a table, and is the closure's one
+            // image otherwise.
+            let label =
+                match crate::image::units::current().and_then(|table| table.get(*home as u32)) {
+                    Some(unit) => unit.name.to_string(),
+                    None => "image".to_string(),
+                };
             stats.layer(
-                "image",
+                &label,
                 &image.module.funcs,
                 frozen_bytes(&image.instance.frozen),
             );
@@ -1130,7 +1198,7 @@ fn lower_inner(
         stats.layer("delta", &module.funcs, frozen_bytes(&instance.frozen));
         stats.dump(stack.key());
     }
-    (module, instance, base_exports, split_image)
+    (module, instance, base_exports, split_images)
 }
 
 /// dylib dlopen candidate list, deduplicated in order: the development symlink `lib{name}.so`

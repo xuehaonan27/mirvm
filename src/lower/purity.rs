@@ -200,7 +200,7 @@ fn shim_def(inst: Instance<'_>) -> Option<rustc_middle::ty::Ty<'_>> {
 /// constrains nothing and its instances are homed to the smallest closure that covers the arguments
 /// (the base has no unit of its own yet); the local crate is above every unit, so mentioning it is
 /// residue.
-pub(super) fn home_of(
+pub(crate) fn home_of(
     inst: Instance<'_>,
     tcx: TyCtxt<'_>,
     table: &crate::image::units::UnitTable,
@@ -249,7 +249,7 @@ pub(super) fn home_of(
 
 /// The unit a crate was compiled to, matched by the artifact path the session resolved it from. Two
 /// semver-forked versions of one crate are two units with two paths, so the path is the identity.
-fn unit_of_crate(
+pub(crate) fn unit_of_crate(
     tcx: TyCtxt<'_>,
     krate: rustc_span::def_id::CrateNum,
     table: &crate::image::units::UnitTable,

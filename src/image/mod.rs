@@ -65,12 +65,6 @@ crate::diag_codes! {
     }
 }
 
-/// The code domain a dependency image's entry stubs are allocated in. One image occupies spline slot
-/// k=0 today; the unit design assigns k by load order.
-pub(crate) fn image_code_home() -> u64 {
-    crate::os_arch::addrspace::image_code_addr(0) as u64
-}
-
 /// A loaded layer, ready for a program session to use.
 pub struct BaseImage {
     pub module: Module,
@@ -83,6 +77,10 @@ pub struct BaseImage {
     pub lowering_fp: (bool, bool, bool),
     /// Layered cache key (referenced by the L2 entry; includes the lowering fingerprint)
     pub key: String,
+    /// The unit whose layer this is, when it was loaded as one. A loaded layer is immutable, so this
+    /// is how lowering knows which homes the stack already provides. `None` for the base image and
+    /// for a closure image.
+    pub unit: Option<u32>,
 }
 
 impl BaseImage {
@@ -189,6 +187,26 @@ impl ImageStack {
     /// The layers of this stack, bottom first: what a symbolic binding may name.
     pub fn layers(&self) -> &[BaseImage] {
         &self.images
+    }
+
+    /// The function and TLS ids each layer of this stack occupies, bottom first. Concatenation makes
+    /// the ranges contiguous and cumulative, so the id space a layer's own functions start at is the
+    /// end of the previous range.
+    pub(crate) fn layer_ranges(&self) -> Vec<manifest::LayerRanges> {
+        let mut funcs = 0;
+        let mut tls = 0;
+        self.images
+            .iter()
+            .map(|image| {
+                let range = (
+                    (funcs, image.module.funcs.len() as u32),
+                    (tls, image.module.tls.len() as u32),
+                );
+                funcs += image.module.funcs.len() as u32;
+                tls += image.module.tls.len() as u32;
+                range
+            })
+            .collect()
     }
 
     /// The stack context for a module that is about to join above these layers: the numbering they

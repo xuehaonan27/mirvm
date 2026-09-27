@@ -47,6 +47,15 @@ pub(crate) fn image_code_addr(k: usize) -> usize {
     IMAGE_CODE_SPLINE + k * IMAGE_CODE_STEP
 }
 
+/// The dependency-image spline slot a frozen-region base occupies. The base and delta regions sit
+/// below the spline and are no layer's slot, so they are `None` rather than slot 0.
+pub(crate) fn image_slot(addr: usize) -> Option<usize> {
+    addr.checked_sub(IMAGE_SPLINE_BASE)
+        .filter(|offset| offset.is_multiple_of(IMAGE_SPLINE_STEP))
+        .map(|offset| offset / IMAGE_SPLINE_STEP)
+        .filter(|slot| *slot < IMAGE_SPLINE_COUNT)
+}
+
 /// Frozen-region base -> this module's code-region base (same-k invariant: delta↔delta,
 /// base↔base, image_spline(k)↔image_code(k)). Non-whitelisted frozen base => None
 /// (engine invariant violation).
@@ -54,13 +63,7 @@ pub(crate) fn code_home_for_frozen(home: usize) -> Option<usize> {
     match home {
         DELTA_FIXED_ADDR => Some(DELTA_CODE_ADDR),
         BASE_IMAGE_FIXED_ADDR => Some(BASE_CODE_ADDR),
-        h if h >= IMAGE_SPLINE_BASE
-            && (h - IMAGE_SPLINE_BASE).is_multiple_of(IMAGE_SPLINE_STEP)
-            && (h - IMAGE_SPLINE_BASE) / IMAGE_SPLINE_STEP < IMAGE_SPLINE_COUNT =>
-        {
-            Some(image_code_addr((h - IMAGE_SPLINE_BASE) / IMAGE_SPLINE_STEP))
-        }
-        _ => None,
+        h => image_slot(h).map(image_code_addr),
     }
 }
 

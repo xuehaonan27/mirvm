@@ -20,8 +20,13 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
+use crate::store::entry;
 use crate::utils::content::FileStamp;
+use crate::vm::instance::Instance;
+
+use super::manifest;
 
 /// One unit of the table, in topological order (dependencies before dependents).
 pub(crate) struct Unit {
@@ -78,6 +83,10 @@ impl UnitTable {
 
     pub(crate) fn get(&self, index: u32) -> Option<&Unit> {
         self.units.get(index as usize)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.units.len()
     }
 
     /// The unit a crate was compiled to, matched by the rlib path the session resolved it from.
@@ -143,6 +152,323 @@ pub(crate) fn install(table: UnitTable) {
 /// The table, when the running track has one (the cargoless path; the Cargo track has no build graph).
 pub(crate) fn current() -> Option<&'static UnitTable> {
     TABLE.get()
+}
+
+/// How many manifests per unit stay on disk. A running program pins the digest it loaded through the
+/// L2 key chain, so the newest few are what a reader can still need; older ones are pruned on publish
+/// (their readers simply rebuild).
+const KEEP_PER_UNIT: usize = 3;
+
+/// One unit manifest's file name: the unit's key and the digest of the manifest's own bytes.
+fn file_name(unit_key: &str, digest: &str) -> String {
+    format!("{unit_key}-{digest}.unit")
+}
+
+/// Every manifest file for one unit, newest first (mtime, then name for a stable tie break).
+fn manifests_of(dir: &Path, unit_key: &str) -> Vec<(PathBuf, String)> {
+    let prefix = format!("{unit_key}-");
+    let mut found: Vec<(PathBuf, String, SystemTime)> = Vec::new();
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "unit") {
+                continue;
+            }
+            let Some(digest) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix(&prefix))
+                .and_then(|rest| rest.strip_suffix(".unit"))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let mtime = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            found.push((path, digest, mtime));
+        }
+    }
+    found.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+    found
+        .into_iter()
+        .map(|(path, digest, _)| (path, digest))
+        .collect()
+}
+
+/// Load one unit's newest usable manifest, keyed by its rlib. `stack` is what is already below it
+/// (the base and every unit loaded before it in topological order), which is both what its symbols
+/// resolve against and what it is verified against.
+///
+/// Every failure — no manifest, a header that no longer matches, a fragment the store lost, a symbol
+/// the stack does not provide — is a miss that leaves the unit to this session's lowering.
+pub(crate) fn try_load(
+    index: u32,
+    base: &super::BaseImage,
+    stack: &super::ImageStack,
+    base_key: &str,
+) -> Option<super::BaseImage> {
+    let table = current()?;
+    let unit = table.get(index)?;
+    let unit_key = table.key_of(index, base_key)?;
+    let dir = crate::store::UNITS.dir();
+    for (path, digest) in manifests_of(&dir, &unit_key) {
+        if let Some(layer) = load_one(index, &path, &digest, &unit_key, unit, base, stack) {
+            return Some(layer);
+        }
+    }
+    None
+}
+
+fn load_one(
+    index: u32,
+    path: &Path,
+    digest: &str,
+    unit_key: &str,
+    unit: &Unit,
+    base: &super::BaseImage,
+    stack: &super::ImageStack,
+) -> Option<super::BaseImage> {
+    let reason = |why: &str| {
+        if crate::options::a2_debug() {
+            eprintln!("[a2-debug] unit {unit_key} manifest {digest} unusable: {why}");
+        }
+    };
+    let Some(data) = std::fs::read(path).ok() else {
+        reason("unreadable");
+        return None;
+    };
+    let Ok(mut f) = postcard::from_bytes::<manifest::File>(&data) else {
+        reason("undecodable");
+        return None;
+    };
+    let Ok(stamp) = FileStamp::of(&unit.rlib) else {
+        reason("the unit's rlib cannot be stamped");
+        return None;
+    };
+    if !entry::is_current_generation(&f.build_id) {
+        reason("another build wrote it");
+        return None;
+    }
+    if f.base_key != base.key {
+        reason("built above a different base");
+        return None;
+    }
+    if f.unit_key.as_deref() != Some(unit_key) {
+        reason("key mismatch");
+        return None;
+    }
+    if f.lowering_fp != base.lowering_fp {
+        reason("built with a different lowering fingerprint");
+        return None;
+    }
+    if f.extern_stamps != vec![stamp] {
+        reason("the unit's rlib is not the one it was built from");
+        return None;
+    }
+    // The frozen bytes must land where the manifest's baked link addresses point.
+    if !entry::frozen_at(
+        &f.module,
+        Some(crate::os_arch::addrspace::image_addr(f.home)),
+    ) {
+        reason("its frozen region is not in the slot it records");
+        return None;
+    }
+    let Some(frozen) = f
+        .module
+        .frozen
+        .as_ref()
+        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))
+    else {
+        reason("no frozen region");
+        return None;
+    };
+    let unit_view = super::deps::unit_of(&stack.layer_ranges(), stack.below().prefix, &f.module, f.home, frozen);
+    // Bindings and the id-bearing tables resolve against the layers below this unit, and the whole
+    // module is verified against the stack it is about to join.
+    let symbols = manifest::Symbols::of(stack.layers());
+    if let Err(error) = manifest::rehydrate_module(&mut f.module, &f.funcs, &unit_view, &symbols) {
+        reason(&error);
+        return None;
+    }
+    let tls_by_sym = match f.tables.restore(&mut f.module, &unit_view, &symbols) {
+        Ok((_, tls)) => tls,
+        Err(error) => {
+            reason(&error);
+            return None;
+        }
+    };
+    if crate::options::a2_debug() {
+        eprintln!(
+            "[a2-debug] unit {unit_key}: {} records, {} module funcs, {} names, home {}",
+            f.funcs.len(),
+            f.module.funcs.len(),
+            f.module.function_names.len(),
+            f.home
+        );
+    }
+    let mut instance = match Instance::materialize(&f.module) {
+        Ok(instance) => instance,
+        Err(error) => {
+            if crate::options::a2_debug() {
+                eprintln!("[a2-debug] unit {unit_key} rejected: {error}");
+            }
+            return None;
+        }
+    };
+    if let Err(error) = crate::vm::verify::module_below(&f.module, &instance, stack.below()) {
+        if crate::options::a2_debug() {
+            eprintln!("[a2-debug] unit {unit_key} rejected: {error}");
+        }
+        return None;
+    }
+    instance.asm_stub_addrs = crate::lower::asm::materialize(&f.module.asm_sites);
+    if !entry::native_libs_present(&f.module) {
+        return None;
+    }
+    let module = f.module;
+    Some(super::BaseImage {
+        fn_by_sym: module.exports.clone(),
+        entry_by_sym: f.fn_entry_syms.into_iter().collect(),
+        static_by_sym: f.static_syms.into_iter().collect(),
+        tls_by_sym,
+        lowering_fp: f.lowering_fp,
+        key: format!("{unit_key}-{digest}"),
+        module,
+        instance,
+        unit: Some(index),
+    })
+}
+
+/// Persist one home as its unit's manifest: the fragments it references, then the manifest itself,
+/// then prune the unit's older digests. A layer the store cannot hold stays in memory for this run
+/// and is simply not cached.
+pub(crate) fn store(
+    index: u32,
+    stack: &super::ImageStack,
+    fp: (bool, bool, bool),
+    image: crate::lower::SplitImage,
+) -> super::BaseImage {
+    let mut bi = image.into_base_image(fp);
+    let Some(table) = current() else {
+        return super::deps::degraded(bi);
+    };
+    let Some(base) = stack.base_image() else {
+        return super::deps::degraded(bi);
+    };
+    let Some(unit) = table.get(index) else {
+        return super::deps::degraded(bi);
+    };
+    let (Some(unit_key), Ok(stamp)) = (table.key_of(index, &base.key), FileStamp::of(&unit.rlib))
+    else {
+        return super::deps::degraded(bi);
+    };
+    let below = stack.below();
+    // The writer applies the loader's predicate against the same stack. The frozen area must sit at a
+    // fixed base — any slot will do, because the manifest records which one (its `home`) and the
+    // loader restores it there.
+    let publishable = entry::snapshot_is_publishable(&bi.module, &bi.instance, None);
+    let cacheable =
+        publishable && crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
+    if !cacheable {
+        if crate::options::a2_debug() {
+            eprintln!(
+                "[a2-debug] unit {unit_key} not stored: {}",
+                if publishable {
+                    "verification against the stack below failed"
+                } else {
+                    "snapshot is not in its spline slot"
+                }
+            );
+        }
+        return super::deps::degraded(bi);
+    }
+    let Some(snapshot) = bi.module.frozen.as_ref() else {
+        return super::deps::degraded(bi);
+    };
+    // The slot the arenas actually landed in: the manifest records it, and the loader restores there.
+    // A unit's arenas always occupy one, so a module whose frozen bytes are not in the spline was not
+    // publishable in the first place.
+    let Some(home) = crate::os_arch::addrspace::image_slot(snapshot.home()) else {
+        return super::deps::degraded(bi);
+    };
+    let frozen = (snapshot.home() as u64, snapshot.bytes().len() as u64);
+    let unit_view = super::deps::unit_of(&stack.layer_ranges(), below.prefix, &bi.module, home, frozen);
+    let symbols = manifest::Symbols::of(stack.layers());
+    let mut session = crate::store::frags::Session::default();
+    let records = match manifest::project_module(&mut bi.module, &unit_view, &symbols, &mut session)
+    {
+        Ok(records) => records,
+        Err(error) => {
+            if crate::options::a2_debug() {
+                eprintln!("[a2-debug] unit {unit_key} not stored: {error}");
+            }
+            return super::deps::degraded(bi);
+        }
+    };
+    let mut fn_entry_syms = bi
+        .entry_by_sym
+        .iter()
+        .map(|(s, a)| (s.clone(), *a))
+        .collect::<Vec<_>>();
+    fn_entry_syms.sort_unstable();
+    let mut static_syms = bi
+        .static_by_sym
+        .iter()
+        .map(|(s, a)| (s.clone(), *a))
+        .collect::<Vec<_>>();
+    static_syms.sort_unstable();
+    // The module's id-bearing tables leave it in canonical form before serializing, and come back
+    // right after so this session keeps running the layer it wrote.
+    let tables =
+        match manifest::Tables::capture(&mut bi.module, &unit_view, &symbols, &bi.tls_by_sym) {
+            Ok(tables) => tables,
+            Err(error) => {
+                if crate::options::a2_debug() {
+                    eprintln!("[a2-debug] unit {unit_key} not stored: {error}");
+                }
+                return super::deps::degraded(bi);
+            }
+        };
+    let file = manifest::FileRef {
+        build_id: crate::options::build::BUILD_ID,
+        base_key: &base.key,
+        unit_key: Some(&unit_key),
+        home,
+        lowering_fp: fp,
+        extern_stamps: std::slice::from_ref(&stamp),
+        module: &bi.module,
+        funcs: &records,
+        fn_entry_syms: &fn_entry_syms,
+        static_syms: &static_syms,
+        tables: &tables,
+    };
+    let Ok(bytes) = manifest::encode(&file) else {
+        return super::deps::degraded(bi);
+    };
+    // Fragments first: a manifest that names a fragment the store does not hold is a manifest the
+    // loader will refuse.
+    let published = session.publish();
+    if published.is_err() {
+        return super::deps::degraded(bi);
+    }
+    let dir = crate::store::UNITS.dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return super::deps::degraded(bi);
+    }
+    let digest = crate::utils::content::digest_hex(&crate::vm::ir::frag::id_of(&bytes));
+    if crate::store::publish_bytes(&dir.join(file_name(&unit_key, &digest)), &bytes).is_err() {
+        return super::deps::degraded(bi);
+    }
+    for (path, _) in manifests_of(&dir, &unit_key)
+        .into_iter()
+        .skip(KEEP_PER_UNIT)
+    {
+        let _ = std::fs::remove_file(path);
+    }
+    bi.key = format!("{unit_key}-{digest}");
+    bi
 }
 
 #[cfg(test)]

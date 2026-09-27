@@ -171,24 +171,70 @@ impl<'tcx> Linker<'tcx> {
     /// follows the defining crate rather than the referencing context; a reference from a higher home
     /// finds them through the lower homes' tables.
     pub(super) fn home_of_krate(&self, krate: rustc_span::def_id::CrateNum) -> Option<usize> {
-        (self.split.is_some() && krate != rustc_hir::def_id::LOCAL_CRATE).then_some(0)
+        if self.split.is_none() || krate == rustc_hir::def_id::LOCAL_CRATE {
+            return None;
+        }
+        match crate::image::units::current() {
+            Some(table) => {
+                // A crate no unit covers — a sysroot crate, or a path dependency the table does not
+                // know — is below every unit, so the first one hosts it. That is the rule `place`
+                // applies to a function naming no unit; putting it in the delta instead would leave a
+                // home body referencing a layer above itself.
+                let unit = crate::lower::purity::unit_of_crate(self.tcx, krate, table)
+                    .or_else(|| (table.len() > 0).then_some(0))?;
+                self.placeable(unit as usize).then_some(unit as usize)
+            }
+            // Without a build graph the closure is one home.
+            None => Some(0),
+        }
+    }
+
+    /// Whether this session can still add to a home: it must be addressable, and the stack must not
+    /// already provide its layer. A loaded layer is immutable, so an instance it does not provide by
+    /// symbol — one rustc instantiated in this program, which is why its mangled name names this
+    /// crate — is residue: the delta duplicates it instead of rewriting a shared unit's manifest from
+    /// one program's view of it.
+    fn placeable(&self, home: usize) -> bool {
+        home < MAX_HOMES
+            && !self
+                .split
+                .as_ref()
+                .is_some_and(|split| split.is_loaded(home))
     }
 
     /// Which home an instance is lowered in: the delta (`None`) or a home index.
     ///
-    /// The unit table's home rule (`image::units`, measured by `MIRVM_FRAG_STATS`) becomes this
-    /// placement rule when a session can load and publish per unit; until then the purity classifier
-    /// decides and every homed instance goes to home 0 — the single closure image the manifest
-    /// describes today.
+    /// With a unit table (the cargoless track) the home rule decides: the first unit whose closure
+    /// covers the instance's defining crate and every unit its arguments mention. Without one (the
+    /// Cargo track, which has no build graph) the closure is one home and the purity classifier
+    /// decides. An instance the rule cannot place is residue and stays in the delta.
     pub(super) fn place(&self, inst: Instance<'tcx>) -> Option<usize> {
-        classify_purity(inst).is_image().then_some(0)
+        match crate::image::units::current() {
+            Some(table) => match crate::lower::purity::home_of(inst, self.tcx, table) {
+                Some(home) => {
+                    let home = home.unit as usize;
+                    if !self.placeable(home) {
+                        if crate::options::a2_debug() && home < MAX_HOMES {
+                            eprintln!(
+                                "[a2-debug] residue in this program: {} belongs to loaded home {home}",
+                                self.tcx.symbol_name(inst).name
+                            );
+                        }
+                        return None;
+                    }
+                    Some(home)
+                }
+                None => None,
+            },
+            None => classify_purity(inst).is_image().then_some(0),
+        }
     }
 
     /// Activate split (home/delta) lowering: each home's frozen area lands in its spline domain. If that
     /// domain is occupied, fall back to a dynamic base; semantics are unchanged, but the write phase refuses
     /// serialization and self-heals.
-    pub(super) fn activate_split(&mut self) {
-        self.split = Some(Split::activate());
+    pub(super) fn activate_split(&mut self, taken_slots: Vec<usize>, loaded_homes: Vec<usize>) {
+        self.split = Some(Split::activate(taken_slots, loaded_homes));
     }
 
     /// Reserve an asm-stub slot, returning (AsmStubId, symbol name); the text follows via `set_asm_stub`.

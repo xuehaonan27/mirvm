@@ -101,6 +101,7 @@ fn load(path: &Path, want_stamp: &str) -> Option<crate::image::BaseImage> {
         key,
         module,
         instance,
+        unit: None,
     })
 }
 

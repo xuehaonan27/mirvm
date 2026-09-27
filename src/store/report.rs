@@ -24,6 +24,7 @@ pub struct Purge {
     pub base: bool,
     pub ir: bool,
     pub frags: bool,
+    pub units: bool,
     pub scripts: bool,
     /// The target directories (shared dependency storage and the native differential builds).
     pub target: bool,
@@ -43,6 +44,7 @@ impl Purge {
             Some(FamilyFlag::Deps) => self.deps,
             Some(FamilyFlag::Ir) => self.ir,
             Some(FamilyFlag::Frags) => self.frags,
+            Some(FamilyFlag::Units) => self.units,
             Some(FamilyFlag::Scripts) => self.scripts,
             Some(FamilyFlag::Target) => self.target,
             None => false,
