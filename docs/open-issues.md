@@ -133,6 +133,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   clear the materialized project under `build/scripts/<key>`, run `fixtures/cargoless/serde.rs` (it
   succeeds), run it again (it fails). The defect is the resolver round trip — its own fresh resolution
   produces a graph its lock reader rejects — not the fixture. Found while measuring the unit home rule.
+- **E40** `OPEN`: `fib32`'s 80ms ceiling is unreachable on the Linux verify host, and was already:
+  the round-7 full gate records 9144ms against the same ceiling, and today's run is 9275ms. The
+  `--vm-call fib(32)` path makes **one** compilation request for a workload of ~3.5M recursive calls,
+  so the JIT does not accelerate the calls the caller makes; whether that is the vm-call entry path
+  bypassing compiled dispatch or a tier decision is what the L3 tiers step has to answer. The ceiling
+  is the right number to keep — 80ms is what compiled recursion costs — so this closes with a
+  measurement of where the interpreted calls come from, not by raising it.
 
 ## D. Distribution and product
 
