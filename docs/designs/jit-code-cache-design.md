@@ -210,9 +210,19 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    hands that order to the worker, which links what the store holds for it *before* it serves a request —
    so the first call into a hot function finds a published entry instead of enqueueing a compile. The
    wave goes through the ordinary load path, so a stale or unreadable entry is a miss exactly as it is
-   there, and `fib32-jit-cache` requires the warm run to prelink and count it. Adaptive tiers are not
-   built: the optimization level is already a jit-key dimension, and the policy that would use it is the
-   D16 ledger's to decide, per §2.6.
+   there, and `fib32-jit-cache` requires the warm run to prelink and count it.
+   Tiers are built as the mechanism §2.6 asks for: one Engine runs one compiler per tier (each with its
+   own ISA, module and jit-key, both publishing into the same slots), the pre-link wave prefers a stored
+   optimized entry for a hot function and falls back to the baseline one, and the *request* a function
+   raises while it is interpreted asks for the tier the heat ledger gives it (`JitState::tier_for`).
+   `fib32-jit-cache` asserts the split: a cold run is all baseline, a warm one links from the store and
+   compiles the functions the heat order names at the optimized tier.
+   The policy has no within-run upgrade, and measuring says why: a request is raised once while a
+   function is interpreted, and publishing the baseline entry — pre-linked or compiled — means its later
+   calls go through the PLT slot, where no counter observes them. So the ledger's unit of evidence is one
+   run, and the second threshold this file first carried was unreachable rather than merely conservative.
+   A within-run signal needs the compiled-call path (the PLT slot load, or a cheap sampled counter) and
+   is open in §6.
 
 Step 1 needs canonical fragment ids only as *names* (the encoding pass of
 [dep-sharing-design.md](dep-sharing-design.md) §6 step 2), not the fragment store; the two designs
@@ -222,6 +232,12 @@ share that keystone and are otherwise parallel.
 
 - The compile-time/code-size ledger (D16) that prices pre-linking scope and the small-function
   floor: below some size, linking may cost more than recompiling — measure, then set the floor.
+- A within-run tier upgrade needs a signal the compiled-call path can carry: the interpreter stops
+  counting a function the moment its first entry is published, so today a function that becomes hot
+  during a run keeps the tier the *previous* run's ledger gave it. The candidates are the PLT slot load
+  (a counter beside the slot), a cheap sampled counter in the fast path, and the call-counter machinery
+  the interpreter already has. Whichever lands needs its cost measured against the D16 ledger before the
+  tier thresholds mean anything.
 - Whether `.eh_frame` batches should merge across load waves or stay one section per wave. Measuring
   says the question is not only about bytes: the compile worker registers each batch with
   `__register_frame` while guest threads may already be unwinding, and libgcc mutates that list under a
