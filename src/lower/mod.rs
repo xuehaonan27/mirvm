@@ -1020,10 +1020,17 @@ fn lower_inner(
                 .iter()
                 .map(|(inst, &addr)| (Box::from(tcx.symbol_name(*inst).name), addr))
                 .collect();
+            // `static_defs` is the session's list, and this session may have materialized statics in
+            // other homes and in the delta; the index carries only the ones whose address is in this
+            // home's own slot. A name bound to another slot would be a dangling address in a session
+            // that loads this layer alone, because that other slot is not part of its stack.
             let static_syms = linker
                 .static_defs
                 .iter()
-                .filter(|(def_id, _)| def_id.krate != rustc_hir::def_id::LOCAL_CRATE)
+                .filter(|(def_id, addr)| {
+                    def_id.krate != rustc_hir::def_id::LOCAL_CRATE
+                        && crate::image::manifest::frozen_slot_of(*addr as usize) == Some(home)
+                })
                 .map(|&(def_id, addr)| {
                     let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
                     (Box::from(sym), addr)

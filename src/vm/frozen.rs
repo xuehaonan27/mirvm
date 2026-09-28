@@ -14,8 +14,10 @@
 //! before the guest runs, and the snapshot is the clean state right after lowering -- runtime inputs such
 //! as argv are not in it (see `Instance::finalize_entry_argv`).
 
-/// Frozen arena capacity (virtually reserved; physical pages are allocated on touch).
-const FROZEN_CAP: usize = 256 << 20;
+/// Frozen arena capacity (virtually reserved; physical pages are allocated on touch). A region owns
+/// the addresses in `[base, base + FROZEN_CAP)`, which is what tells a layer's own addresses from a
+/// host address or another region's.
+pub(crate) const FROZEN_CAP: usize = 256 << 20;
 
 /// Fixed-base numeric values and whitelist criteria live in `crate::os_arch::addrspace` (this pair's fixed-address layout); see that module header for the address-selection rationale and the domain model.
 use crate::os_arch::addrspace::{

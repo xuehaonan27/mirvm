@@ -567,6 +567,63 @@ fn project_target(target: Target, unit: &Unit, symbols: &Symbols) -> Result<Bind
     }
 }
 
+/// The dependency-image slot an address inside a frozen region occupies, if the region that contains
+/// it is one.
+///
+/// [`crate::os_arch::addrspace::image_slot`] classifies a region *base*; a link address is an offset
+/// inside one, so carrying a layer's addresses needs this. The span is the region's own — the spline
+/// step is far wider than [`FROZEN_CAP`] — which is what keeps an address that is nobody's region (a
+/// `dlsym` result in a foreign slot's fixpoint, say) from being mistaken for a layer's.
+pub(crate) fn frozen_slot_of(addr: usize) -> Option<usize> {
+    use crate::os_arch::addrspace as layout;
+    let offset = addr.checked_sub(layout::IMAGE_SPLINE_BASE)?;
+    let slot = offset / layout::IMAGE_SPLINE_STEP;
+    (slot < layout::IMAGE_SPLINE_COUNT
+        && offset - slot * layout::IMAGE_SPLINE_STEP < crate::vm::frozen::FROZEN_CAP)
+        .then_some(slot)
+}
+
+/// The code-spline counterpart of [`frozen_slot_of`]: the slot an entry-stub address inside a code
+/// region occupies.
+fn code_slot_of(addr: usize) -> Option<usize> {
+    use crate::os_arch::addrspace as layout;
+    let offset = addr.checked_sub(layout::IMAGE_CODE_SPLINE)?;
+    let slot = offset / layout::IMAGE_CODE_STEP;
+    (slot < layout::IMAGE_CODE_COUNT
+        && offset - slot * layout::IMAGE_CODE_STEP < crate::vm::codearena::CODE_CAP)
+        .then_some(slot)
+}
+
+/// Whether a stored layer may carry this *data* address.
+///
+/// The delta region is this program's own: its base is fixed, but what lives at an offset inside it is
+/// decided by this session's lowering, so a layer that carries one is not a layer another process can
+/// use. Otherwise the address's frozen slot has to be at or below the layer's own.
+fn above_frozen(target: u64, home: usize) -> Option<u64> {
+    use crate::os_arch::addrspace as layout;
+    let addr = target as usize;
+    if (layout::DELTA_FIXED_ADDR..layout::IMAGE_SPLINE_BASE).contains(&addr) {
+        return Some(target);
+    }
+    let slot = frozen_slot_of(addr)?;
+    (slot > home).then_some(target)
+}
+
+/// Whether a stored layer may carry this *executable entry* address: the delta's own code region is
+/// refused like its data region, and the slot test is the code spline's. The two splines are separate
+/// spaces with the same numbering and the same step, so an address names a slot only under the kind it
+/// is — the code spline's base line is numerically a frozen slot's, hundreds of slots above the layer
+/// that owns it.
+fn above_entry(target: u64, home: usize) -> Option<u64> {
+    use crate::os_arch::addrspace as layout;
+    let addr = target as usize;
+    if (layout::DELTA_CODE_ADDR..layout::BASE_CODE_ADDR).contains(&addr) {
+        return Some(target);
+    }
+    let slot = code_slot_of(addr)?;
+    (slot > home).then_some(target)
+}
+
 /// The first link address in a *higher* dependency-image spline slot than this layer's own — the one
 /// shape a stored layer cannot carry.
 ///
@@ -577,25 +634,6 @@ fn project_target(target: Target, unit: &Unit, symbols: &Symbols) -> Result<Bind
 /// it, because the bodies and the id-bearing tables are canonical.
 pub(crate) fn cross_layer_target(module: &crate::vm::ir::Module, home: usize) -> Option<u64> {
     use crate::vm::ir::FrozenRelocTarget;
-    let above = |target: u64| {
-        // The delta regions are this program's own: their bases are fixed, but what lives at an offset
-        // inside them is decided by this session's lowering, so a layer that carries one is not a layer
-        // another process can use.
-        let addr = target as usize;
-        let in_delta = |start: usize, end: usize| addr >= start && addr < end;
-        if in_delta(
-            crate::os_arch::addrspace::DELTA_FIXED_ADDR,
-            crate::os_arch::addrspace::IMAGE_SPLINE_BASE,
-        ) || in_delta(
-            crate::os_arch::addrspace::DELTA_CODE_ADDR,
-            crate::os_arch::addrspace::IMAGE_CODE_SPLINE,
-        ) {
-            return Some(target);
-        }
-        let slot = crate::os_arch::addrspace::image_slot(addr)
-            .or_else(|| crate::os_arch::addrspace::image_code_slot(addr))?;
-        (slot > home).then_some(target)
-    };
     // Every table of the serialized module that holds a bare link address: a relocation's target, a
     // TLS template, and a GOT slot. Bodies and the id-bearing tables are canonical (`Tables`), but
     // these three are stored as they are, so they are what the layer has to be able to explain.
@@ -603,14 +641,42 @@ pub(crate) fn cross_layer_target(module: &crate::vm::ir::Module, home: usize) ->
         .frozen_relocs
         .iter()
         .find_map(|reloc| match reloc.target {
-            FrozenRelocTarget::Frozen(addr) | FrozenRelocTarget::Entry(addr) => above(addr.0),
+            FrozenRelocTarget::Frozen(addr) => above_frozen(addr.0, home),
+            FrozenRelocTarget::Entry(addr) => above_entry(addr.0, home),
         })
-        .or_else(|| module.tls.iter().find_map(|slot| above(slot.template.0)))
+        .or_else(|| {
+            module
+                .tls
+                .iter()
+                .find_map(|slot| above_frozen(slot.template.0, home))
+        })
         .or_else(|| {
             module
                 .got_fixups
                 .iter()
-                .find_map(|fixup| above(fixup.addr.0))
+                .find_map(|fixup| above_frozen(fixup.addr.0, home))
+        })
+}
+
+/// The first name a layer's own fn-entry/static index binds to an address it may not carry, with that
+/// address.
+///
+/// The module check covers what the layer's *data* reads; a layer also publishes name→address indexes,
+/// and the session above binds those names to exactly those addresses. An index entry pointing above
+/// the layer is as unusable as a relocation pointing there — worse, because nothing downstream would
+/// re-derive it. The two indexes hold different kinds of address, so each is classified as its own.
+pub(crate) fn index_target<'a>(
+    home: usize,
+    entries: impl IntoIterator<Item = (&'a str, u64)>,
+    statics: impl IntoIterator<Item = (&'a str, u64)>,
+) -> Option<(&'a str, u64)> {
+    entries
+        .into_iter()
+        .find_map(|(name, addr)| above_entry(addr, home).map(|addr| (name, addr)))
+        .or_else(|| {
+            statics
+                .into_iter()
+                .find_map(|(name, addr)| above_frozen(addr, home).map(|addr| (name, addr)))
         })
 }
 
@@ -1022,5 +1088,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("is not in the stack below"), "{error}");
+    }
+
+    /// A layer's addresses are classified by the region that contains them: its own slot and every slot
+    /// below it are carried as offsets *inside* a region, the base image it is stacked on is carried,
+    /// and a higher slot, this program's delta, or an address no region owns is not. The two kinds of
+    /// address are read in their own spline — a frozen pointer and an executable entry.
+    #[test]
+    fn a_link_address_is_classified_by_the_region_containing_it() {
+        use crate::os_arch::addrspace as layout;
+        let home = 3;
+        let data = |addr: usize| index_target(home, [], [("static", addr as u64)]).is_none();
+        let entry = |addr: usize| index_target(home, [("entry", addr as u64)], []).is_none();
+        assert!(data(layout::image_addr(2) + 0x18));
+        assert!(data(layout::image_addr(3) + 0x4238));
+        assert!(data(layout::BASE_IMAGE_FIXED_ADDR + 0x40));
+        // A `dlsym` result, or any other host address: no region contains it.
+        assert!(data(0x0000_7f2b_c000_1234));
+        assert!(entry(
+            layout::IMAGE_CODE_SPLINE + 3 * layout::IMAGE_CODE_STEP + 0x30
+        ));
+        assert!(entry(layout::BASE_CODE_ADDR + 0x40));
+        assert!(entry(0x0000_7f2b_c000_1234));
+        assert!(!data(layout::image_addr(4) + 0x8));
+        assert!(!data(layout::DELTA_FIXED_ADDR + 0x8));
+        assert!(!entry(
+            layout::IMAGE_CODE_SPLINE + 4 * layout::IMAGE_CODE_STEP + 0x8
+        ));
+        assert!(!entry(layout::DELTA_CODE_ADDR + 0x8));
     }
 }

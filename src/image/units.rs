@@ -323,10 +323,25 @@ fn load_one(
         return None;
     };
     // A relocation to another layer's slot was baked against the stack the manifest was written over:
-    // that stack's layout is not what this one has, so the manifest is a miss rather than a guess.
+    // that stack's layout is not what this one has, so the manifest is a miss rather than a guess. The
+    // name indexes get the same treatment: the session above binds them to the addresses they carry.
     if let Some(target) = manifest::cross_layer_target(&f.module, f.home) {
         reason(&format!(
             "a frozen relocation targets another layer at {target:#x}"
+        ));
+        return None;
+    }
+    if let Some((name, target)) = manifest::index_target(
+        f.home,
+        f.fn_entry_syms
+            .iter()
+            .map(|(sym, addr)| (sym.as_ref(), *addr)),
+        f.static_syms
+            .iter()
+            .map(|(sym, addr)| (sym.as_ref(), *addr)),
+    ) {
+        reason(&format!(
+            "its index names {name} in another layer at {target:#x}"
         ));
         return None;
     }
@@ -450,14 +465,28 @@ pub(crate) fn store(
     // fixed base — any slot will do, because the manifest records which one (its `home`) and the
     // loader restores it there.
     let publishable = entry::snapshot_is_publishable(&bi.module, &bi.instance, None);
-    // A layer that points into another layer's slot would be refused on load, so it is not written in
-    // the first place.
+    // A layer that points into another layer's slot — in its frozen data or in the name indexes it
+    // publishes — would be refused on load, so it is not written in the first place.
+    let stray = |home: usize| {
+        manifest::cross_layer_target(&bi.module, home).or_else(|| {
+            manifest::index_target(
+                home,
+                bi.entry_by_sym
+                    .iter()
+                    .map(|(sym, addr)| (sym.as_ref(), *addr)),
+                bi.static_by_sym
+                    .iter()
+                    .map(|(sym, addr)| (sym.as_ref(), *addr)),
+            )
+            .map(|(_, addr)| addr)
+        })
+    };
     let portable = bi
         .module
         .frozen
         .as_ref()
         .and_then(|snapshot| crate::os_arch::addrspace::image_slot(snapshot.home()))
-        .is_none_or(|home| manifest::cross_layer_target(&bi.module, home).is_none());
+        .is_none_or(|home| stray(home).is_none());
     let cacheable = publishable
         && portable
         && crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
@@ -468,7 +497,7 @@ pub(crate) fn store(
                 if !publishable {
                     "snapshot is not in its spline slot"
                 } else if !portable {
-                    "a frozen relocation targets another layer"
+                    "it names an address outside its own slot"
                 } else {
                     "verification against the stack below failed"
                 }
