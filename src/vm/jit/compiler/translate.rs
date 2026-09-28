@@ -172,6 +172,35 @@ impl<'a> Compiler<'a> {
         jit.publish_compiled_entries_for(self.domain, func, fast, packed, ranges);
     }
 
+    /// Pre-link the store's entries for the functions a previous run found hot, before the worker
+    /// serves a single request.
+    ///
+    /// Each one goes through the ordinary load path, so a stale order, a stale entry or an unreadable
+    /// one is a miss here exactly as it is there, and what does link is published like any other entry.
+    /// Nothing about the program's semantics depends on this happening.
+    pub(super) fn prelink(&mut self, order: &[u32]) {
+        let mut linked = 0;
+        for func in order {
+            let Some(body) = self.shared.module.funcs.get(*func as usize) else {
+                continue;
+            };
+            if self.shared.jit.slots_for(self.domain).slots[*func as usize].load(Ordering::Acquire)
+                != 0
+            {
+                continue;
+            }
+            if self.load_cached(*func, body) {
+                linked += 1;
+            }
+        }
+        if linked != 0 {
+            helpers::cache_prelinked(linked);
+        }
+        if linked != 0 && crate::options::jit_debug() {
+            eprintln!("mirvm-jit-debug: prelinked {linked} entries from the heat order");
+        }
+    }
+
     /// Give every PLT-visible callee of this body a fast slot: an uncompiled one gets a c2i
     /// trampoline (fast shape, so its call sites keep a constant shape). Callees that do not fit the
     /// fast shape are excluded; their call sites go straight to c2i (cold path).

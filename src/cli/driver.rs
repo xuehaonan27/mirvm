@@ -454,6 +454,7 @@ pub(super) fn run_vm_engine(
     vm_call: Option<&str>,
     vm_stats: bool,
     already_verified: bool,
+    heat: crate::vm::jit::Heat,
 ) -> i32 {
     if !already_verified && let Err(e) = crate::vm::verify::module(&module, &instance) {
         diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
@@ -564,7 +565,7 @@ pub(super) fn run_vm_engine(
     } else {
         None
     };
-    let code = run_vm_engine_loaded(module, instance, vm_call);
+    let code = run_vm_engine_loaded(module, instance, vm_call, heat);
     if let Some(session) = &mut capture {
         match session.finish(std::time::Duration::from_secs(30)) {
             Ok(crate::telemetry::CaptureFinish::Finished(_)) => {}
@@ -589,8 +590,10 @@ fn run_vm_engine_loaded(
     module: crate::vm::ir::Module,
     instance: crate::vm::instance::Instance,
     vm_call: Option<&str>,
+    heat: crate::vm::jit::Heat,
 ) -> i32 {
     let shared = crate::vm::ctx::Shared::new_loaded(module, instance);
+    shared.set_heat(heat);
     // Make entry stubs executable: recipe -> closure -> stub bytes -> whole-region RX (a
     // full-phase step alongside the two above; an occupied region means load failure).
     let engine = match crate::vm::ctx::Engine::try_new(shared) {
@@ -875,6 +878,9 @@ pub(crate) fn run_driver(
             exit(1);
         }
         let t_engine = std::time::Instant::now();
+        // What a previous run of this program found hot: the JIT worker links those entries before it
+        // serves a request, so warmup is one link wave rather than a compile wave.
+        let heat = crate::image::program::heat(&rustc_args);
         let code = run_vm_engine(
             module,
             instance,
@@ -882,6 +888,7 @@ pub(crate) fn run_driver(
             vm_call.as_deref(),
             vm_stats,
             false,
+            heat,
         );
         let engine = (!vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(&timing, engine, t_start.elapsed(), vm_stats);
@@ -996,6 +1003,7 @@ pub(crate) fn run_driver(
             exit(1);
         }
         let t_engine = std::time::Instant::now();
+        let heat = crate::image::program::heat(&callbacks.rustc_args);
         let code = run_vm_engine(
             module,
             instance,
@@ -1003,6 +1011,7 @@ pub(crate) fn run_driver(
             callbacks.vm_call.as_deref(),
             callbacks.vm_stats,
             false,
+            heat,
         );
         // The vm-stats branch does not run the guest, so an engine phase would be meaningless and
         // is not reported.

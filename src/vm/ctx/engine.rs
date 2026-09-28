@@ -42,6 +42,9 @@ pub struct Shared {
     /// Compiler threads are the only writers, publishing a slot with a single
     /// atomic swap; readers keep the read-only-after-publication discipline.
     pub jit: super::super::jit::JitState,
+    /// The function heat order this session pre-links from, and where it writes the order it observes.
+    /// Set by the session before the Engine starts; the compile worker reads it once.
+    pub(crate) heat: std::sync::OnceLock<super::super::jit::Heat>,
     pub(crate) control: Arc<EngineControl>,
     /// Every host thread owns its slot; Shared keeps only weak discovery links
     /// so an exited thread cannot form a cycle. Finalization clears the live
@@ -55,6 +58,12 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// Hand this session's heat order to the compile worker. Called once, before the Engine that
+    /// starts the worker exists; a second call is a no-op.
+    pub(crate) fn set_heat(&self, heat: super::super::jit::Heat) {
+        let _ = self.heat.set(heat);
+    }
+
     pub(crate) fn control(&self) -> &Arc<EngineControl> {
         &self.control
     }

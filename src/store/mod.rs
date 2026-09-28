@@ -223,8 +223,9 @@ families! {
     Cache NATIVE_ARCHIVES "native-archives" keyed;
     // owners: pack — native libraries carried inside a `.mirvm`; keyed by their content hash.
     Cache PACKAGE_NATIVE  "package-native"  keyed;
-    // owners: pack — the function heat order learned from a package's first runs; keyed by its code.
-    // `pack::read` derives the path and `vm::ir` writes the order through it.
+    // owners: pack, image::program, vm::jit — the function heat order one run leaves for the next;
+    // keyed by the code it was learned from (a package's function section, a program's IR key).
+    // `pack::read` and `image::program` derive the path; the decoder and the compile worker write it.
     Cache PACKAGE_HEAT    "package-heat"    keyed;
     // owners: cargoless::registry — crate and git sources, read through to `~/.cargo`; fetched, not derived.
     Data  REGISTRY        "registry"        unit;

@@ -607,6 +607,9 @@ pub(super) fn run_main(
             vm_call.as_deref(),
             vm_stats,
             true,
+            // A package carries its own heat order in its function table; the program-level one does
+            // not apply to code that came from a package.
+            crate::vm::jit::Heat::default(),
         );
         // The guest's own status: not mirvm's to classify.
         return Ok(ExitCode::from(code as u8));

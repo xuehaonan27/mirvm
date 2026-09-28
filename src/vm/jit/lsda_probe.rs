@@ -480,6 +480,7 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
 /// the host's `catch_unwind`. A pair whose call encoding this linker does not apply stores nothing, so
 /// the test reports that and stops rather than pretending.
 #[test]
+#[ignore = "resumes through linked frames; the jit-cache gate runs it alone because a registration             another test starts while this one unwinds can end the unwinder's walk early (see the JIT             design's eh_frame open item)"]
 fn a_linked_entry_unwinds_through_a_loaded_frame() {
     use super::artifact;
 

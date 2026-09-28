@@ -58,6 +58,7 @@ impl Shared {
             domain,
             jit,
             control: Arc::new(EngineControl::new(id)),
+            heat: std::sync::OnceLock::new(),
             ctx_slots: Mutex::new(Vec::new()),
             fork_baseline_threads: std::sync::atomic::AtomicUsize::new(0),
             fork_baseline_pid: std::sync::atomic::AtomicI32::new(0),
