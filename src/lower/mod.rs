@@ -293,12 +293,25 @@ impl<'tcx> Split<'tcx> {
         self.homes.get(index).and_then(|home| home.as_ref())
     }
 
-    /// An allocation's existing address as seen from `home` (`None` = the delta): that home's table,
-    /// then every lower home's. The delta sits above the homes, so a home body never looks there, and
-    /// a body may reuse what a layer below it materialized.
-    pub(crate) fn lookup_alloc(&self, home: Option<usize>, id: AllocId) -> Option<u64> {
-        let last = home.map_or(self.homes.len(), |home| home + 1);
-        (0..last).rev().find_map(|index| {
+    /// An allocation's existing address as seen from `home` (`None` = the delta).
+    ///
+    /// A delta body may reuse any home's materialization: the delta is no layer, so nothing it holds
+    /// has to be explainable by a manifest. A home body may always reuse its own home's, and a lower
+    /// home's only when `identity` says the address *is* the allocation's identity. An anonymous
+    /// allocation is materialized per home instead: a copy in a lower unit's slot would leave this
+    /// unit's body naming an address no symbol in its stack explains, which its manifest cannot carry.
+    pub(crate) fn lookup_alloc(
+        &self,
+        home: Option<usize>,
+        id: AllocId,
+        identity: bool,
+    ) -> Option<u64> {
+        let (last, first) = match home {
+            None => (self.homes.len(), 0),
+            Some(home) if identity => (home + 1, 0),
+            Some(home) => (home + 1, home),
+        };
+        (first..last).rev().find_map(|index| {
             self.home(index)
                 .and_then(|layer| layer.alloc_addrs.get(&id).copied())
         })
