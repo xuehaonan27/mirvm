@@ -174,14 +174,18 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
 2. **In-process reload proof** — serialize a compiled function, drop it, re-link it into the same
    process, run the differential. This proves the relocation vocabulary complete with no
    cross-process variables yet. Implemented: `vm::jit::artifact` captures each defined symbol's code
-   with its relocation list in canonical form (a site of the recording vocabulary, a name of the
-   import whitelist or of another symbol of the entry, or an offset inside the symbol), encodes that
-   through one version byte and postcard, maps it into a fresh executable region, resolves every
-   relocation against live state and republishes the linked entries. `MIRVM_JIT_RELOAD` runs a whole
-   session that way, so every existing JIT differential also runs against linked code, and
-   `fib32-reload` is its standing gate. The kinds applied are the x86_64 ones: the call encoding,
-   veneers and write/execute discipline of the macOS pair are that pair's item (§6), and a kind this
-   engine does not apply is a miss, never a guess.
+   with its relocation list in canonical form — a reference of the fragment by the ordinal the
+   canonical walk gives it (`Func`/`Tls`/`Asm`/`Link`), an interior of the resident body, the entry's
+   own function id, a name of the import whitelist or of another symbol of the entry, or an offset
+   inside the symbol — encodes that through one version byte and postcard, maps it into a fresh
+   executable region, resolves every relocation against live state and republishes the linked entries.
+   The entry holds no program's numbering or addresses, so one body's artifact is byte-identical in two
+   programs that number its functions and place its frozen data differently; a unit test compiles one
+   body twice that way and compares the bytes, which is the precondition the store keys on.
+   `MIRVM_JIT_RELOAD` runs a whole session that way, so every existing JIT differential also runs
+   against linked code, and `fib32-reload` is its standing gate. The kinds applied are the x86_64 ones:
+   the call encoding, veneers and write/execute discipline of the macOS pair are that pair's item
+   (§6), and a kind this engine does not apply is a miss, never a guess.
 3. **The store family** — packs, keys, generation, purge; cross-process warm runs; the §4 gates.
 4. **Startup pre-linking by heat order**, then **adaptive tiers** on the D16 measurement ledger.
 
