@@ -343,10 +343,18 @@ deleted and replaced, not phased out.
    `frag-sharing` run leaves 3 chunks (6 113 B) in `cache/frozen`, a warm run loads the entry and the
    closure from them and produces the same guest output, and a purge with the manifests gone empties
    the family.
-   Heat-order-driven pack layout is unmeasured for a reason the reader states: a fragment is reached by
-   binary search plus one seek, so record order buys nothing for random access, and the only reader that
-   walks a layer in heat order is the lazy decode worker of a package's function table. Measuring that
-   worker's page locality is the precondition; until then the layout is not a lever.
+   Heat-order-driven pack layout is measured and closed. A fragment is reached by binary search plus
+   one seek, so record order buys nothing for random access, and the only reader that walks a layer in
+   heat order is the lazy decode worker of a package's function table — whose input is not paged at
+   all: `pack::read` copies the whole package into one `Arc<[u8]>` before the worker starts, so no
+   order of the walk is a page-in. Measured on a real package (`frag-sharing`: 9 583 bodies, 2 808 000 B
+   of postcard, 293 B average): the FUNCS section spans 687 pages and one page holds 14 bodies, and the
+   predicted walk decodes the whole learned order, so it touches that same page set whatever the record
+   order is. A reordering could therefore only shrink the *span* of a partial walk, by at most the
+   factor the bodies-per-page ratio bounds (14 here), over a postcard parse of bytes already in RAM.
+   The order it would be driven by also cannot key the layout: the heat file is keyed by the FUNCS section's own
+   hash (`pack::read`), so a reordered section looks up an empty key — the learned order that would
+   justify reordering is the one the reordering invalidates.
 
 ## 7. Open items
 
