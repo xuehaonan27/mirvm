@@ -192,7 +192,9 @@ Two new `Class::Cache` families in the register:
 
 Fragments carry no generation: they are reached only through manifests, manifests are generational,
 and collection is **mark-sweep from current-generation manifests** — refcounts are rejected as
-crash-fragile. `cache purge` marks live fragment ids, rewrites packs whose live ratio is low, and
+crash-fragile. The frozen region's chunks are the same kind of record in their own family
+(`cache/frozen`, §3.6), marked from the same manifests and swept under the same lock discipline.
+`cache purge` marks live ids and chunk ids, rewrites packs whose live ratio is low, and
 deletes prunable manifests (stale generations as today; superseded digests per unit_key beyond a
 small keep-count). A pack whose live share stays above half its bytes is left alone: copying it would
 buy back few bytes, so the dead records it keeps are counted until a later sweep folds them. Sweep
@@ -237,9 +239,10 @@ parent document are the regression fence.
   is preserved by construction.
 - **Residue instances** duplicate per program (in the delta), bounded by the same purity ledger that
   measures them today.
-- **Manifest overhead** duplicates per unit: symbols, bindings, frozen bytes. Symbols and frozen
-  bytes exist per unit today; the net new cost is the binding tables, bought back many times over by
-  fragment sharing.
+- **Manifest overhead** duplicates per unit: symbols, bindings, frozen bytes. Symbols exist per unit
+  today and the binding tables are the net new cost, bought back many times over by fragment sharing;
+  the frozen region does not duplicate in the store, because a manifest names its region's chunks
+  rather than carrying the bytes (§3.4).
 
 ## 4. Boundaries
 
@@ -247,12 +250,12 @@ parent document are the regression fence.
   a bonus, not a contract.
 - The L3 JIT code cache is not this document's topic: [jit-code-cache-design.md](jit-code-cache-design.md)
   owns it, keyed by this document's fragment ids.
-- rlibs are rustc's artifacts and are not deduplicated here; the frozen region is stored whole per
-  unit in v1 — chunk-level dedup of frozen bytes is an extension with a measurement trigger, not a
-  commitment.
-- The base image and L2 program entries do not move into the fragment store in v1. The L2 entry as a
-  manifest of fragments (making per-edit IR caching incremental) is the highest-value extension and
-  is deferred until the store exists.
+- rlibs are rustc's artifacts and are not deduplicated here. The frozen region is not stored whole:
+  it is cut into 4 KiB chunks under their own content addresses, because consecutive revisions of a
+  layer share most of it (measured below).
+- The base image does not move into the fragment store: it is one byte-deterministic artifact per
+  build, with no sibling to share bodies with. An L2 program entry is a manifest of fragments, so an
+  edit reuses the bodies it did not change.
 - This is not a distribution format: `.mirvm` stays self-contained; `pack` absorbs a stack and never
   ships fragment references.
 
@@ -279,11 +282,12 @@ parent document are the regression fence.
   warm rerun to write no manifest at all, and diffs the loaded-stack run's guest output against the
   same program with the stack bypassed.
 - **Collection safety**: purge under a concurrent publisher never leaves a manifest referencing a
-  swept fragment — the mark and the sweep hold the family's exclusive lock, a publisher holds it
-  shared across the fragment pack and the manifest that names it, and a compacted pack is published
-  under its new name before the old file is removed. A manifest referencing a missing fragment is a
-  miss that self-heals, never a runtime error. `frag-collect` gates the cycle in a store of its own:
-  publish, drop the manifests, purge, republish the same packs under the same names.
+  swept record — each pack family is marked and swept under its own exclusive lock, a publisher holds
+  the lock shared across the pack and the manifest that names it, and a compacted pack is published
+  under its new name before the old file is removed. A manifest referencing a missing fragment or
+  chunk is a miss that self-heals, never a runtime error. `frag-collect` gates the cycle in a store of
+  its own for both families: publish, drop the manifests, purge, republish the same packs under the
+  same names.
 
 ## 6. Construction order
 
@@ -311,7 +315,7 @@ deleted and replaced, not phased out.
    names it, `store::frags::sweep` drops or compacts packs against that mark under the family's
    exclusive lock, the unit manifests are a generational family so a manifest another build wrote is
    pruned, and `cache status` reports the live/dead split — the `frag-collect` gate walks one session
-   through publish, drop, purge and republish.
+   through publish, drop, purge and republish, for both pack families.
 5. Extensions, each behind its own measurement: frozen-region chunk dedup; the L2 entry as a
    fragment manifest; heat-order-driven pack layout.
    The first measurement is taken. A clean `frag-sharing` run reports the delta — the program's own
@@ -321,19 +325,24 @@ deleted and replaced, not phased out.
    and 98.3% of the union**, so an L2 entry written as a manifest would add one new fragment and reuse
    the rest of the previous entry's bodies instead of carrying its own copy: the trigger fired, and the
    extension is implemented. A program entry is now the same manifest of fragments the other two layers
-   use — bodies in `cache/frags`, frozen bytes, id-bearing tables and asm recipes behind the entry's
-   header — and collection marks the fragments an entry names, so an L2 entry keeps its bodies alive
+   use — bodies in `cache/frags`, its frozen region chunked in `cache/frozen`, id-bearing tables and
+   asm recipes behind the entry's header — and collection marks the fragments an entry names, so an L2
+   entry keeps its bodies alive
    exactly like the closure and unit manifests do. Measured after the change: a clean `frag-sharing`
    run leaves 172 records and 19 281 B in `cache/frags`, the same 172 fragments and bytes the probe
-   priced before it, and a cold and a warm run agree on the guest's output. Chunk-level dedup of the frozen
-   region is priced by the same run only on one side of its ledger — the 24.1% it would go after — and
-   the missing number is how much of those bytes two revisions still share. The first instrument for it
-   is in place — `MIRVM_A2_DEBUG` prints the entry's frozen byte count and a digest of them on every
-   write — and it already answers the cheap question: for a small program (`frag-sharing`'s own crate,
-   25 B of frozen data) an edit changes the digest, so the frozen region is not byte-identical across
-   revisions and the extension's value has to come from *partial* overlap. Judging that needs a
-   chunk-level differ, which is the next instrument this item asks for; the 24.1% share above is what it
-   would be aimed at.
+   priced before it, and a cold and a warm run agree on the guest's output.
+   The frozen region is chunk-addressed too, and its trigger is measured. A region is cut into 4 KiB
+   chunks under their own BLAKE3 addresses in `cache/frozen`, the manifest carries the addresses and
+   the region's length, and `MIRVM_A2_DEBUG` prints the region's size, its chunk count and what the
+   write had to store. Two revisions of one program share most of the region: `frag-sharing`'s delta
+   (6 120 B, 2 chunks) is byte-identical across an edit that only changes a body and keeps 1 of 2
+   chunks when the edit adds a function, and a program whose region is 71 720 B (18 chunks, a 64 KiB
+   static table) keeps 18 of 18 and 16 of 18 in the same two cases. The share therefore depends on how
+   much of the region changed and on where the change lands, not on the region being rewritten: 50 to
+   100% of it survives a revision, so the extension pays. What is stored is the chunks: a cold
+   `frag-sharing` run leaves 3 chunks (6 113 B) in `cache/frozen`, a warm run loads the entry and the
+   closure from them and produces the same guest output, and a purge with the manifests gone empties
+   the family.
    Heat-order-driven pack layout is unmeasured for a reason the reader states: a fragment is reached by
    binary search plus one seek, so record order buys nothing for random access, and the only reader that
    walks a layer in heat order is the lazy decode worker of a package's function table. Measuring that
@@ -363,6 +372,6 @@ deleted and replaced, not phased out.
 - open-issues G5 asks whether cross-project sharing is needed at all and whether tainted images
   should become project-local; this RFC is the "yes, and finer" answer to the first question and
   leaves the second untouched. Deciding this RFC closes that branch of G5.
-- `cache/units/` and `cache purge --units` land with the unit step; `cache/frags` and `--frags`
-  already exist. The parent document's store-layout table follows the code, per the "current code
-  wins" rule.
+- The store's layout is the register in `src/store/mod.rs`: `cache/frags`, `cache/frozen` and
+  `cache/units` are present, with `cache purge --frags|--frozen|--units`. The parent document's
+  store-layout table follows the code, per the "current code wins" rule.

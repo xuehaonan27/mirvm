@@ -37,13 +37,15 @@ contracts are its siblings in `docs/designs/`.
   rustdoc front end adds doctests without pretending they are ordinary tests.
 - **Images and caches** — a byte-deterministic std base image plus a deps manifest make warm runs load
   instead of re-lower. The manifest stores each dependency function as a fragment in the shared
-  content-addressed `cache/frags` store plus the binding table that gives that fragment's ordinals
-  meaning, so identical bodies are stored once machine-wide. On the cargoless track the closure is
+  content-addressed `cache/frags` store, its frozen region as 4 KiB chunks in `cache/frozen`, plus the
+  binding table that gives that fragment's ordinals meaning, so identical bodies and an unchanged
+  region are stored once machine-wide. On the cargoless track the closure is
   split by crate: `cache/units` holds one content-named manifest per unit (keyed by build id, base key
   and rlib stamp), a stack `[std base, unit…]` serves two programs that share a dependency, and a layer
   the stack provides is never rewritten. An image stack carries multi-source lookup, cumulative
-  offsets and a key chain, and an L2 post-mono engine-IR cache serializes a whole frozen region at
-  fixed logical addresses. `MIRVM_TIMING` prints a phase ledger.
+  offsets and a key chain, and an L2 post-mono engine-IR entry is a manifest of fragments behind a
+  header, so an edit reuses the bodies and frozen chunks it did not change. `MIRVM_TIMING` prints a
+  phase ledger.
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the
   source into a process-owned immutable snapshot and each `unsafe instantiate` builds an independent
   Engine, so one package instantiates repeatedly and concurrently. Artifacts use logical `LinkAddr`
