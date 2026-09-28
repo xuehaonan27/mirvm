@@ -57,8 +57,11 @@ mode_run() {
         echo $? >"$TMP/$tag.code"
     }
 
-    run cold
+    run cold MIRVM_JIT_STATS=1
     [ "$(cat "$TMP/cold.code")" = 0 ] || abort_test "cold run exited $(cat "$TMP/cold.code"): $(tail -3 "$TMP/cold.err")"
+    # Nothing is known about this program yet, so every function starts at the cheap tier.
+    grep -qE "tier_baseline=[1-9]" "$TMP/cold.err" \
+        || abort_test "the cold run did not compile at the baseline tier"
     grep -q "published from a stored entry" "$TMP/cold.err" \
         && abort_test "the cold run reused an entry no earlier run had written"
     [ -n "$(ls "$JIT_DIR"/*.pack 2>/dev/null)" ] \
@@ -79,6 +82,12 @@ mode_run() {
     prelinked=$(grep -o "cache_prelinked=[0-9]*" "$TMP/warm.err" | tail -1 | cut -d= -f2)
     [ -n "$prelinked" ] && [ "$prelinked" -gt 0 ] \
         || abort_test "the warm run did not count its prelinked entries"
+    # The heat order learned last run is what asks for the optimized tier: the warm run must show both
+    # the linked entries and the tier split the policy produced.
+    grep -qE "cache_hits=[1-9]" "$TMP/warm.err" \
+        || abort_test "the warm run linked nothing from the store"
+    grep -qE "tier_optimized=[1-9]" "$TMP/warm.err" \
+        || abort_test "no function reached the optimized tier"
 
     run bypass MIRVM_NO_JIT_CACHE=1
     [ "$(cat "$TMP/bypass.code")" = 0 ] || abort_test "bypassed run exited $(cat "$TMP/bypass.code")"
@@ -87,19 +96,28 @@ mode_run() {
     cmp -s "$TMP/cold.out" "$TMP/bypass.out" \
         || abort_test "the bypassed run and the stored run disagree on stdout"
 
-    # 4) a corrupted pack: the bytes a record carries must be verified before they are linked. One byte
-    #    in the middle of the pack is enough to break the record's own hash.
-    pack=$(ls "$JIT_DIR"/*.pack | head -1)
-    middle=$(( $(wc -c <"$pack") / 2 ))
-    printf '\xff' | dd of="$pack" bs=1 seek="$middle" conv=notrunc 2>/dev/null
+    # 4) honesty: what the store holds must be verified before it is used. A byte in the middle of
+    #    every pack breaks the record it lands in, so those entries are refused — the run still produces
+    #    the same output, and it says it refused something instead of linking it.
+    for pack in "$JIT_DIR"/*.pack; do
+        middle=$(( $(wc -c <"$pack") / 2 ))
+        printf '\xff' | dd of="$pack" bs=1 seek="$middle" conv=notrunc 2>/dev/null
+    done
     run corrupt MIRVM_JIT_STATS=1
     [ "$(cat "$TMP/corrupt.code")" = 0 ] || abort_test "corrupt-store run exited $(cat "$TMP/corrupt.code")"
     cmp -s "$TMP/cold.out" "$TMP/corrupt.out" \
         || abort_test "a corrupted entry changed the guest output"
-    stats=$(grep -o "cache_hits=[0-9]* cache_misses=[0-9]* cache_refused=[0-9]*" "$TMP/corrupt.err" | tail -1)
-    [ -n "$stats" ] || abort_test "the run did not report the store counters"
-    hits=$(printf '%s' "$stats" | sed -n 's/.*cache_hits=\([0-9]*\).*/\1/p')
-    [ "$hits" = 0 ] || abort_test "a corrupted entry was used ($stats)"
+    grep -qE "cache_refused=[1-9]" "$TMP/corrupt.err" \
+        || abort_test "no corrupted entry was refused: $(tail -1 "$TMP/corrupt.err")"
+
+    # 4b) and an empty store is a miss, not a mystery: the same output again, nothing reused.
+    rm -f "$JIT_DIR"/*.pack
+    run missing MIRVM_JIT_STATS=1
+    [ "$(cat "$TMP/missing.code")" = 0 ] || abort_test "missing-store run exited $(cat "$TMP/missing.code")"
+    cmp -s "$TMP/cold.out" "$TMP/missing.out" \
+        || abort_test "an empty store changed the guest output"
+    grep -qE "cache_hits=0 cache_misses=[1-9]" "$TMP/missing.err" \
+        || abort_test "an empty store did not miss: $(tail -1 "$TMP/missing.err")"
 
     # 5) the §4 unwind proof at loaded addresses, alone in its own process.
     ( cd "$REPO_ROOT" && "${CARGO:-cargo}" test --locked --all-features --lib -- --ignored \
@@ -108,5 +126,5 @@ mode_run() {
     grep -q "1 passed" "$TMP/unwind.txt" \
         || abort_test "the loaded-frame unwind proof did not run: $(tail -3 "$TMP/unwind.txt")"
 
-    ok "cold stored, warm reused, bypass compiled, corruption refused, loaded frame unwound"
+    ok "cold stored, warm reused, bypass compiled, corruption refused, misses rebuilt, frame unwound"
 }

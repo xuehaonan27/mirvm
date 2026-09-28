@@ -67,8 +67,8 @@ impl<'a> Compiler<'a> {
             // TLS and stays correct.
             return;
         }
-        if jit.slots_for(self.domain).slots[func as usize].load(Ordering::Acquire) != 0 {
-            return; // already compiled in this domain
+        if self.published.contains(&func) {
+            return; // already compiled by this compiler, at this tier
         }
         let Some(body) = self.shared.module.funcs.get(func as usize) else {
             return;
@@ -170,34 +170,10 @@ impl<'a> Compiler<'a> {
         // Every memory range is complete before these two Release stores; the perf map
         // is written only by an explicit stop.
         jit.publish_compiled_entries_for(self.domain, func, fast, packed, ranges);
-    }
-
-    /// Pre-link the store's entries for the functions a previous run found hot, before the worker
-    /// serves a single request.
-    ///
-    /// Each one goes through the ordinary load path, so a stale order, a stale entry or an unreadable
-    /// one is a miss here exactly as it is there, and what does link is published like any other entry.
-    /// Nothing about the program's semantics depends on this happening.
-    pub(super) fn prelink(&mut self, order: &[u32]) {
-        let mut linked = 0;
-        for func in order {
-            let Some(body) = self.shared.module.funcs.get(*func as usize) else {
-                continue;
-            };
-            if self.shared.jit.slots_for(self.domain).slots[*func as usize].load(Ordering::Acquire)
-                != 0
-            {
-                continue;
-            }
-            if self.load_cached(*func, body) {
-                linked += 1;
-            }
-        }
-        if linked != 0 {
-            helpers::cache_prelinked(linked);
-        }
-        if linked != 0 && crate::options::jit_debug() {
-            eprintln!("mirvm-jit-debug: prelinked {linked} entries from the heat order");
+        self.published.insert(func);
+        match self.tier {
+            Tier::Baseline => helpers::tier_baseline(),
+            Tier::Optimized => helpers::tier_optimized(),
         }
     }
 
@@ -235,7 +211,7 @@ impl<'a> Compiler<'a> {
     /// A hit that links registers the stored unwind material at the loaded addresses and publishes the
     /// same two entries a compile would. Everything a doubt can do is a miss, which spends a compile
     /// and nothing else.
-    fn load_cached(&mut self, func: u32, body: &ir::FuncBody) -> bool {
+    pub(super) fn load_cached(&mut self, func: u32, body: &ir::FuncBody) -> bool {
         let Some(ordinals) = artifact::Ordinals::of(body) else {
             return false;
         };
@@ -313,6 +289,11 @@ impl<'a> Compiler<'a> {
         self.shared
             .jit
             .publish_compiled_entries_for(self.domain, func, guarded, packed, ranges);
+        self.published.insert(func);
+        match self.tier {
+            Tier::Baseline => helpers::tier_baseline(),
+            Tier::Optimized => helpers::tier_optimized(),
+        }
         true
     }
 

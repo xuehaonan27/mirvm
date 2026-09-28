@@ -39,6 +39,36 @@ pub(crate) enum CodeDomain {
     Trace,
 }
 
+/// Which optimization level a function is compiled at.
+///
+/// The level is a jit-key dimension, so one fragment may have an entry per tier and dispatch publishes
+/// whichever it has; the policy that chooses between them is the heat ledger's (§2.6 of the JIT
+/// design), and nothing about a program's semantics depends on the choice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Tier {
+    /// The cheapest code to produce: what a function gets before anything says it is hot.
+    Baseline,
+    /// The optimized level: what the heat order and the upgrade threshold ask for.
+    Optimized,
+}
+
+impl Tier {
+    /// The cranelift `opt_level` value this tier compiles with.
+    pub(crate) fn opt_level(self) -> &'static str {
+        match self {
+            Tier::Baseline => "none",
+            Tier::Optimized => "speed",
+        }
+    }
+}
+
+/// One compilation request: which function, and the tier the ledger asked for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Request {
+    pub func: u32,
+    pub tier: Tier,
+}
+
 /// The function heat order a session starts with, and where it leaves its own.
 ///
 /// A program's hot functions are not a mystery: the order its last run asked the compiler for them in
@@ -162,8 +192,13 @@ pub struct JitState {
     /// False under `--jit off` / `MIRVM_JIT=off`: pure interpretation, not even counters
     /// are bumped (the differential-comparison baseline).
     pub enabled: bool,
-    /// Requests compilation once a function's counter crosses this.
+    /// Requests baseline compilation once a function's counter crosses this.
     pub threshold: u32,
+    /// The functions a previous run learned are hot, by id. This is the adaptive policy's whole
+    /// input: the tier a function is compiled at is `tier_for`'s answer, and the order it comes from
+    /// is learned again every run — which is the hysteresis, since one run of evidence is not enough
+    /// to rewrite it. The D16 measurement ledger owns any refinement (§2.6 of the JIT design).
+    hot: std::sync::RwLock<std::collections::HashSet<u32>>,
     /// `MIRVM_JIT_SYNC=1` verification mode: after queueing, wait for publication or the
     /// failure sentinel. With threshold 1 this turns "first call requests compilation"
     /// into "first call compiles and publishes synchronously", and a compilation failure
@@ -172,7 +207,7 @@ pub struct JitState {
     pub sync: bool,
     /// Compilation-request channel (`jit_compile::start` fills it; always None without the
     /// cranelift feature).
-    pub queue: std::sync::Mutex<Option<std::sync::mpsc::Sender<u32>>>,
+    pub queue: std::sync::Mutex<Option<std::sync::mpsc::Sender<Request>>>,
     /// The worker must be joined before process exit runs allocator cleanup; dropping the
     /// handle instead lets Cranelift race libc/Rust teardown and corrupt the heap in ways
     /// that drift across workloads.
@@ -209,6 +244,7 @@ impl JitState {
             counters: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
             enabled,
             threshold,
+            hot: std::sync::RwLock::new(std::collections::HashSet::new()),
             sync: crate::options::jit_sync(),
             queue: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
@@ -216,6 +252,26 @@ impl JitState {
             guest_code: RwLock::new(Vec::new()),
             symbol_ranges: RwLock::new(Vec::new()),
             sites: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Record the order a previous run asked for functions in: the hot set this session's tier
+    /// policy reads.
+    pub(crate) fn set_hot(&self, order: &[u32]) {
+        let Ok(mut hot) = self.hot.write() else {
+            return;
+        };
+        hot.clear();
+        hot.extend(order.iter().copied());
+    }
+
+    /// Which tier a function's request should ask for: the optimized one exactly when a previous run
+    /// found it hot, and the cheap one otherwise. A request is raised once per function while it is
+    /// interpreted, so this is the only place the policy is consulted.
+    pub fn tier_for(&self, func: u32) -> Tier {
+        match self.hot.read() {
+            Ok(hot) if hot.contains(&func) => Tier::Optimized,
+            _ => Tier::Baseline,
         }
     }
 
