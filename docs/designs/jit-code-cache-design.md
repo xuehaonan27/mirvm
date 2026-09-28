@@ -198,9 +198,12 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    publishes the same two entries a compile would; a miss compiles, stages the entry and publishes the
    batch as one pack when it is worth a file, and `MIRVM_NO_JIT_CACHE=1` bypasses the whole family.
    `fib32-jit-cache` is the standing case: cold stores, warm reuses at least one entry, the bypassed
-   run compiles, and all three agree on stdout. The loaded-address unwind proof of §4 (a panic crossing
-   a *loaded* frame) and the linker-honesty counter are not built yet; the FDE path they exercise is
-   the same one a fresh compile registers through.
+   run compiles, a corrupted pack is refused rather than used, and all four agree on stdout. The
+   counters behind that last leg (`cache_hits`/`cache_misses`/`cache_refused`, dumped with the helper
+   buckets) are the linker-honesty observable of §4, and the loaded-address unwind proof is the
+   `a_linked_entry_unwinds_through_a_loaded_frame` probe: the same cleanup-pad chain the LSDA probe
+   already runs, but through frames the *link* placed and FDEs synthesized from the stored CFA
+   programs.
 4. **Startup pre-linking by heat order**, then **adaptive tiers** on the D16 measurement ledger.
 
 Step 1 needs canonical fragment ids only as *names* (the encoding pass of
@@ -214,8 +217,6 @@ share that keystone and are otherwise parallel.
 - Whether `.eh_frame` batches should merge across load waves or stay one section per wave.
 - The concrete adaptive-tier statistic (call count, self time, or the heat file's order) and its
   hysteresis — tuned from measurement, recorded here once chosen.
-- The loaded-address unwind proof and the linker-honesty counter are the §4 gates step 3 still owes;
-  both need the same thing, an entry whose link is followed by a real unwind, so they close together.
 - macOS pair items: `MAP_JIT`, `pthread_jit_write_protect_np`, the code-arena placement rules, and the
   `Arm64Call` encoding — a `bl` patches one instruction field, in range or through a veneer, and which
   of the two is decided when the entry lands, so the pair owns both the decision and the space a
