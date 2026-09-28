@@ -314,6 +314,18 @@ deleted and replaced, not phased out.
    through publish, drop, purge and republish.
 5. Extensions, each behind its own measurement: frozen-region chunk dedup; the L2 entry as a
    fragment manifest; heat-order-driven pack layout.
+   The first measurement is taken. A clean `frag-sharing` run reports the delta — the program's own
+   lowered bodies, which is exactly what an L2 entry stores inline today — as 196 bodies → 172
+   fragments, 19 281 B canonical beside 6 120 B of frozen data (24.1% of its unit). Editing the
+   program (one new function, one changed caller) keeps **171 of those 172 fragments, 99.4% retention
+   and 98.3% of the union**, so an L2 entry written as a manifest would add one new fragment and reuse
+   the rest of the previous entry's bodies instead of carrying its own copy: the trigger for that
+   extension has fired, and it is the next thing this line implements. Chunk-level dedup of the frozen
+   region is priced by the same run only on one side of its ledger — the 24.1% it would go after — and
+   the missing number is how much of those bytes two revisions still share, which the next measurement
+   has to take before the extension can be judged. Heat-order-driven pack layout stays unmeasured: the
+   reader is a binary search per fragment, so what a layout can buy is sequential locality for the lazy
+   decode worker, and that needs a read-amplification counter first.
 
 ## 7. Open items
 
