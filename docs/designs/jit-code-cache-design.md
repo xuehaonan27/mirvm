@@ -230,8 +230,18 @@ share that keystone and are otherwise parallel.
 
 ## 6. Open items
 
-- The compile-time/code-size ledger (D16) that prices pre-linking scope and the small-function
-  floor: below some size, linking may cost more than recompiling — measure, then set the floor.
+- The compile-time/code-size ledger (D16) is in place and has priced both questions:
+  `MIRVM_JIT_LEDGER=1` prints one row per function this process built or linked — the kind, the
+  canonical body's bytes, the machine code's bytes and the microseconds the call took — and a
+  per-kind summary at exit. Measured on two generated programs, one of 200 small bodies (13 B to
+  3 388 B) and one of graded large ones (678 B to 27 720 B), both with `MIRVM_JIT_THRESHOLD=1` so a
+  first call builds each function: linking is cheaper than compiling at **every** measured size, by
+  9.6× at the median (32.5 µs against 312 µs) and by 2.5× to 31× per size band. The small-function
+  floor this item hypothesized does not exist — the cheapest link measured (14 µs for a 27 B body)
+  beats the cheapest compile measured (82 µs for a 23 B body) — so the pre-link wave links the whole
+  order and no size gate is set. That also fixes the scope: a warm start pays ~62 µs per hot
+  function (184 links = 11.5 ms, against 89 ms to compile the same bodies), which is a price worth
+  paying for every function in the ledger.
 - A within-run tier upgrade needs a signal the compiled-call path can carry: the interpreter stops
   counting a function the moment its first entry is published, so today a function that becomes hot
   during a run keeps the tier the *previous* run's ledger gave it. The candidates are the PLT slot load
@@ -249,8 +259,12 @@ share that keystone and are otherwise parallel.
   `struct object` — or registering from a point the guest cannot be unwinding at. The repository gate
   runs its tests on one thread for the same reason, and the item closes when the JIT can register
   while guest threads unwind without that window.
-- The concrete adaptive-tier statistic (call count, self time, or the heat file's order) and its
-  hysteresis — tuned from measurement, recorded here once chosen.
+- The adaptive-tier statistic is chosen: the persisted **heat order**, not a counter. A function the
+  previous run's order names is asked for at the optimized tier the first time this session compiles
+  it, and everything else starts at the baseline one, so the decision is made once per function per
+  session from evidence the store already keeps (`cache/package-heat`). No hysteresis is needed while
+  the decision is a single membership test per session; it becomes necessary only with a within-run
+  signal, which is the item above.
 - macOS pair items: `MAP_JIT`, `pthread_jit_write_protect_np`, the code-arena placement rules, and the
   `Arm64Call` encoding — a `bl` patches one instruction field, in range or through a veneer, and which
   of the two is decided when the entry lands, so the pair owns both the decision and the space a
