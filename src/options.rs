@@ -289,6 +289,8 @@ entries! {
     user no_base_image env("MIRVM_NO_BASE_IMAGE")  default("off") child_only => reads(bool, |o| o.no_base_image);
     /// Bypass the dependency image.
     user no_deps_image env("MIRVM_NO_DEPS_IMAGE")  default("off") child_only => reads(bool, |o| o.no_deps_image);
+    /// Bypass the JIT code store: compile every function instead of reusing a stored entry.
+    user no_jit_cache  env("MIRVM_NO_JIT_CACHE")   default("off") => reads(bool, |o| o.no_jit_cache);
     /// Disable registry HTTP; resolve from the local cache only and fail loudly on a miss.
     user offline       env("MIRVM_OFFLINE")        default("off")            => live(bool, |_| read_offline());
     /// `mirvm pack`: carry machine code out of line and rematerialize it on load.
@@ -557,6 +559,7 @@ struct Options {
     no_ir_cache: bool,
     no_base_image: bool,
     no_deps_image: bool,
+    no_jit_cache: bool,
     pack_no_mc: bool,
     deps_audit_keep: bool,
     encoded_rustflags_append: Option<String>,
@@ -607,6 +610,7 @@ impl Options {
             no_ir_cache: nonempty("no_ir_cache"),
             no_base_image: nonempty("no_base_image"),
             no_deps_image: nonempty("no_deps_image"),
+            no_jit_cache: nonempty("no_jit_cache"),
             pack_no_mc: flag("pack_no_mc"),
             deps_audit_keep: flag("deps_audit_keep"),
             encoded_rustflags_append: raw("encoded_rustflags_append")
@@ -1095,6 +1099,7 @@ mod tests {
         let _ = super::no_ir_cache();
         let _ = super::no_base_image();
         let _ = super::no_deps_image();
+        let _ = super::no_jit_cache();
         let _ = super::offline();
         let _ = super::pack_no_mc();
         let _ = super::jit_debug();

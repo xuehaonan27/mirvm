@@ -25,6 +25,7 @@ pub struct Purge {
     pub base: bool,
     pub ir: bool,
     pub frags: bool,
+    pub jit: bool,
     pub units: bool,
     pub scripts: bool,
     /// The target directories (shared dependency storage and the native differential builds).
@@ -45,6 +46,7 @@ impl Purge {
             Some(FamilyFlag::Deps) => self.deps,
             Some(FamilyFlag::Ir) => self.ir,
             Some(FamilyFlag::Frags) => self.frags,
+            Some(FamilyFlag::Jit) => self.jit,
             Some(FamilyFlag::Units) => self.units,
             Some(FamilyFlag::Scripts) => self.scripts,
             Some(FamilyFlag::Target) => self.target,
@@ -96,10 +98,46 @@ struct FamilyStatus {
     generations: Option<(u64, u64)>,
     /// For the others, how the family is keyed — which is why it cannot be cleaned partially.
     kind: &'static str,
-    /// For a pack family: what its own indexes say. Repeated bytes are fragments a later pack stored
+    /// What one record of a pack family is called, in the detail line.
+    noun: &'static str,
+    /// The names its accounting uses in `--json`: one family's keys never collide with another's, so a
+    /// reader can pick its family out of the document without parsing the whole tree.
+    account: AccountKeys,
+    /// For a pack family: what its own indexes say. Repeated bytes are records a later pack stored
     /// again; removing them is what a repack would buy.
     fragments: Option<store::frags::Inventory>,
 }
+
+/// The `--json` keys one pack family accounts under.
+#[derive(Clone, Copy)]
+struct AccountKeys {
+    records: &'static str,
+    unique: &'static str,
+    repeated: &'static str,
+    live: &'static str,
+    live_bytes: &'static str,
+    dead_bytes: &'static str,
+}
+
+/// The fragment store's keys, which its gates parse.
+const FRAGMENT_KEYS: AccountKeys = AccountKeys {
+    records: "fragments",
+    unique: "unique_bytes",
+    repeated: "repeated_bytes",
+    live: "live_fragments",
+    live_bytes: "live_bytes",
+    dead_bytes: "dead_bytes",
+};
+
+/// The JIT store's keys: the same accounting, named for what its records are.
+const ENTRY_KEYS: AccountKeys = AccountKeys {
+    records: "entries",
+    unique: "unique_entry_bytes",
+    repeated: "repeated_entry_bytes",
+    live: "live_entries",
+    live_bytes: "live_entry_bytes",
+    dead_bytes: "dead_entry_bytes",
+};
 
 impl FamilyStatus {
     fn detail(&self) -> String {
@@ -113,9 +151,10 @@ impl FamilyStatus {
             None => match &self.fragments {
                 Some(inventory) => {
                     let mut detail = format!(
-                        "({} packs, {} fragments, {} unique, {} repeated",
+                        "({} packs, {} {}, {} unique, {} repeated",
                         self.items,
                         inventory.records,
+                        self.noun,
                         human_bytes(inventory.unique_bytes),
                         human_bytes(inventory.duplicate_bytes)
                     );
@@ -232,13 +271,14 @@ impl Status {
                             None => {
                                 out.string("kind", family.kind);
                                 if let Some(inventory) = &family.fragments {
-                                    out.number("fragments", inventory.records);
-                                    out.number("unique_bytes", inventory.unique_bytes);
-                                    out.number("repeated_bytes", inventory.duplicate_bytes);
+                                    let keys = family.account;
+                                    out.number(keys.records, inventory.records);
+                                    out.number(keys.unique, inventory.unique_bytes);
+                                    out.number(keys.repeated, inventory.duplicate_bytes);
                                     if let Some(liveness) = &inventory.liveness {
-                                        out.number("live_fragments", liveness.fragments);
-                                        out.number("live_bytes", liveness.bytes);
-                                        out.number("dead_bytes", liveness.dead_bytes);
+                                        out.number(keys.live, liveness.fragments);
+                                        out.number(keys.live_bytes, liveness.bytes);
+                                        out.number(keys.dead_bytes, liveness.dead_bytes);
                                     }
                                 }
                             }
@@ -294,13 +334,31 @@ pub fn status(root: &Path, live: Option<&HashSet<[u8; 32]>>) -> Status {
                 Shape::Pack => {
                     let (bytes, files) = du(&dir);
                     total += bytes;
+                    // Both pack families are content-keyed; what one record *is* differs, so the noun —
+                    // and with it the accounting keys — follows the family.
+                    let (kind, noun, account, inventory) = match family.flag {
+                        Some(FamilyFlag::Jit) => (
+                            "compiled entries, content-keyed packs",
+                            "entries",
+                            ENTRY_KEYS,
+                            store::jit::inventory_marked(live),
+                        ),
+                        _ => (
+                            "content-keyed packs",
+                            "fragments",
+                            FRAGMENT_KEYS,
+                            store::frags::inventory_marked(live),
+                        ),
+                    };
                     FamilyStatus {
                         path: name,
                         bytes,
                         items: files,
                         generations: None,
-                        kind: "content-keyed packs",
-                        fragments: Some(store::frags::inventory_marked(live)),
+                        kind,
+                        noun,
+                        account,
+                        fragments: Some(inventory),
                     }
                 }
                 Shape::Generation { ext } => {
@@ -316,6 +374,8 @@ pub fn status(root: &Path, live: Option<&HashSet<[u8; 32]>>) -> Status {
                         items: (current.len() + stale.len() + garbage.len()) as u64,
                         generations: Some((stale_bytes, garbage_bytes)),
                         kind: "content-keyed",
+                        noun: "fragments",
+                        account: FRAGMENT_KEYS,
                         fragments: None,
                     }
                 }
@@ -333,6 +393,8 @@ pub fn status(root: &Path, live: Option<&HashSet<[u8; 32]>>) -> Status {
                             Shape::Keyed => "content-keyed",
                             _ => "one artifact",
                         },
+                        noun: "fragments",
+                        account: FRAGMENT_KEYS,
                         fragments: None,
                     }
                 }

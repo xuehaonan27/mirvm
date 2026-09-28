@@ -2,17 +2,26 @@
 # run-expect: run the program and assert declared facts about it -- exit code, stdout against an
 # oracle file, and required or forbidden patterns in stdout/stderr. Use this for behaviour that is
 # not a comparison against native: a diagnosis, a statistics line, a deliberate failure mode.
-# fields: input(required) args guest env exit stdout stderr stderr_absent stdout_absent
+# fields: input(required) args guest env needs exit stdout stderr stderr_absent stdout_absent
 
-MODE_FIELDS="input args guest env exit stdout stdout_match stderr stderr_absent stdout_absent"
+MODE_FIELDS="input args guest env needs exit stdout stdout_match stderr stderr_absent stdout_absent"
 MODE_REQUIRED="input"
 
 mode_run() {
-    local input name want_exit
+    local input name want_exit needs
     input=$(field_required input)
     name=$CASE_NAME
     want_exit=$(field exit 0)
+    needs=$(field needs "")
+    needs=${needs//\{DATA\}/$DATA_DIR}
+    needs=${needs//\{ROOT\}/$REPO_ROOT}
     case_init
+
+    # An absent capability path is a host this case does not apply to, not a failure.
+    if [ -n "$needs" ] && [ ! -e "$needs" ]; then
+        skip "$name (needs absent: $needs)"
+        return 77
+    fi
     apply_env "$(field env "")"
 
     local -a pre=() guest=()
