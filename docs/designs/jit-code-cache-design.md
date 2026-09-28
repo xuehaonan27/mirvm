@@ -205,6 +205,14 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    already runs, but through frames the *link* placed and FDEs synthesized from the stored CFA
    programs.
 4. **Startup pre-linking by heat order**, then **adaptive tiers** on the D16 measurement ledger.
+   Pre-linking is implemented: one run records the order the compile worker was asked for functions in
+   (`cache/package-heat`, filed under the same key as the IR entry whose ids it names), and the next run
+   hands that order to the worker, which links what the store holds for it *before* it serves a request —
+   so the first call into a hot function finds a published entry instead of enqueueing a compile. The
+   wave goes through the ordinary load path, so a stale or unreadable entry is a miss exactly as it is
+   there, and `fib32-jit-cache` requires the warm run to prelink and count it. Adaptive tiers are not
+   built: the optimization level is already a jit-key dimension, and the policy that would use it is the
+   D16 ledger's to decide, per §2.6.
 
 Step 1 needs canonical fragment ids only as *names* (the encoding pass of
 [dep-sharing-design.md](dep-sharing-design.md) §6 step 2), not the fragment store; the two designs
@@ -214,7 +222,17 @@ share that keystone and are otherwise parallel.
 
 - The compile-time/code-size ledger (D16) that prices pre-linking scope and the small-function
   floor: below some size, linking may cost more than recompiling — measure, then set the floor.
-- Whether `.eh_frame` batches should merge across load waves or stay one section per wave.
+- Whether `.eh_frame` batches should merge across load waves or stay one section per wave. Measuring
+  says the question is not only about bytes: the compile worker registers each batch with
+  `__register_frame` while guest threads may already be unwinding, and libgcc mutates that list under a
+  lock it does not take on the lookup path. A panic that races a registration can therefore end as
+  `_URC_END_OF_STACK` instead of a caught exception. Registration is serialized with the other
+  registrations (one process lock) and always happens before the entries are published, which is what
+  the design asks for; closing the rest means either merging every batch into one section per Engine —
+  re-registered under a lock the unwinder also observes, which libgcc offers only through its private
+  `struct object` — or registering from a point the guest cannot be unwinding at. The repository gate
+  runs its tests on one thread for the same reason, and the item closes when the JIT can register
+  while guest threads unwind without that window.
 - The concrete adaptive-tier statistic (call count, self time, or the heat file's order) and its
   hysteresis — tuned from measurement, recorded here once chosen.
 - macOS pair items: `MAP_JIT`, `pthread_jit_write_protect_np`, the code-arena placement rules, and the
