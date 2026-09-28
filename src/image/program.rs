@@ -231,6 +231,23 @@ pub fn store(
     let Ok(manifest_bytes) = manifest::encode(&file) else {
         return false;
     };
+    if crate::options::a2_debug() {
+        // What the frozen extension is about: how many bytes the entry's data beside the fragments
+        // takes, and a digest of them, so two revisions can be compared without a differ.
+        let digest = module
+            .frozen
+            .as_ref()
+            .map(|snapshot| {
+                crate::utils::content::digest_hex(&*blake3::hash(snapshot.bytes()).as_bytes())
+            })
+            .unwrap_or_default();
+        eprintln!(
+            "[a2-debug] program entry: {} bodies -> fragments, frozen {} B digest {}",
+            records.len(),
+            frozen.1,
+            digest
+        );
+    }
     let header = Header {
         build_id: crate::options::build::BUILD_ID.to_string(),
         args: rustc_args.to_vec(),
