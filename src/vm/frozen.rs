@@ -51,11 +51,18 @@ impl FrozenSnapshot {
         &self.bytes
     }
 
+    /// The snapshot as the `(home, bytes)` pair a stored form carries. `link_base` is dropped because
+    /// it is always `home` (see [`Self::from_home_and_bytes`]); what a store needs to keep is the
+    /// domain, and the bytes that are laid out in it.
+    pub(crate) fn into_home_and_bytes(self) -> (usize, Vec<u8>) {
+        (self.home, self.bytes)
+    }
+
     /// Build a snapshot from the two fields its artifact wire form carries. `link_base` is left equal
     /// to `home`: only an arena at its fixed base can be snapshotted, so the link base equals the home
     /// domain by construction, and a snapshot that claimed otherwise would embed addresses that are
     /// wrong after re-mapping.
-    fn from_home_and_bytes(home: usize, bytes: Vec<u8>) -> Result<Self, String> {
+    pub(crate) fn from_home_and_bytes(home: usize, bytes: Vec<u8>) -> Result<Self, String> {
         if !is_valid_home(home) {
             return Err(format!("invalid frozen snapshot domain: {home:#x}"));
         }

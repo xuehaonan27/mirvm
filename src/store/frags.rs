@@ -8,6 +8,10 @@
 //! may serve an id an older build wrote — content addressing is self-consistent — while the manifests
 //! that name them stay generational.
 //!
+//! The format is not fragment-specific: a record is a byte string addressed by the BLAKE3 of its
+//! bytes, and a canonical body is one such string. The frozen-chunk family
+//! ([`crate::store::frozen`]) is the other user, whose records are raw region blocks.
+//!
 //! Fragments are stored in **packs**: append-only files holding one session's new fragments, each
 //! followed by a sorted index. One file per fragment is the obvious shape and the wrong one —
 //! measured on a small dependency closure a fragment averages ~131 bytes, so a filesystem block per
@@ -435,10 +439,16 @@ pub(crate) struct Liveness {
     pub dead_bytes: u64,
 }
 
-/// Size the family by its own indexes: distinct fragments, and what repeated publishing cost. Each
-/// distinct fragment is additionally scored against `live` when the caller marked the manifests.
+/// Size the fragment family by its own indexes. Each distinct fragment is additionally scored
+/// against `live` when the caller marked the manifests.
 pub(crate) fn inventory_marked(live: Option<&HashSet<[u8; 32]>>) -> Inventory {
-    let index = Index::load();
+    inventory_marked_in(&crate::store::FRAGS.dir(), live)
+}
+
+/// The same sizing over another directory: the pack format serves more than one family, and a family
+/// sized by a caller's own root (the collection tests) is why this is a directory and not a `Family`.
+pub(crate) fn inventory_marked_in(dir: &Path, live: Option<&HashSet<[u8; 32]>>) -> Inventory {
+    let index = Index::load_in(dir);
     let mut seen: HashMap<[u8; 32], u32> = HashMap::new();
     let mut inv = Inventory {
         packs: index.packs.len() as u64,

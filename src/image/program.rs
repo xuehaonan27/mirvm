@@ -103,7 +103,8 @@ pub fn lookup(
     // The bodies live in the fragment store, one canonical fragment per function, so a module this
     // edit did not change reuses the fragments the previous entry wrote instead of storing its own
     // copy. Everything else — the frozen area, the id-bearing tables, the asm recipes — is the
-    // manifest's, in the same form the closure and unit layers use.
+    // manifest's, in the same form the closure and unit layers use, and the frozen area is itself
+    // shared chunk by chunk.
     let mut f: manifest::File = postcard::from_bytes(manifest_bytes).ok()?;
     if !crate::store::entry::is_current_generation(&f.build_id)
         || f.base_key != base_key.unwrap_or_default()
@@ -111,6 +112,8 @@ pub fn lookup(
     {
         return None;
     }
+    // A chunk the store no longer holds is a miss, never a partial layer.
+    manifest::restore_frozen(&mut f).ok()?;
     let frozen = f
         .module
         .frozen
@@ -132,9 +135,14 @@ pub fn lookup(
     Some((f.module, instance))
 }
 
-/// Mark the fragments one L2 entry names, for collection. The entry is `[Header][manifest]`, so the
-/// marker skips exactly what the loader skips, and an entry from another build marks nothing.
-pub(crate) fn mark_live(path: &std::path::Path, live: &mut std::collections::HashSet<[u8; 32]>) {
+/// Mark the fragments and frozen chunks one L2 entry names, for collection. The entry is
+/// `[Header][manifest]`, so the marker skips exactly what the loader skips, and an entry from another
+/// build marks nothing.
+pub(crate) fn mark_live(
+    path: &std::path::Path,
+    fragments: &mut std::collections::HashSet<[u8; 32]>,
+    chunks: &mut std::collections::HashSet<[u8; 32]>,
+) {
     let Ok(data) = std::fs::read(path) else {
         return;
     };
@@ -147,7 +155,10 @@ pub(crate) fn mark_live(path: &std::path::Path, live: &mut std::collections::Has
     let Ok(file) = postcard::from_bytes::<manifest::File>(manifest_bytes) else {
         return;
     };
-    live.extend(file.funcs.iter().map(|record| record.fragment));
+    fragments.extend(file.funcs.iter().map(|record| record.fragment));
+    if let Some(frozen) = &file.frozen {
+        chunks.extend(frozen.chunks.iter().copied());
+    }
 }
 
 /// The lowering fingerprint a delta above this stack was built with: the base's, because every
@@ -212,42 +223,38 @@ pub fn store(
         return false;
     };
     let fp = lowering_fp(stack);
-    let file = manifest::FileRef {
-        build_id: crate::options::build::BUILD_ID,
-        base_key: base_key.unwrap_or_default(),
-        unit_key: None,
-        // The base key is checked exactly and the delta's ids start after the base's prefix, so there
-        // is no prefix of *manifest* layers to pin: the stack below is one image.
-        below: &[],
-        home: 0,
-        lowering_fp: fp,
-        extern_stamps: &[],
-        module,
-        funcs: &records,
-        tables: &tables,
-        fn_entry_syms: &[],
-        static_syms: &[],
+    // A program's frozen region is the part of it that most edits leave alone and every edit
+    // rewrites, so it goes to the chunk store rather than into the entry. The region comes back
+    // before the entry is published: this session keeps running the module it just wrote.
+    let mut chunks = crate::store::frags::Session::default();
+    let taken = manifest::take_frozen(module, &mut chunks);
+    let frozen_chunks = taken.as_ref().map_or(0, |f| f.reference().chunks.len());
+    let encoded = {
+        let file = manifest::FileRef {
+            build_id: crate::options::build::BUILD_ID,
+            base_key: base_key.unwrap_or_default(),
+            unit_key: None,
+            // The base key is checked exactly and the delta's ids start after the base's prefix, so
+            // there is no prefix of *manifest* layers to pin: the stack below is one image.
+            below: &[],
+            home: 0,
+            lowering_fp: fp,
+            extern_stamps: &[],
+            module,
+            funcs: &records,
+            tables: &tables,
+            fn_entry_syms: &[],
+            static_syms: &[],
+            frozen: taken.as_ref().map(manifest::Frozen::reference),
+        };
+        manifest::encode(&file)
     };
-    let Ok(manifest_bytes) = manifest::encode(&file) else {
+    if let Some(taken) = taken {
+        taken.put_back(module);
+    }
+    let Ok(manifest_bytes) = encoded else {
         return false;
     };
-    if crate::options::a2_debug() {
-        // What the frozen extension is about: how many bytes the entry's data beside the fragments
-        // takes, and a digest of them, so two revisions can be compared without a differ.
-        let digest = module
-            .frozen
-            .as_ref()
-            .map(|snapshot| {
-                crate::utils::content::digest_hex(&*blake3::hash(snapshot.bytes()).as_bytes())
-            })
-            .unwrap_or_default();
-        eprintln!(
-            "[a2-debug] program entry: {} bodies -> fragments, frozen {} B digest {}",
-            records.len(),
-            frozen.1,
-            digest
-        );
-    }
     let header = Header {
         build_id: crate::options::build::BUILD_ID.to_string(),
         args: rustc_args.to_vec(),
@@ -259,11 +266,29 @@ pub fn store(
     };
     buf.extend(manifest_bytes);
 
-    // The publish lock is held across the fragment pack and the entry that names it: a sweep between
-    // the two would see fragments no manifest names yet and drop them.
+    // Chunks and fragments first, the entry last: an entry that names what the store does not hold is
+    // an entry the loader refuses. Both publish locks are held across the whole sequence, because a
+    // sweep between the writes would see records no manifest names yet and drop them.
     let _publishing = crate::store::frags::publish_lock();
+    let chunks_store = crate::store::frozen::System::open();
+    let _chunk_publishing = chunks_store.publish_lock();
+    let Ok(chunk_published) = chunks_store.publish(chunks) else {
+        return false;
+    };
     if session.publish().is_err() {
         return false;
+    }
+    if crate::options::a2_debug() {
+        // What the entry stores beside its fragments: the frozen region, as the chunks it is cut into,
+        // and how much of that the store already held — which is what an edit's frozen bytes cost.
+        eprintln!(
+            "[a2-debug] program entry: {} bodies -> fragments, frozen {} B in {frozen_chunks} chunks \
+             ({} stored, {} deduped)",
+            records.len(),
+            frozen.1,
+            chunk_published.stored,
+            chunk_published.deduped
+        );
     }
     // Atomic publish: a reader sees either the previous entry or this one, never a half-written file.
     let path = entry_path(rustc_args);
