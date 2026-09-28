@@ -567,20 +567,34 @@ fn project_target(target: Target, unit: &Unit, symbols: &Symbols) -> Result<Bind
     }
 }
 
-/// The first frozen relocation whose target lies in a dependency-image spline slot that is not this
-/// layer's own — the one shape a stored layer cannot carry.
+/// The first link address in a *higher* dependency-image spline slot than this layer's own — the one
+/// shape a stored layer cannot carry.
 ///
-/// A layer's slot is its position in the unit table of the program that built it, and that position
-/// is a property of that program's dependency graph, not of the crate: a layer that points into a
-/// sibling slot is therefore only valid above the exact stack it was written over, which is more than
-/// a manifest claims. The base and delta regions are fixed addresses and always portable, and so is
-/// the layer's own slot, which the manifest records.
+/// A layer's slot is its position in the unit table of the program that built it, so a reference to a
+/// slot below is pinned by the layout the manifest records, and its own slot is where it will be
+/// restored. A reference *above* it would mean the layer reaches a layer that is not below it at all,
+/// which is wrong above every stack; frozen relocations and the TLS/GOT tables are what can express
+/// it, because the bodies and the id-bearing tables are canonical.
 pub(crate) fn cross_layer_target(module: &crate::vm::ir::Module, home: usize) -> Option<u64> {
     use crate::vm::ir::FrozenRelocTarget;
-    let other = |target: u64| {
-        let slot = crate::os_arch::addrspace::image_slot(target as usize)
-            .or_else(|| crate::os_arch::addrspace::image_code_slot(target as usize))?;
-        (slot != home).then_some(target)
+    let above = |target: u64| {
+        // The delta regions are this program's own: their bases are fixed, but what lives at an offset
+        // inside them is decided by this session's lowering, so a layer that carries one is not a layer
+        // another process can use.
+        let addr = target as usize;
+        let in_delta = |start: usize, end: usize| addr >= start && addr < end;
+        if in_delta(
+            crate::os_arch::addrspace::DELTA_FIXED_ADDR,
+            crate::os_arch::addrspace::IMAGE_SPLINE_BASE,
+        ) || in_delta(
+            crate::os_arch::addrspace::DELTA_CODE_ADDR,
+            crate::os_arch::addrspace::IMAGE_CODE_SPLINE,
+        ) {
+            return Some(target);
+        }
+        let slot = crate::os_arch::addrspace::image_slot(addr)
+            .or_else(|| crate::os_arch::addrspace::image_code_slot(addr))?;
+        (slot > home).then_some(target)
     };
     // Every table of the serialized module that holds a bare link address: a relocation's target, a
     // TLS template, and a GOT slot. Bodies and the id-bearing tables are canonical (`Tables`), but
@@ -589,14 +603,14 @@ pub(crate) fn cross_layer_target(module: &crate::vm::ir::Module, home: usize) ->
         .frozen_relocs
         .iter()
         .find_map(|reloc| match reloc.target {
-            FrozenRelocTarget::Frozen(addr) | FrozenRelocTarget::Entry(addr) => other(addr.0),
+            FrozenRelocTarget::Frozen(addr) | FrozenRelocTarget::Entry(addr) => above(addr.0),
         })
-        .or_else(|| module.tls.iter().find_map(|slot| other(slot.template.0)))
+        .or_else(|| module.tls.iter().find_map(|slot| above(slot.template.0)))
         .or_else(|| {
             module
                 .got_fixups
                 .iter()
-                .find_map(|fixup| other(fixup.addr.0))
+                .find_map(|fixup| above(fixup.addr.0))
         })
 }
 

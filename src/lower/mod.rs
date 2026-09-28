@@ -250,21 +250,37 @@ pub(crate) struct Split<'tcx> {
     /// Homes whose layer the stack already provides. A loaded layer is immutable: whatever it does
     /// not provide by symbol is residue, never an addition to that home.
     loaded: Vec<usize>,
+    /// Whether this session may lower a home at all.
+    ///
+    /// A session that loaded any layer may not: the set of homes a cold session creates depends on
+    /// which statics and instances it has to materialize, and a loaded layer answers some of those by
+    /// symbol, so lowering the rest would lay the units out differently from every manifest written
+    /// above them. Such a session keeps the loaded layers as its whole image stack and puts what they
+    /// do not provide in the delta — the same place residue already goes — and publishes nothing, so
+    /// the store stays consistent and converges from a cold start.
+    lower_homes: bool,
 }
 
 impl<'tcx> Split<'tcx> {
     fn activate(loaded: Vec<usize>) -> Self {
+        let lower_homes = loaded.is_empty();
         Split {
             homes: Vec::new(),
             current: None,
             populated: 0,
             loaded,
+            lower_homes,
         }
     }
 
     /// Whether the stack already provides this home's layer.
     fn is_loaded(&self, home: usize) -> bool {
         self.loaded.contains(&home)
+    }
+
+    /// Whether this session may lower a home (see [`Split::lower_homes`]).
+    pub(crate) fn lower_homes(&self) -> bool {
+        self.lower_homes
     }
 
     /// The home currently being lowered. Every caller is reached only from a home body.

@@ -155,6 +155,16 @@ impl ImageStack {
         self.images.is_empty()
     }
 
+    /// Drop every layer above `keep` and rebuild the union tables. The loader uses it when a layer the
+    /// store was expected to provide turns out unusable: a stack that was built against the layers
+    /// below it has to be used whole or not at all, because the ids and slots of what is left would
+    /// otherwise be the ones a *different* stack implied.
+    pub(crate) fn truncate(&mut self, keep: usize) {
+        let mut images = std::mem::take(&mut self.images);
+        images.truncate(keep);
+        *self = ImageStack::from_images(images);
+    }
+
     /// Bottom-most base image (used for the below-key/lowering-fp layered check when
     /// loading dependency images; `None` for an empty stack)
     pub fn base_image(&self) -> Option<&BaseImage> {

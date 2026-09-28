@@ -78,6 +78,7 @@ mod tests {
             build_id: build_id.to_string(),
             base_key: "base".into(),
             unit_key: None,
+            below: Vec::new(),
             home: 0,
             lowering_fp: (false, false, false),
             extern_stamps: Vec::new(),
