@@ -327,10 +327,17 @@ deleted and replaced, not phased out.
    run leaves 172 records and 19 281 B in `cache/frags`, the same 172 fragments and bytes the probe
    priced before it, and a cold and a warm run agree on the guest's output. Chunk-level dedup of the frozen
    region is priced by the same run only on one side of its ledger — the 24.1% it would go after — and
-   the missing number is how much of those bytes two revisions still share, which the next measurement
-   has to take before the extension can be judged. Heat-order-driven pack layout stays unmeasured: the
-   reader is a binary search per fragment, so what a layout can buy is sequential locality for the lazy
-   decode worker, and that needs a read-amplification counter first.
+   the missing number is how much of those bytes two revisions still share. The first instrument for it
+   is in place — `MIRVM_A2_DEBUG` prints the entry's frozen byte count and a digest of them on every
+   write — and it already answers the cheap question: for a small program (`frag-sharing`'s own crate,
+   25 B of frozen data) an edit changes the digest, so the frozen region is not byte-identical across
+   revisions and the extension's value has to come from *partial* overlap. Judging that needs a
+   chunk-level differ, which is the next instrument this item asks for; the 24.1% share above is what it
+   would be aimed at.
+   Heat-order-driven pack layout is unmeasured for a reason the reader states: a fragment is reached by
+   binary search plus one seek, so record order buys nothing for random access, and the only reader that
+   walks a layer in heat order is the lazy decode worker of a package's function table. Measuring that
+   worker's page locality is the precondition; until then the layout is not a lever.
 
 ## 7. Open items
 
