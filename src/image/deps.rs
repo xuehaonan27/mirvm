@@ -152,6 +152,9 @@ pub fn try_load(
     {
         return None;
     }
+    // The frozen bytes come back from the chunk store before anything about them can be checked: a
+    // chunk the store lost is a miss, never a layer with a hole in its region.
+    manifest::restore_frozen(&mut f).ok()?;
     // The frozen area must actually land in the spline k=0 domain the layer below expects: this
     // rejects a swapped file and a stolen domain alike.
     if !entry::frozen_at(&f.module, Some(crate::os_arch::addrspace::image_addr(0))) {
@@ -277,10 +280,11 @@ pub fn store_and_wrap(
             return degraded(bi);
         };
         let symbols = manifest::Symbols::of(stack.layers());
-        // The bodies and the id-bearing tables leave the module so the manifest can be serialized
-        // without either, and come back right after: this session keeps running the layer it just
-        // wrote.
+        // The bodies, the id-bearing tables and the frozen region leave the module so the manifest can
+        // be serialized without them, and come back right after: this session keeps running the layer
+        // it just wrote.
         let mut session = crate::store::frags::Session::default();
+        let mut chunks = crate::store::frags::Session::default();
         let projected = manifest::project_module(&mut bi.module, &unit, &symbols, &mut session)
             .and_then(|records| {
                 let tables =
@@ -292,6 +296,7 @@ pub fn store_and_wrap(
         {
             eprintln!("[a2-debug] closure manifest not written: {error}");
         }
+        let taken = manifest::take_frozen(&mut bi.module, &mut chunks);
         let manifest = projected.ok().map(|(records, tables)| {
             let mut fn_entry_syms = bi
                 .entry_by_sym
@@ -320,27 +325,35 @@ pub fn store_and_wrap(
                 tables: &tables,
                 fn_entry_syms: &fn_entry_syms,
                 static_syms: &static_syms,
+                frozen: taken.as_ref().map(manifest::Frozen::reference),
             };
             manifest::encode(&file).map(|bytes| (bytes, tables))
         });
+        if let Some(taken) = taken {
+            taken.put_back(&mut bi.module);
+        }
         let manifest_bytes = match manifest {
             Some(Ok((bytes, tables))) => Some((bytes, tables)),
             _ => None,
         };
-        // The publish lock is held across the fragment pack and the closure manifest that names it:
-        // a sweep between the two would see fragments no manifest names yet and drop them.
+        // The publish locks are held across the record packs and the closure manifest that names
+        // them: a sweep between the writes would see records no manifest names yet and drop them.
         let _publishing = crate::store::frags::publish_lock();
-        if let (Ok(()), Some((bytes, tables))) = (
-            session.publish().map(|published| {
-                if crate::options::a2_debug() {
-                    eprintln!(
-                        "[a2-debug] stored {} fragments ({} already shared), {} B",
-                        published.stored, published.deduped, published.bytes
-                    );
-                }
-            }),
-            manifest_bytes,
-        ) {
+        let chunks_store = crate::store::frozen::System::open();
+        let _chunk_publishing = chunks_store.publish_lock();
+        let held = chunks_store.publish(chunks).is_ok()
+            && session
+                .publish()
+                .map(|published| {
+                    if crate::options::a2_debug() {
+                        eprintln!(
+                            "[a2-debug] stored {} fragments ({} already shared), {} B",
+                            published.stored, published.deduped, published.bytes
+                        );
+                    }
+                })
+                .is_ok();
+        if let (true, Some((bytes, tables))) = (held, manifest_bytes) {
             let path = file_path(&key);
             let dir_exists = path
                 .parent()

@@ -147,6 +147,7 @@ pub(super) fn cache_main(
             "--base" => plan.base = true,
             "--ir" => plan.ir = true,
             "--frags" => plan.frags = true,
+            "--frozen" => plan.frozen = true,
             "--jit" => plan.jit = true,
             "--units" => plan.units = true,
             "--scripts" => plan.scripts = true,
@@ -166,9 +167,9 @@ pub(super) fn cache_main(
     let json = crate::options::output_format()? == crate::options::OutputFormat::Json;
     match sub.as_deref() {
         Some("status") => {
-            // Mark the fragments from the manifests before sizing the store: a fragment is live
-            // exactly when a current-generation manifest names it.
-            let live = crate::image::collect::live_fragments(&root);
+            // Mark the fragments and frozen chunks from the manifests before sizing the store: a
+            // record is live exactly when a current-generation manifest names it.
+            let live = crate::image::collect::live(&root);
             let report = crate::store::report::status(&root, Some(&live));
             print!("{}", if json { report.json() } else { report.text() });
             Ok(ExitCode::SUCCESS)
@@ -180,6 +181,7 @@ pub(super) fn cache_main(
                 || plan.base
                 || plan.ir
                 || plan.frags
+                || plan.frozen
                 || plan.jit
                 || plan.units
                 || plan.scripts

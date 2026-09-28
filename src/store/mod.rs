@@ -29,6 +29,7 @@
 
 pub(crate) mod entry;
 pub(crate) mod frags;
+pub(crate) mod frozen;
 pub(crate) mod jit;
 pub(crate) mod report;
 
@@ -98,6 +99,7 @@ pub(crate) enum FamilyFlag {
     Deps,
     Ir,
     Frags,
+    Frozen,
     Jit,
     Units,
     Scripts,
@@ -206,6 +208,11 @@ families! {
     // references by content address; a pack is reachable only through the manifests that name its
     // fragments.
     Cache FRAGS           "frags"           pack flag(Frags);
+    // owners: store::frozen, image::collect — one manifest's frozen region, cut into fixed-size
+    // chunks and addressed by their own content, so two revisions of a layer share the chunks they
+    // did not change. Reachable only through the manifests that name its chunks, and packed in the
+    // fragment store's own format.
+    Cache FROZEN          "frozen"          pack flag(Frozen);
     // owners: store::jit, vm::jit::compiler — one compiled symbol's code per `(fragment, jit-key)`,
     // reachable only through the fragment id it was compiled from. Packs like the fragment store, and
     // purged whole: what is live inside is the fragments the manifests name.

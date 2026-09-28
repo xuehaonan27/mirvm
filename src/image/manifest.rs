@@ -210,15 +210,18 @@ impl Symbols {
     }
 }
 
-/// The stored manifest of one layer: header material, the module without its bodies and without its
-/// id-bearing tables, and one record per function in FuncId order (parallel to
-/// `module.function_names`). The bodies are fragments in the shared store and the tables are
-/// canonical ([`Tables`]), so nothing in the file depends on how many layers happen to sit below it.
+/// The stored manifest of one layer: header material, the module without its bodies, its id-bearing
+/// tables and its frozen region, and one record per function in FuncId order (parallel to
+/// `module.function_names`). The bodies are fragments in the shared store, the tables are canonical
+/// ([`Tables`]) and the frozen region is chunk-addressed ([`FrozenRef`]), so nothing in the file
+/// depends on how many layers happen to sit below it, and two revisions of a layer share what they
+/// did not change.
 ///
-/// The same format serves both layers the design has: a **closure manifest** (one program's whole
-/// dependency closure, keyed by the `--extern` stamps, in `cache/deps/`) and a **unit manifest** (one
-/// crate, keyed by its rlib, in `cache/units/`). A unit manifest also records the spline slot its
-/// arenas were built in, so the loader restores them where their baked link addresses point.
+/// The same format serves all three layers the design has: a **closure manifest** (one program's whole
+/// dependency closure, keyed by the `--extern` stamps, in `cache/deps/`), a **unit manifest** (one
+/// crate, keyed by its rlib, in `cache/units/`) and an **L2 program entry** (one program's own delta,
+/// behind a header, in `cache/ir/`). A unit manifest also records the spline slot its arenas were
+/// built in, so the loader restores them where their baked link addresses point.
 #[derive(Deserialize, Serialize)]
 pub(crate) struct File {
     pub build_id: String,
@@ -247,6 +250,20 @@ pub(crate) struct File {
     pub tables: Tables,
     pub fn_entry_syms: Vec<(Box<str>, u64)>,
     pub static_syms: Vec<(Box<str>, u64)>,
+    /// The layer's frozen region as chunk addresses, when the writer stored it that way. `None` means
+    /// the module carries the region itself. Whatever the answer, [`restore_frozen`] puts the bytes
+    /// back before the module is used.
+    pub frozen: Option<FrozenRef>,
+}
+
+/// A layer's frozen region in the manifest's own terms: the content addresses of its chunks, the
+/// region's length (the last chunk is short, so the length is not implied) and the fixed base the
+/// bytes are laid out at, which is what their baked addresses mean.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FrozenRef {
+    pub home: u64,
+    pub len: u64,
+    pub chunks: Vec<[u8; 32]>,
 }
 
 /// Borrowed shape for writing (`ir::Module` is not `Clone`).
@@ -264,12 +281,83 @@ pub(crate) struct FileRef<'a> {
     pub tables: &'a Tables,
     pub fn_entry_syms: &'a [(Box<str>, u64)],
     pub static_syms: &'a [(Box<str>, u64)],
+    pub frozen: Option<&'a FrozenRef>,
 }
 
 /// Serialize one manifest. The bytes are what a unit manifest is named by, so the caller that wants a
 /// content address hashes exactly these.
 pub(crate) fn encode(file: &FileRef<'_>) -> Result<Vec<u8>, String> {
     postcard::to_stdvec(file).map_err(|error| error.to_string())
+}
+
+/// A layer's frozen region, taken out of its module so the manifest can name chunks instead of
+/// carrying the bytes. The region is the layer's own arena and the session keeps running it, so the
+/// caller must put it back — [`put_back`](Self::put_back) — before the module is used again.
+pub(crate) struct Frozen {
+    reference: FrozenRef,
+    bytes: Vec<u8>,
+}
+
+impl Frozen {
+    /// The reference the manifest carries in the region's place.
+    pub(crate) fn reference(&self) -> &FrozenRef {
+        &self.reference
+    }
+
+    /// Put the region back where it came from: the bytes are the ones that were taken, so the arena
+    /// this session runs is exactly the one it lowered.
+    pub(crate) fn put_back(self, module: &mut crate::vm::ir::Module) {
+        match crate::vm::frozen::FrozenSnapshot::from_home_and_bytes(
+            self.reference.home as usize,
+            self.bytes,
+        ) {
+            Ok(snapshot) => module.frozen = Some(snapshot),
+            Err(error) => {
+                // A region that cannot be rebuilt is a bug in this process, not a cache decision: say
+                // so rather than run a module whose statics have no home.
+                if crate::options::a2_debug() {
+                    eprintln!("[a2-debug] frozen region not put back: {error}");
+                }
+            }
+        }
+    }
+}
+
+/// Take `module`'s frozen region for a manifest, staging its chunks in `session` (published to
+/// [`crate::store::frozen`]). `None` when the module has no region, which is a miss for every layer
+/// that needs one.
+pub(crate) fn take_frozen(
+    module: &mut crate::vm::ir::Module,
+    session: &mut crate::store::frags::Session,
+) -> Option<Frozen> {
+    let snapshot = module.frozen.take()?;
+    let (home, bytes) = snapshot.into_home_and_bytes();
+    let chunks = crate::store::frozen::split(&bytes, session);
+    Some(Frozen {
+        reference: FrozenRef {
+            home: home as u64,
+            len: bytes.len() as u64,
+            chunks,
+        },
+        bytes,
+    })
+}
+
+/// Put a decoded manifest's frozen region back into its module.
+///
+/// A chunk the store no longer holds, or a length the chunks do not reassemble to, is an error the
+/// caller turns into a miss: a region missing a byte is wrong at every address in it. A manifest
+/// whose module already carries its region — the writer stored it whole — needs nothing.
+pub(crate) fn restore_frozen(file: &mut File) -> Result<(), String> {
+    let Some(reference) = file.frozen.as_ref() else {
+        return Ok(());
+    };
+    let bytes = crate::store::frozen::System::open().read(&reference.chunks, reference.len)?;
+    file.module.frozen = Some(crate::vm::frozen::FrozenSnapshot::from_home_and_bytes(
+        reference.home as usize,
+        bytes,
+    )?);
+    Ok(())
 }
 
 /// Project every function of `module` into `session` (the fragment store's staging set) and return the

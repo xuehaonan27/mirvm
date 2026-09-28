@@ -305,7 +305,13 @@ fn load_one(
         reason("the unit's rlib is not the one it was built from");
         return None;
     }
-    // The frozen bytes must land where the manifest's baked link addresses point.
+    // The frozen bytes come back from the chunk store first — a chunk the store lost is a miss, never
+    // a layer with a hole in its region — and they must land where the manifest's baked link
+    // addresses point.
+    if let Err(error) = manifest::restore_frozen(&mut f) {
+        reason(&error);
+        return None;
+    }
     if !entry::frozen_at(
         &f.module,
         Some(crate::os_arch::addrspace::image_addr(f.home)),
@@ -524,6 +530,7 @@ pub(crate) fn store(
     );
     let symbols = manifest::Symbols::of(stack.layers());
     let mut session = crate::store::frags::Session::default();
+    let mut chunks = crate::store::frags::Session::default();
     let records = match manifest::project_module(&mut bi.module, &unit_view, &symbols, &mut session)
     {
         Ok(records) => records,
@@ -558,29 +565,40 @@ pub(crate) fn store(
                 return super::deps::degraded(bi);
             }
         };
-    let file = manifest::FileRef {
-        build_id: crate::options::build::BUILD_ID,
-        base_key: &base.key,
-        unit_key: Some(&unit_key),
-        below: &stack.layers().iter().map(layer_counts).collect::<Vec<_>>(),
-        home,
-        lowering_fp: fp,
-        extern_stamps: std::slice::from_ref(&stamp),
-        module: &bi.module,
-        funcs: &records,
-        fn_entry_syms: &fn_entry_syms,
-        static_syms: &static_syms,
-        tables: &tables,
+    let taken = manifest::take_frozen(&mut bi.module, &mut chunks);
+    let encoded = {
+        let file = manifest::FileRef {
+            build_id: crate::options::build::BUILD_ID,
+            base_key: &base.key,
+            unit_key: Some(&unit_key),
+            below: &stack.layers().iter().map(layer_counts).collect::<Vec<_>>(),
+            home,
+            lowering_fp: fp,
+            extern_stamps: std::slice::from_ref(&stamp),
+            module: &bi.module,
+            funcs: &records,
+            fn_entry_syms: &fn_entry_syms,
+            static_syms: &static_syms,
+            tables: &tables,
+            frozen: taken.as_ref().map(manifest::Frozen::reference),
+        };
+        manifest::encode(&file)
     };
-    let Ok(bytes) = manifest::encode(&file) else {
+    if let Some(taken) = taken {
+        taken.put_back(&mut bi.module);
+    }
+    let Ok(bytes) = encoded else {
         return super::deps::degraded(bi);
     };
-    // Fragments first: a manifest that names a fragment the store does not hold is a manifest the
-    // loader will refuse. The publish lock is held across both writes: a sweep between them would see
-    // fragments no manifest names yet and drop them.
+    // Chunks and fragments first, the manifest last: a manifest that names what the store does not
+    // hold is a manifest the loader will refuse. Both publish locks are held across the whole
+    // sequence, because a sweep between the writes would see records no manifest names yet and drop
+    // them.
     let dir = crate::store::UNITS.dir();
     let _publishing = crate::store::frags::publish_lock();
-    if session.publish().is_err() {
+    let chunks_store = crate::store::frozen::System::open();
+    let _chunk_publishing = chunks_store.publish_lock();
+    if chunks_store.publish(chunks).is_err() || session.publish().is_err() {
         return super::deps::degraded(bi);
     }
     if std::fs::create_dir_all(&dir).is_err() {

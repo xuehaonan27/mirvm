@@ -8,7 +8,6 @@
 //! Each report is data first: `text` and `json` are two renderings of one structure, so a field can
 //! neither exist in one and be missing from the other, nor be computed twice.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::diag::json::{self, Writer};
@@ -25,6 +24,7 @@ pub struct Purge {
     pub base: bool,
     pub ir: bool,
     pub frags: bool,
+    pub frozen: bool,
     pub jit: bool,
     pub units: bool,
     pub scripts: bool,
@@ -46,6 +46,7 @@ impl Purge {
             Some(FamilyFlag::Deps) => self.deps,
             Some(FamilyFlag::Ir) => self.ir,
             Some(FamilyFlag::Frags) => self.frags,
+            Some(FamilyFlag::Frozen) => self.frozen,
             Some(FamilyFlag::Jit) => self.jit,
             Some(FamilyFlag::Units) => self.units,
             Some(FamilyFlag::Scripts) => self.scripts,
@@ -127,6 +128,16 @@ const FRAGMENT_KEYS: AccountKeys = AccountKeys {
     live: "live_fragments",
     live_bytes: "live_bytes",
     dead_bytes: "dead_bytes",
+};
+
+/// The frozen-chunk store's keys: the same accounting, named for what its records are.
+const CHUNK_KEYS: AccountKeys = AccountKeys {
+    records: "chunks",
+    unique: "unique_chunk_bytes",
+    repeated: "repeated_chunk_bytes",
+    live: "live_chunks",
+    live_bytes: "live_chunk_bytes",
+    dead_bytes: "dead_chunk_bytes",
 };
 
 /// The JIT store's keys: the same accounting, named for what its records are.
@@ -319,7 +330,7 @@ impl Status {
 ///
 /// `live` is the fragment mark (`image::collect`), or `None` when the caller did not mark: the
 /// fragment family then reports its own size without a liveness split.
-pub fn status(root: &Path, live: Option<&HashSet<[u8; 32]>>) -> Status {
+pub fn status(root: &Path, live: Option<&crate::image::collect::Live>) -> Status {
     let mut total = 0u64;
     let mut total_stale = 0u64;
     let mut claimed: Vec<String> = Vec::new();
@@ -334,20 +345,27 @@ pub fn status(root: &Path, live: Option<&HashSet<[u8; 32]>>) -> Status {
                 Shape::Pack => {
                     let (bytes, files) = du(&dir);
                     total += bytes;
-                    // Both pack families are content-keyed; what one record *is* differs, so the noun —
-                    // and with it the accounting keys — follows the family.
+                    // Every pack family is content-keyed; what one record *is* differs, so the noun —
+                    // and with it the accounting keys — follows the family, as does the mark its
+                    // liveness is scored against.
                     let (kind, noun, account, inventory) = match family.flag {
                         Some(FamilyFlag::Jit) => (
                             "compiled entries, content-keyed packs",
                             "entries",
                             ENTRY_KEYS,
-                            store::jit::inventory_marked(live),
+                            store::jit::inventory_marked(live.map(|live| &live.fragments)),
+                        ),
+                        Some(FamilyFlag::Frozen) => (
+                            "frozen chunks, content-keyed packs",
+                            "chunks",
+                            CHUNK_KEYS,
+                            store::frags::inventory_marked_in(&dir, live.map(|live| &live.chunks)),
                         ),
                         _ => (
                             "content-keyed packs",
                             "fragments",
                             FRAGMENT_KEYS,
-                            store::frags::inventory_marked(live),
+                            store::frags::inventory_marked(live.map(|live| &live.fragments)),
                         ),
                     };
                     FamilyStatus {
