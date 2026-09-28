@@ -56,16 +56,6 @@ pub(crate) fn image_slot(addr: usize) -> Option<usize> {
         .filter(|slot| *slot < IMAGE_SPLINE_COUNT)
 }
 
-/// The dependency-image code spline slot an address occupies, if it is one. The mirror of
-/// [`image_slot`] for entry-stub addresses: the two splines are separate, so a code address needs its
-/// own classification.
-pub(crate) fn image_code_slot(addr: usize) -> Option<usize> {
-    addr.checked_sub(IMAGE_CODE_SPLINE)
-        .filter(|offset| offset.is_multiple_of(IMAGE_CODE_STEP))
-        .map(|offset| offset / IMAGE_CODE_STEP)
-        .filter(|slot| *slot < IMAGE_CODE_COUNT)
-}
-
 /// Frozen-region base -> this module's code-region base (same-k invariant: delta↔delta,
 /// base↔base, image_spline(k)↔image_code(k)). Non-whitelisted frozen base => None
 /// (engine invariant violation).

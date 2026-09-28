@@ -15,7 +15,8 @@
 pub const STUB_STRIDE: u64 = crate::arch::asmstub::STUB_STRIDE;
 
 /// Code-region capacity (virtually reserved; one stub entry per instance, 64 MiB >> any real workload).
-const CODE_CAP: usize = 64 << 20;
+/// A region owns the addresses in `[base, base + CODE_CAP)`.
+pub(crate) const CODE_CAP: usize = 64 << 20;
 
 /// Code-region base values, spline parameters, and whitelist criteria are centralized in
 /// `crate::os_arch::addrspace` (this pair's fixed-address layout).
