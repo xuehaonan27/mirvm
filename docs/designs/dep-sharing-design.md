@@ -319,8 +319,13 @@ deleted and replaced, not phased out.
    fragments, 19 281 B canonical beside 6 120 B of frozen data (24.1% of its unit). Editing the
    program (one new function, one changed caller) keeps **171 of those 172 fragments, 99.4% retention
    and 98.3% of the union**, so an L2 entry written as a manifest would add one new fragment and reuse
-   the rest of the previous entry's bodies instead of carrying its own copy: the trigger for that
-   extension has fired, and it is the next thing this line implements. Chunk-level dedup of the frozen
+   the rest of the previous entry's bodies instead of carrying its own copy: the trigger fired, and the
+   extension is implemented. A program entry is now the same manifest of fragments the other two layers
+   use — bodies in `cache/frags`, frozen bytes, id-bearing tables and asm recipes behind the entry's
+   header — and collection marks the fragments an entry names, so an L2 entry keeps its bodies alive
+   exactly like the closure and unit manifests do. Measured after the change: a clean `frag-sharing`
+   run leaves 172 records and 19 281 B in `cache/frags`, the same 172 fragments and bytes the probe
+   priced before it, and a cold and a warm run agree on the guest's output. Chunk-level dedup of the frozen
    region is priced by the same run only on one side of its ledger — the 24.1% it would go after — and
    the missing number is how much of those bytes two revisions still share, which the next measurement
    has to take before the extension can be judged. Heat-order-driven pack layout stays unmeasured: the
