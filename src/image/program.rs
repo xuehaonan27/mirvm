@@ -13,12 +13,14 @@
 //! frozen.rs); missing required .so is a miss (self-heal rather than runtime error).
 //! `MIRVM_NO_IR_CACHE=1` bypasses the cache entirely.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
 use crate::depinfo::InputManifest;
+use crate::image::manifest;
 use crate::vm::instance::Instance;
 use crate::vm::ir;
 
@@ -82,14 +84,15 @@ fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>
 /// overwrite via asm_sites before executing.
 pub fn lookup(
     rustc_args: &[String],
-    base_key: Option<&str>,
-    below: crate::vm::verify::Below<'_>,
+    stack: &crate::image::ImageStack,
 ) -> Option<(ir::Module, Instance)> {
     if disabled() {
         return None;
     }
+    let base_key = stack.key();
+    let below = stack.below();
     let data = std::fs::read(entry_path(rustc_args)).ok()?;
-    let (header, module_bytes) = postcard::take_from_bytes::<Header>(&data).ok()?;
+    let (header, manifest_bytes) = postcard::take_from_bytes::<Header>(&data).ok()?;
     if !header_matches(&header, rustc_args, base_key) {
         return None;
     }
@@ -97,17 +100,63 @@ pub fn lookup(
     if !header.inputs.is_current() {
         return None;
     }
-    // Module deserialization; the frozen image is mapped by `revive`, and failure (base occupied
-    // etc.) → miss
-    let mut module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
+    // The bodies live in the fragment store, one canonical fragment per function, so a module this
+    // edit did not change reuses the fragments the previous entry wrote instead of storing its own
+    // copy. Everything else — the frozen area, the id-bearing tables, the asm recipes — is the
+    // manifest's, in the same form the closure and unit layers use.
+    let mut f: manifest::File = postcard::from_bytes(manifest_bytes).ok()?;
+    if !crate::store::entry::is_current_generation(&f.build_id)
+        || f.base_key != base_key.unwrap_or_default()
+        || f.lowering_fp != lowering_fp(stack)
+    {
+        return None;
+    }
+    let frozen = f
+        .module
+        .frozen
+        .as_ref()
+        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))?;
+    let unit = crate::image::deps::unit_of(&[], below.prefix, &f.module, 0, frozen);
+    let symbols = manifest::Symbols::of(stack.layers());
+    // A missing fragment or an unresolvable symbol is a miss, never a partial module.
+    manifest::rehydrate_module(&mut f.module, &f.funcs, &unit, &symbols).ok()?;
+    f.tables.restore(&mut f.module, &unit, &symbols).ok()?;
     // Correct shape does not guarantee index and frame range safety, so a bad cache is a miss that
     // the cold path self-heals. Materialized .so files (native archive / global_asm) that were
     // removed are a miss for the same reason.
-    let instance = crate::store::entry::revive(&mut module, below)?;
-    if !crate::store::entry::native_libs_present(&module) {
+    let mut instance = crate::store::entry::revive(&mut f.module, below)?;
+    instance.asm_stub_addrs = crate::lower::asm::materialize(&f.module.asm_sites);
+    if !crate::store::entry::native_libs_present(&f.module) {
         return None;
     }
-    Some((module, instance))
+    Some((f.module, instance))
+}
+
+/// Mark the fragments one L2 entry names, for collection. The entry is `[Header][manifest]`, so the
+/// marker skips exactly what the loader skips, and an entry from another build marks nothing.
+pub(crate) fn mark_live(path: &std::path::Path, live: &mut std::collections::HashSet<[u8; 32]>) {
+    let Ok(data) = std::fs::read(path) else {
+        return;
+    };
+    let Ok((header, manifest_bytes)) = postcard::take_from_bytes::<Header>(&data) else {
+        return;
+    };
+    if !crate::store::entry::is_current_generation(&header.build_id) {
+        return;
+    }
+    let Ok(file) = postcard::from_bytes::<manifest::File>(manifest_bytes) else {
+        return;
+    };
+    live.extend(file.funcs.iter().map(|record| record.fragment));
+}
+
+/// The lowering fingerprint a delta above this stack was built with: the base's, because every
+/// absolute the delta embeds is laid out against it.
+fn lowering_fp(stack: &crate::image::ImageStack) -> (bool, bool, bool) {
+    stack
+        .base_image()
+        .map(|base| base.lowering_fp)
+        .unwrap_or((false, false, false))
 }
 
 /// Cold-path store (clean state right after lower finishes and before guest runs). Returns whether
@@ -115,14 +164,15 @@ pub fn lookup(
 pub fn store(
     tcx: TyCtxt<'_>,
     rustc_args: &[String],
-    module: &ir::Module,
+    module: &mut ir::Module,
     instance: &Instance,
-    base_key: Option<&str>,
-    below: crate::vm::verify::Below<'_>,
+    stack: &crate::image::ImageStack,
 ) -> bool {
     if disabled() {
         return false;
     }
+    let base_key = stack.key();
+    let below = stack.below();
     if crate::vm::verify::module_below(module, instance, below).is_err() {
         return false;
     }
@@ -138,7 +188,49 @@ pub fn store(
     let Some(inputs) = InputManifest::collect(tcx) else {
         return false; // some input could not be stamped (missing/unusual) — prefer not to cache
     };
+    let Some(frozen) = module
+        .frozen
+        .as_ref()
+        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))
+    else {
+        return false;
+    };
 
+    // The bodies move into the fragment store — which is what makes this entry incremental across an
+    // edit, and what lets two programs share a body they both have — and the manifest keeps the rest.
+    // The segments mirror the closure layer's exactly, because the delta *is* the closure above the
+    // base in this track.
+    let unit = crate::image::deps::unit_of(&[], below.prefix, module, 0, frozen);
+    let symbols = manifest::Symbols::of(stack.layers());
+    let mut session = crate::store::frags::Session::default();
+    let projected =
+        manifest::project_module(module, &unit, &symbols, &mut session).and_then(|records| {
+            let tables = manifest::Tables::capture(module, &unit, &symbols, &HashMap::new())?;
+            Ok((records, tables))
+        });
+    let Ok((records, tables)) = projected else {
+        return false;
+    };
+    let fp = lowering_fp(stack);
+    let file = manifest::FileRef {
+        build_id: crate::options::build::BUILD_ID,
+        base_key: base_key.unwrap_or_default(),
+        unit_key: None,
+        // The base key is checked exactly and the delta's ids start after the base's prefix, so there
+        // is no prefix of *manifest* layers to pin: the stack below is one image.
+        below: &[],
+        home: 0,
+        lowering_fp: fp,
+        extern_stamps: &[],
+        module,
+        funcs: &records,
+        tables: &tables,
+        fn_entry_syms: &[],
+        static_syms: &[],
+    };
+    let Ok(manifest_bytes) = manifest::encode(&file) else {
+        return false;
+    };
     let header = Header {
         build_id: crate::options::build::BUILD_ID.to_string(),
         args: rustc_args.to_vec(),
@@ -148,11 +240,14 @@ pub fn store(
     let Ok(mut buf) = postcard::to_stdvec(&header) else {
         return false;
     };
-    match postcard::to_stdvec(module) {
-        Ok(m) => buf.extend(m),
-        Err(_) => return false,
-    }
+    buf.extend(manifest_bytes);
 
+    // The publish lock is held across the fragment pack and the entry that names it: a sweep between
+    // the two would see fragments no manifest names yet and drop them.
+    let _publishing = crate::store::frags::publish_lock();
+    if session.publish().is_err() {
+        return false;
+    }
     // Atomic publish: a reader sees either the previous entry or this one, never a half-written file.
     let path = entry_path(rustc_args);
     let Some(dir) = path.parent() else {
@@ -161,7 +256,13 @@ pub fn store(
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
-    crate::store::publish_bytes(&path, &buf).is_ok()
+    if crate::store::publish_bytes(&path, &buf).is_err() {
+        return false;
+    }
+    // The entry is written: put this module's own ids back, so the session keeps running the module it
+    // just wrote.
+    let _ = tables.restore(module, &unit, &symbols);
+    true
 }
 
 #[cfg(test)]

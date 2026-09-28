@@ -399,10 +399,9 @@ impl Callbacks for MirvmCallbacks {
                 && crate::image::program::store(
                     tcx,
                     &self.rustc_args,
-                    self.module.as_ref().expect("just set"),
+                    self.module.as_mut().expect("just set"),
                     self.instance.as_ref().expect("just set"),
-                    self.stack.key(),
-                    self.stack.below(),
+                    &self.stack,
                 )
             {
                 self.timing.cache_store = Some(t_store.elapsed());
@@ -831,13 +830,11 @@ pub(crate) fn run_driver(
             }
         }
     }
-    let base_key = stack.key().map(str::to_owned);
     // L2 warm path: a hit skips the entire rustc session (frontend + metadata + mono + lower).
     // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
     // against the key chain.
     if !dump_mir
-        && let Some((mut module, mut instance)) =
-            crate::image::program::lookup(&rustc_args, base_key.as_deref(), stack.below())
+        && let Some((mut module, mut instance)) = crate::image::program::lookup(&rustc_args, &stack)
     {
         // A cache hit has no compiler session; seal that empty phase before
         // MIRVM control and guest execution begin.
