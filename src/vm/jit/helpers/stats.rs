@@ -79,6 +79,7 @@ pub(crate) fn stat_value(name: &str) -> u64 {
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 static CACHE_REFUSED: AtomicU64 = AtomicU64::new(0);
+static CACHE_PRELINKED: AtomicU64 = AtomicU64::new(0);
 
 /// An entry was linked and published from the store.
 pub(crate) fn cache_hit() {
@@ -93,6 +94,12 @@ pub(crate) fn cache_miss() {
 /// The store held something that could not be used, which is why the function was compiled.
 pub(crate) fn cache_refused() {
     CACHE_REFUSED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Entries linked from the heat order before any request was served: what warmup traded a compile
+/// wave for.
+pub(crate) fn cache_prelinked(count: u64) {
+    CACHE_PRELINKED.fetch_add(count, Ordering::Relaxed);
 }
 
 /// The store counters, for a diagnostic that must name them.
@@ -115,7 +122,8 @@ extern "C" fn stat_dump() {
     let (hits, misses, refused) = cache_counts();
     if hits + misses + refused != 0 {
         line.push_str(&format!(
-            " cache_hits={hits} cache_misses={misses} cache_refused={refused}"
+            " cache_hits={hits} cache_misses={misses} cache_refused={refused} cache_prelinked={}",
+            CACHE_PRELINKED.load(Ordering::Relaxed)
         ));
     }
     eprintln!("{line}");

@@ -159,9 +159,11 @@ pub fn start(shared: &std::sync::Arc<Shared>) {
     // The worker compiles for the Engine's frozen domain, so the code it
     // publishes lands in the slot set dispatch will read for that domain.
     let worker_domain = shared.domain;
+    // What a previous run of this program found hot, and where this run leaves its own order.
+    let worker_heat = shared.heat.get().cloned().unwrap_or_default();
     let worker = std::thread::Builder::new()
         .name("mirvm-jit".into())
-        .spawn(move || worker(worker_shared, rx, worker_domain));
+        .spawn(move || worker(worker_shared, rx, worker_domain, worker_heat));
     *shared.jit.worker.lock().unwrap() = worker.ok();
 }
 
@@ -176,9 +178,21 @@ pub fn stop(shared: &Shared) {
     }
 }
 
-pub(super) fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: CodeDomain) {
+pub(super) fn worker(
+    shared: std::sync::Arc<Shared>,
+    rx: Receiver<u32>,
+    domain: CodeDomain,
+    heat: crate::vm::jit::Heat,
+) {
     let dbg = crate::options::jit_debug();
     let mut c = Compiler::with_domain(&shared, domain);
+    // Before a single request is served: link what the store already holds for the functions the last
+    // run found hot. The first call into one of them then finds a published entry instead of enqueueing
+    // a compile, which is the whole point of a heat order.
+    let mut observed: Vec<u32> = Vec::new();
+    if c.jit_cache {
+        c.prelink(&heat.order);
+    }
     while let Ok(func) = rx.recv() {
         if shared.jit.stopping.load(Ordering::Acquire) {
             break;
@@ -190,6 +204,7 @@ pub(super) fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: 
             );
         }
         c.compile(func);
+        observed.push(func);
         if dbg {
             let s = shared.jit.slots[func as usize].load(Ordering::Acquire);
             let ok = s != 0 && s != FAIL_SENTINEL;
@@ -208,6 +223,8 @@ pub(super) fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: 
             }
         }
     }
+    // The order requests arrived in is this program's heat order for the next run.
+    heat.write(&observed);
     // Whatever the batch still holds is worth a file: the next session can only reuse what is in the
     // store, and a worker that exits with entries staged would lose them.
     if c.jit_cache {

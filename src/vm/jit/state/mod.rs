@@ -39,6 +39,60 @@ pub(crate) enum CodeDomain {
     Trace,
 }
 
+/// The function heat order a session starts with, and where it leaves its own.
+///
+/// A program's hot functions are not a mystery: the order its last run asked the compiler for them in
+/// is close to the order the next run will want them, so one run learns it and the next pre-links it —
+/// warmup becomes one link wave instead of a compile wave. Nothing here is semantics: an order that is
+/// absent, stale or partly stale costs pre-linking and nothing else, because every entry is still
+/// checked against the fragment and key it was written for.
+#[derive(Clone, Debug, Default)]
+pub struct Heat {
+    /// Where this session writes the order it observed; `None` writes nothing.
+    pub path: Option<std::path::PathBuf>,
+    /// The ids a previous run asked for, hottest first.
+    pub order: Vec<u32>,
+}
+
+impl Heat {
+    /// Read the order a previous run left at `path`.
+    pub fn read(path: std::path::PathBuf) -> Heat {
+        let order = std::fs::read_to_string(&path)
+            .map(|text| {
+                text.split_ascii_whitespace()
+                    .filter_map(|value| value.parse::<u32>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Heat {
+            path: Some(path),
+            order,
+        }
+    }
+
+    /// Record this session's observed order, hottest first. Best effort: a heat file that cannot be
+    /// written only costs the next run its prediction.
+    pub fn write(&self, observed: &[u32]) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if observed.is_empty() {
+            return;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let body = observed
+            .iter()
+            .filter(|id| seen.insert(**id))
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = crate::store::publish_bytes(path, body.as_bytes());
+    }
+}
+
 /// Failure sentinel for `MIRVM_JIT_SYNC` verification mode: when compilation of an
 /// eligible function fails, the worker stores this into the slots and the sync waiter
 /// aborts loudly on it. It lies outside the normal value range (0 = not compiled, keep

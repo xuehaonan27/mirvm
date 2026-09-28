@@ -39,11 +39,32 @@ fn disabled() -> bool {
 }
 
 fn entry_path(rustc_args: &[String]) -> PathBuf {
+    crate::store::IR
+        .dir()
+        .join(format!("{}.bin", key_of(rustc_args).digest()))
+}
+
+/// The key of one program's IR, which is what its heat order is filed under.
+fn key_of(rustc_args: &[String]) -> crate::store::entry::Key {
     let mut key = crate::store::entry::Key::new();
     for arg in rustc_args {
         key.part(arg);
     }
-    crate::store::IR.dir().join(format!("{}.bin", key.digest()))
+    key
+}
+
+/// The heat order of this program: where a previous run left its hot functions, and where this run
+/// leaves its own.
+///
+/// It is filed under the same key as the IR entry, because the function ids it names are ids of that
+/// module: an order read against another module would name other functions, which the entry check
+/// turns into a miss rather than a wrong link.
+pub(crate) fn heat(rustc_args: &[String]) -> crate::vm::jit::Heat {
+    crate::vm::jit::Heat::read(
+        crate::store::PACKAGE_HEAT
+            .dir()
+            .join(format!("{}.order", key_of(rustc_args).digest())),
+    )
 }
 
 /// Header triple equality: build id (stale across builds) + full args replay (hash-collision proof) +
