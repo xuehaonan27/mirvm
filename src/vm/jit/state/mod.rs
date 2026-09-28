@@ -33,7 +33,7 @@ mod tests;
 ///
 /// Defined here rather than beside the compiler because the guest dispatch path
 /// reads the domain even in builds without the code generator.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CodeDomain {
     Plain,
     Trace,

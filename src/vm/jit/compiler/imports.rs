@@ -357,8 +357,12 @@ impl<'a> Compiler<'a> {
             values,
             sites: Vec::new(),
             site_data: Vec::new(),
+            artifacts: Vec::new(),
+            reload: crate::options::jit_reload(),
             #[cfg(test)]
             fail_after_symbol: None,
+            #[cfg(test)]
+            last_artifact: None,
         };
         // The trace domain can only publish bodies once its boundary trampoline
         // exists: a trace body reads the recorder from the pinned register, so

@@ -285,6 +285,7 @@ purity-fence  compile-crate  fast   300  crate=fixtures/tsan
 load       timed-run  gate  60  input=programs/empty.rs max_ms=1000 runs=1
 rayon-gate timed-run  gate  60  input=programs/c_rayon.rs max_ms=5000 runs=1 expect_stdout=par_sort%20ok%20=%20true
 fib32      timed-run  gate  60  input=programs/vmcall_pure.rs args=--vm-call;fib(32) max_ms=80 runs=3 expect_stdout=2178309
+fib32-reload run-expect gate 120  input=programs/vmcall_pure.rs args=--vm-call;fib(32) env=MIRVM_JIT_RELOAD=1;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1;MIRVM_JIT_DEBUG=1 stdout=2178309 stderr=linked%20back%20from%20its%20artifact
 resources  metering   gate  60
 
 # the repository's own source checks

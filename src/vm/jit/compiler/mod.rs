@@ -106,8 +106,16 @@ struct Compiler<'a> {
     /// Their module-level data ids, parallel to `sites`: how a relocation's target maps back to the
     /// site it belongs to.
     site_data: Vec<u32>,
+    /// The artifact of the function being compiled, one symbol at a time, while a reload is on.
+    artifacts: Vec<artifact::Symbol>,
+    /// Whether this compiler links what it just compiled back from its artifact and publishes that,
+    /// instead of publishing the module's own code (`MIRVM_JIT_RELOAD`).
+    reload: bool,
     #[cfg(test)]
     fail_after_symbol: Option<JitSymbolRole>,
+    /// The last fast body captured for a reload, for the test that links one back by hand.
+    #[cfg(test)]
+    last_artifact: Option<artifact::Symbol>,
 }
 
 struct PendingJitSymbol {

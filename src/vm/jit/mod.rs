@@ -23,6 +23,8 @@ pub use state::*;
 #[cfg(feature = "cranelift")]
 mod admit;
 #[cfg(feature = "cranelift")]
+mod artifact;
+#[cfg(feature = "cranelift")]
 mod compiler;
 #[cfg(feature = "cranelift")]
 mod frame;
