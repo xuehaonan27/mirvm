@@ -212,7 +212,10 @@ impl<'a> Verifier<'a> {
                 ));
             }
             let template = self.instance.try_resolve_link_addr(slot.template)?;
-            self.frozen_range(template, slot.size, false)
+            // A template may live in a layer below: `tls_id` reuses a lower layer's slot rather than
+            // giving one `#[thread_local]` a second identity, and that layer's region is mapped for
+            // the whole process. The *write* ranges above stay strict.
+            self.frozen_range(template, slot.size, true)
                 .map_err(|e| format!("TLS slot {} template: {e}", self.prefix.tls + i))?;
         }
         for (i, fixup) in self.module.got_fixups.iter().enumerate() {

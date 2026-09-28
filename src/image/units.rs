@@ -120,32 +120,6 @@ impl UnitTable {
             })
     }
 
-    /// The lowest unit whose closure covers `def` and `mentioned` and which `usable` accepts.
-    ///
-    /// A unit that is not usable is skipped rather than ending the search. That matters for an
-    /// instance no unit defines (a sysroot crate's): every unit covers it, and the layer that hosts it
-    /// must be one this session can still add to — a loaded layer cannot grow, and the delta sits above
-    /// its referers, so an instance every unit covers belongs to the lowest *available* unit.
-    pub(crate) fn home_of_usable(
-        &self,
-        def: Option<u32>,
-        mentioned: &BTreeSet<u32>,
-        usable: impl Fn(u32) -> bool,
-    ) -> Option<Home> {
-        self.units
-            .iter()
-            .enumerate()
-            .find(|(index, unit)| {
-                usable(*index as u32)
-                    && def.is_none_or(|def| unit.closure.contains(&def))
-                    && mentioned.iter().all(|m| unit.closure.contains(m))
-            })
-            .map(|(unit, _)| Home {
-                unit: unit as u32,
-                unattached: def.is_none() && mentioned.is_empty(),
-            })
-    }
-
     /// This unit's key: the build id, the stack below it and the rlib it was compiled to.
     ///
     /// The stack below is part of the key because a unit's bindings name symbols of the layers under
@@ -228,6 +202,21 @@ fn manifests_of(dir: &Path, unit_key: &str) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
+/// Whether the store holds any manifest for this unit, whatever its state.
+///
+/// The loader uses this to tell a unit the store was *expected* to provide — one whose manifest is
+/// there but does not fit this stack — from a unit that has no layer at all. The first kind makes the
+/// whole load set unusable; the second is ordinary.
+pub(crate) fn has_manifest(index: u32, base_key: &str) -> bool {
+    let Some(table) = current() else {
+        return false;
+    };
+    let Some(unit_key) = table.key_of(index, base_key) else {
+        return false;
+    };
+    !manifests_of(&crate::store::UNITS.dir(), &unit_key).is_empty()
+}
+
 /// Load one unit's newest usable manifest, keyed by its rlib. `stack` is what is already below it
 /// (the base and every unit loaded before it in topological order), which is both what its symbols
 /// resolve against and what it is verified against.
@@ -302,11 +291,10 @@ fn load_one(
     }
     let below: Vec<(u32, u32, u32)> = stack.layers().iter().map(layer_counts).collect();
     if f.below != below {
-        reason("built above a different stack layout");
-        return None;
-    }
-    if f.home != index as usize {
-        reason("its recorded slot is not its place in this program's units");
+        reason(&format!(
+            "built above a different stack layout: record {:?}, here {:?}",
+            f.below, below
+        ));
         return None;
     }
     if f.lowering_fp != base.lowering_fp {
@@ -450,6 +438,13 @@ pub(crate) fn store(
     else {
         return super::deps::degraded(bi);
     };
+    if crate::options::a2_debug() {
+        eprintln!(
+            "[a2-debug] store index {index} unit {unit_key} counts {:?} below {:?}",
+            layer_counts(&bi),
+            stack.layers().iter().map(layer_counts).collect::<Vec<_>>()
+        );
+    }
     let below = stack.below();
     // The writer applies the loader's predicate against the same stack. The frozen area must sit at a
     // fixed base — any slot will do, because the manifest records which one (its `home`) and the

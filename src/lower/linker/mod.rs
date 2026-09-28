@@ -180,14 +180,14 @@ impl<'tcx> Linker<'tcx> {
                 // would publish one crate's private static inside another's shared manifest.
                 Some(unit) => self.placeable(unit as usize).then_some(unit as usize),
                 // A crate no unit covers — a sysroot crate, or a path dependency the table does not
-                // know — is below every unit, so the lowest *available* one hosts it. That is where
-                // `place` puts a function naming no unit, and the two must agree: a home body that
-                // reaches such an item bakes its address, and a delta-placed one would be above it.
-                None => table
-                    .home_of_usable(None, &std::collections::BTreeSet::new(), |unit| {
-                        self.placeable(unit as usize)
-                    })
-                    .map(|home| home.unit as usize),
+                // know — is below every unit, so the *first* one hosts it — the same home `place`
+                // gives a function that names no unit, and one that does not move when a lower layer
+                // happens to be loaded: a layout that depended on the load set would rewrite every
+                // dependent's manifest with a different prefix.
+                None => {
+                    let first = table.get(0).map(|_| 0)?;
+                    self.placeable(first).then_some(first)
+                }
             },
             // Without a build graph the closure is one home.
             None => Some(0),
@@ -201,10 +201,10 @@ impl<'tcx> Linker<'tcx> {
     /// one program's view of it.
     fn placeable(&self, home: usize) -> bool {
         home < MAX_HOMES
-            && !self
+            && self
                 .split
                 .as_ref()
-                .is_some_and(|split| split.is_loaded(home))
+                .is_some_and(|split| split.lower_homes() && !split.is_loaded(home))
     }
 
     /// Which home an instance is lowered in: the delta (`None`) or a home index.
@@ -217,16 +217,21 @@ impl<'tcx> Linker<'tcx> {
         match crate::image::units::current() {
             Some(table) => {
                 let inputs = crate::lower::purity::home_inputs(inst, self.tcx, table)?;
-                let home = table.home_of_usable(inputs.def, &inputs.mentioned, |unit| {
-                    self.placeable(unit as usize)
-                });
-                if home.is_none() && crate::options::a2_debug() {
-                    eprintln!(
-                        "[a2-debug] residue in this program: no free home covers {}",
-                        self.tcx.symbol_name(inst).name
-                    );
+                // The home is the rule's answer, whether or not this session can add to it: a home
+                // that moved because a lower layer happened to be loaded would lay every dependent's
+                // ids out differently, and the manifests written above it would all be invalidated.
+                let home = table.home_of(inputs.def, &inputs.mentioned)?;
+                let home = home.unit as usize;
+                if !self.placeable(home) {
+                    if crate::options::a2_debug() {
+                        eprintln!(
+                            "[a2-debug] residue in this program: {} belongs to loaded home {home}",
+                            self.tcx.symbol_name(inst).name
+                        );
+                    }
+                    return None;
                 }
-                home.map(|home| home.unit as usize)
+                Some(home)
             }
             None => classify_purity(inst).is_image().then_some(0),
         }

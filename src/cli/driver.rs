@@ -459,6 +459,75 @@ pub(super) fn run_vm_engine(
         diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
         return 70;
     }
+    if crate::options::a2_debug() {
+        // A digest over what this session is about to run: the same program lowered cold and one that
+        // reused stored layers must produce the same functions, in the same order, with the same
+        // absolute ids.
+        use crate::vm::ir::frag;
+        let mut bodies = crate::store::entry::Key::new();
+        let dump = std::env::var_os("MIRVM_MODULE_DUMP").is_some();
+        for (index, body) in module.funcs.iter().enumerate() {
+            let bytes = frag::encode(body).unwrap_or_default();
+            let id = crate::utils::content::digest_hex(&frag::id_of(&bytes));
+            if dump {
+                eprintln!("[a2-dump] {index} {id} {}", body.name);
+            }
+            if dump && body.name.contains("Blake2bVarCore8compress") {
+                let canonical = frag::canonical(body);
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                eprintln!("[a2-targets] {:?}", canonical.targets);
+                eprintln!(
+                    "[a2-body] {} blocks {} frame {} targets {} bytes {} {}",
+                    body.name,
+                    body.blocks.len(),
+                    body.frame_size,
+                    canonical.targets.len(),
+                    bytes.len(),
+                    hex
+                );
+            }
+            bodies.part(&id);
+        }
+        let mut exports: Vec<(&str, u32)> = module
+            .exports
+            .iter()
+            .map(|(name, id)| (name.as_ref(), *id))
+            .collect();
+        exports.sort_unstable();
+        let mut tables = crate::store::entry::Key::new();
+        for (name, id) in &exports {
+            tables.part(&format!("{name}={id}"));
+        }
+        tables.part(&format!(
+            "tls={} entries={} relocs={}",
+            module.tls.len(),
+            module.entry_stub_sites.len(),
+            module.frozen_relocs.len()
+        ));
+        // The frozen bytes are not part of any body's canonical form: a constant whose *content*
+        // differed between two sessions would be invisible to the digest above.
+        let mut data = crate::store::entry::Key::new();
+        if let Some(frozen) = module.frozen.as_ref() {
+            data.part(&crate::utils::content::digest_hex(
+                &crate::vm::ir::frag::id_of(frozen.bytes()),
+            ));
+        }
+        data.part(&format!("{} arenas", instance.image_frozens.len()));
+        for arena in &instance.image_frozens {
+            data.part(&format!("{:#x}:{}", arena.home(), arena.used()));
+            data.part(&crate::utils::content::digest_hex(
+                &crate::vm::ir::frag::id_of(arena.snapshot()),
+            ));
+        }
+        eprintln!(
+            "[a2-debug] module: funcs {} bodies {} exports {} tables {} data {}",
+            module.funcs.len(),
+            bodies.digest(),
+            exports.len(),
+            tables.digest(),
+            data.digest()
+        );
+    }
     if vm_stats {
         // One call, and it must stay one call: growing this branch's body changes the codegen of the
         // enclosing function enough to flip the pinned toolchain's release-build miscompile of the
@@ -709,17 +778,43 @@ pub(crate) fn run_driver(
             Some(table) => {
                 let base_key = stack.base_image().map(|base| base.key.clone());
                 if let Some(base_key) = base_key {
+                    // Whole or nothing: a manifest the store holds must fit this stack, and if one does
+                    // not, no layer is used at all. A layer's ids are laid out against the layers below
+                    // it, so a stack assembled from a *subset* of what the store can provide is a stack
+                    // no manifest above it was written against — and the session's own lowering would
+                    // lay the remaining units out differently from every manifest the last cold session
+                    // wrote. Lowering everything instead is the state that converges: the manifests it
+                    // writes are the ones a cold session would have written.
+                    let before = stack.layers().len();
+                    let mut unusable = false;
                     for index in 0..table.len() as u32 {
+                        if !crate::image::units::has_manifest(index, &base_key) {
+                            continue;
+                        }
                         let layer = {
                             let base = stack.base_image().expect("checked above");
                             crate::image::units::try_load(index, base, &stack, &base_key)
                         };
-                        if let Some(layer) = layer {
-                            if crate::options::a2_debug() {
-                                eprintln!("[a2-debug] layer loaded: {}", layer.key);
+                        match layer {
+                            Some(layer) => {
+                                if crate::options::a2_debug() {
+                                    eprintln!("[a2-debug] layer loaded: {}", layer.key);
+                                }
+                                stack.push(layer);
                             }
-                            stack.push(layer);
+                            None => {
+                                unusable = true;
+                                break;
+                            }
                         }
+                    }
+                    if unusable {
+                        if crate::options::a2_debug() {
+                            eprintln!(
+                                "[a2-debug] unit store not usable whole; lowering every unit instead"
+                            );
+                        }
+                        stack.truncate(before);
                     }
                 }
             }

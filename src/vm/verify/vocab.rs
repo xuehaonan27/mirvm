@@ -197,9 +197,10 @@ impl<'a> Verifier<'a> {
             .iter()
             .chain(self.instance.image_frozens.iter())
             .any(|arena| {
-                let bytes = arena.snapshot();
-                let start = bytes.as_ptr() as u64;
-                let limit = start + bytes.len() as u64;
+                // The whole mapped region, not only the used prefix: a pointer one past the last
+                // allocation is legal, and an arena's bytes are mapped for its full slot.
+                let start = arena.snapshot().as_ptr() as u64;
+                let limit = start + arena.mapped_len();
                 addr >= start && end <= limit
             });
         if !contains && !allow_prefix {
