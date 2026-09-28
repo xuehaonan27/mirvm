@@ -32,14 +32,22 @@ impl<'tcx> Linker<'tcx> {
     /// - identity-bearing paths (statics, weak cells, fn entries) are placed by `krate` or
     ///   class and recorded in **both** tables, so a single identity never splits into two
     ///   addresses. `Memory` and vtables have unspecified identity, so the context decides
-    ///   their region; in an image context, an allocation already present in the delta
-    ///   region is **promoted** (materialized twice, which is safe because constants are
-    ///   read-only).
+    ///   their region *and* their reuse: an image context materializes its own copy instead
+    ///   of naming a lower home's, and one already present in the delta region is
+    ///   **promoted** (materialized twice, which is safe because constants are read-only).
     pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, Error> {
         let ctx_home = self.split.as_ref().and_then(|s| s.current);
+        let alloc = self.tcx.global_alloc(id);
+        // Whether the allocation's *identity* is its address. A static or an fn entry has one address
+        // by definition, so a lower home's copy of it is the same allocation; a constant, a vtable and
+        // every other anonymous allocation has no identity to keep (rustc duplicates vtables per CGU,
+        // and a promoted constant's address is unspecified), so the current home materializes its own
+        // copy — one in a lower unit's slot is an address this unit's manifest cannot explain, and the
+        // unit would never be stored.
+        let identity = matches!(alloc, GlobalAlloc::Static(_) | GlobalAlloc::Function { .. });
         // Reuse an existing materialization: the delta's own table first (only a delta body reads it —
-        // the delta is above the homes), then the current home's table and every lower home's, since a
-        // body may reference what a layer below it materialized.
+        // the delta is above the homes), then the current home's table and, for an identity, every
+        // lower home's.
         if ctx_home.is_none()
             && let Some(&a) = self.alloc_addrs.get(&id)
         {
@@ -48,11 +56,11 @@ impl<'tcx> Linker<'tcx> {
         if let Some(a) = self
             .split
             .as_ref()
-            .and_then(|s| s.lookup_alloc(ctx_home, id))
+            .and_then(|s| s.lookup_alloc(ctx_home, id, identity))
         {
             return Ok(a);
         }
-        match self.tcx.global_alloc(id) {
+        match alloc {
             GlobalAlloc::Memory(alloc) => self.materialize_in(id, alloc, ctx_home),
             GlobalAlloc::Static(def_id) => {
                 // An extern static is a real symbol reached through the os:: passthrough:
