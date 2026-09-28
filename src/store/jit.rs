@@ -153,6 +153,17 @@ fn pack_bytes(entries: &BTreeMap<[u8; 32], ([u8; 32], Vec<u8>)>) -> Vec<u8> {
     out
 }
 
+/// What the family holds for one key.
+#[derive(Debug)]
+pub(crate) enum Lookup {
+    /// No pack holds it: the ordinary miss.
+    Absent,
+    /// A pack holds it and what is there cannot be used. A hash that does not match, a length that does
+    /// not agree, or a record that cannot be read — the caller compiles, and says so.
+    Bad(String),
+    Entry(Vec<u8>),
+}
+
 /// One index entry: the key, the fragment it was compiled from, and where the record is.
 #[derive(Clone, Copy)]
 struct Indexed {
@@ -281,11 +292,28 @@ impl Index {
         self.packs.iter().any(|pack| pack.find(key).is_some())
     }
 
-    /// The entry one key names, if any pack holds a readable one.
+    /// What the family holds for one key.
+    pub(crate) fn lookup(&self, key: &[u8; 32]) -> Lookup {
+        for pack in &self.packs {
+            let Some(entry) = pack.find(key) else {
+                continue;
+            };
+            return match pack.read(&entry) {
+                Some(bytes) => Lookup::Entry(bytes),
+                // The pack holds the key and not the entry: unreadable, or bytes that do not hash back
+                // to what the record says they are. The caller compiles instead, and counts it.
+                None => Lookup::Bad(format!("{} holds {key:?} unreadable", pack.path.display())),
+            };
+        }
+        Lookup::Absent
+    }
+
+    #[cfg(test)]
     pub(crate) fn read(&self, key: &[u8; 32]) -> Option<Vec<u8>> {
-        self.packs
-            .iter()
-            .find_map(|pack| pack.find(key).and_then(|entry| pack.read(&entry)))
+        match self.lookup(key) {
+            Lookup::Entry(bytes) => Some(bytes),
+            _ => None,
+        }
     }
 }
 

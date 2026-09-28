@@ -211,13 +211,30 @@ impl<'a> Compiler<'a> {
             return false;
         };
         let key = crate::store::jit::key(&ordinals.fragment(), &self.jit_key.digest());
-        let Some(bytes) = self.jit_index().read(&key) else {
-            return false;
+        let bytes = match self.jit_index().lookup(&key) {
+            crate::store::jit::Lookup::Entry(bytes) => bytes,
+            crate::store::jit::Lookup::Absent => {
+                helpers::cache_miss();
+                return false;
+            }
+            crate::store::jit::Lookup::Bad(reason) => {
+                helpers::cache_refused();
+                if crate::options::jit_debug() {
+                    eprintln!("mirvm-jit-debug: f{func} stored entry refused: {reason}");
+                }
+                return false;
+            }
         };
-        let Some(entry) = artifact::Entry::decode(&bytes)
+        let entry = artifact::Entry::decode(&bytes)
             .ok()
-            .filter(|entry| entry.fragment == ordinals.fragment() && entry.jit == self.jit_key)
-        else {
+            .filter(|entry| entry.fragment == ordinals.fragment() && entry.jit == self.jit_key);
+        let Some(entry) = entry else {
+            helpers::cache_refused();
+            if crate::options::jit_debug() {
+                eprintln!(
+                    "mirvm-jit-debug: f{func} stored entry refused: not this fragment and key"
+                );
+            }
             return false;
         };
         self.prewarm_callees(func, body);
@@ -235,6 +252,7 @@ impl<'a> Compiler<'a> {
                 .map(|addr| *addr as u64),
             target => artifact::target_value(shared, func, &ordinals, target),
         }) else {
+            helpers::cache_refused();
             return false;
         };
         // The stored CFA programs become FDEs at the addresses the link placed the symbols at, exactly
@@ -254,10 +272,12 @@ impl<'a> Compiler<'a> {
             linked.entry(JitSymbolRole::Guarded),
             linked.entry(JitSymbolRole::Packed),
         ) else {
+            helpers::cache_refused();
             return false;
         };
         // Published code lives to process end, so the mapping must not be unmapped with the handle.
         std::mem::forget(linked);
+        helpers::cache_hit();
         if crate::options::jit_debug() {
             eprintln!("mirvm-jit-debug: f{func} published from a stored entry");
         }

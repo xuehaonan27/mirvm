@@ -469,3 +469,232 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
         "cleanup pad did not run (LSDA/personality missed)"
     );
 }
+
+/// The §4 gate: a panic crossing a frame whose code was *linked from a store entry*, not compiled in
+/// this session.
+///
+/// The probe builds the same two frames as [`lsda_cleanup_pad_executes_and_resume_continues`], captures
+/// each as an artifact, links them into a fresh region and registers the *stored* CFA programs at the
+/// loaded addresses. Then the whole chain must still work: the payload crosses the loaded raiser (its
+/// plain CIE), the loaded caller takes its LSDA cleanup pad, and `_Unwind_Resume` hands the payload to
+/// the host's `catch_unwind`. A pair whose call encoding this linker does not apply stores nothing, so
+/// the test reports that and stops rather than pretending.
+#[test]
+fn a_linked_entry_unwinds_through_a_loaded_frame() {
+    use super::artifact;
+
+    PAD_MARK.store(0, Ordering::SeqCst);
+
+    let isa = super::compiler::domain_isa(super::CodeDomain::Plain);
+    let jit_key = artifact::JitKey::of(isa.as_ref(), super::CodeDomain::Plain);
+    let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    jb.symbol("probe_raise", probe_raise as *const u8);
+    jb.symbol("probe_mark", probe_mark as *const u8);
+    jb.symbol("_Unwind_Resume", _Unwind_Resume as *const u8);
+    let mut module = JITModule::new(jb);
+    let mut fbc = FunctionBuilderContext::new();
+
+    let empty_sig = module.make_signature(); // () -> ()
+    let mark_sig = {
+        let mut s = module.make_signature();
+        s.params.push(AbiParam::new(types::I64));
+        s
+    };
+    let raise = module
+        .declare_function("probe_raise", Linkage::Import, &empty_sig)
+        .unwrap();
+    let mark = module
+        .declare_function("probe_mark", Linkage::Import, &mark_sig)
+        .unwrap();
+    let resume = module
+        .declare_function("_Unwind_Resume", Linkage::Import, &mark_sig)
+        .unwrap();
+
+    // raiser: calls probe_raise; the payload unwinds through its frame.
+    let raiser_id = module
+        .declare_function("raiser", Linkage::Local, &empty_sig)
+        .unwrap();
+    let raiser_symbol = {
+        let mut cctx = module.make_context();
+        cctx.func.signature = empty_sig.clone();
+        let mut b = FunctionBuilder::new(&mut cctx.func, &mut fbc);
+        let entry = b.create_block();
+        b.switch_to_block(entry);
+        let rref = module.declare_func_in_func(raise, b.func);
+        b.ins().call(rref, &[]);
+        b.ins().return_(&[]);
+        b.seal_all_blocks();
+        b.finalize();
+        module.define_function(raiser_id, &mut cctx).unwrap();
+        let symbol = capture_probe_symbol(&module, "raiser", &cctx, None);
+        module.clear_context(&mut cctx);
+        symbol
+    };
+
+    // caller: try_call(raiser); normal -> mark 2; tag-0 pad -> mark 1, then resume.
+    let caller_id = module
+        .declare_function("caller", Linkage::Local, &empty_sig)
+        .unwrap();
+    let caller_symbol = {
+        let mut cctx = module.make_context();
+        cctx.func.signature = empty_sig.clone();
+        let mut b = FunctionBuilder::new(&mut cctx.func, &mut fbc);
+        let entry = b.create_block();
+        let ok = b.create_block();
+        let pad = b.create_block();
+        b.append_block_param(pad, types::I64);
+        b.switch_to_block(entry);
+        let rref = module.declare_func_in_func(raiser_id, b.func);
+        let sig0 = b.func.import_signature(empty_sig.clone());
+        let normal = BlockCall::new(ok, [], &mut b.func.dfg.value_lists);
+        let pad_call = b.func.dfg.block_call(pad, &[BlockArg::TryCallExn(0)]);
+        let et = b.func.dfg.exception_tables.push(ExceptionTableData::new(
+            sig0,
+            normal,
+            [ExceptionTableItem::Tag(
+                ExceptionTag::with_number(0).unwrap(),
+                pad_call,
+            )],
+        ));
+        b.ins().try_call(rref, &[], et);
+        b.switch_to_block(ok);
+        let mref = module.declare_func_in_func(mark, b.func);
+        let two = b.ins().iconst(types::I64, 2);
+        b.ins().call(mref, &[two]);
+        b.ins().return_(&[]);
+        b.switch_to_block(pad);
+        let exn = b.block_params(pad)[0];
+        let mref2 = module.declare_func_in_func(mark, b.func);
+        let one = b.ins().iconst(types::I64, 1);
+        b.ins().call(mref2, &[one]);
+        let resref = module.declare_func_in_func(resume, b.func);
+        b.ins().call(resref, &[exn]);
+        b.ins()
+            .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+        b.seal_all_blocks();
+        b.finalize();
+        module.define_function(caller_id, &mut cctx).unwrap();
+        let (_, call_sites) = unwind_and_sites(module.isa(), &cctx);
+        let symbol = capture_probe_symbol(&module, "caller", &cctx, Some(build_lsda(&call_sites)));
+        module.clear_context(&mut cctx);
+        symbol
+    };
+
+    let (Some(raiser_symbol), Some(caller_symbol)) = (raiser_symbol, caller_symbol) else {
+        eprintln!("this pair's call encoding is not one the linker applies yet; nothing to prove");
+        return;
+    };
+
+    // Link both frames, the raiser first so the caller's call to it resolves to the loaded address.
+    // Guest calls go through PLT slots in real code; this probe calls directly, which is why the test
+    // supplies the name.
+    let resolver = |raiser: Option<u64>| {
+        move |target: &artifact::Target| match target {
+            artifact::Target::Named(name) if name.as_ref() == "raiser" => raiser,
+            artifact::Target::Named(name) => import_address(name),
+            _ => None,
+        }
+    };
+    let raiser_entry = artifact::Entry {
+        fragment: [0; 32],
+        jit: jit_key.clone(),
+        symbols: vec![raiser_symbol],
+    };
+    let raiser_linked = artifact::link(
+        &raiser_entry,
+        &[super::JitSymbolRole::FastBody],
+        resolver(None),
+    )
+    .expect("the raiser links");
+    let raiser_addr = raiser_linked
+        .entry(super::JitSymbolRole::FastBody)
+        .expect("the raiser entry");
+    let caller_entry = artifact::Entry {
+        fragment: [0; 32],
+        jit: jit_key,
+        symbols: vec![caller_symbol],
+    };
+    let caller_linked = artifact::link(
+        &caller_entry,
+        &[super::JitSymbolRole::FastBody],
+        resolver(Some(raiser_addr)),
+    )
+    .expect("the caller links");
+    let caller_addr = caller_linked
+        .entry(super::JitSymbolRole::FastBody)
+        .expect("the caller entry");
+
+    // The stored CFA programs, registered at the addresses the link placed them at: one plain frame and
+    // one whose FDE carries the LSDA the pad needs.
+    let frames: Vec<(u64, UnwindInfo, Option<Vec<u8>>)> = [&raiser_entry, &caller_entry]
+        .iter()
+        .flat_map(|entry| entry.symbols.iter())
+        .map(|symbol| {
+            let addr = if symbol.name.as_ref() == "raiser" {
+                raiser_addr
+            } else {
+                caller_addr
+            };
+            (
+                addr,
+                symbol
+                    .unwind
+                    .clone()
+                    .expect("a probe symbol has unwind info"),
+                symbol.lsda.clone(),
+            )
+        })
+        .collect();
+    super::unwind::register_frames(module.isa(), frames);
+
+    let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
+    let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
+    let payload = result
+        .expect_err("the linked frame did not unwind (registration at loaded addresses is broken)")
+        .downcast::<i32>()
+        .expect("wrong payload type");
+    assert_eq!(*payload, 0x2a);
+    assert_eq!(
+        PAD_MARK.load(Ordering::SeqCst),
+        1,
+        "the loaded frame's cleanup pad did not run"
+    );
+    // Linked code and its FDEs live for the process, like published entries.
+    std::mem::forget(raiser_linked);
+    std::mem::forget(caller_linked);
+}
+
+/// One symbol of the probe module, captured the way the compiler captures its own.
+fn capture_probe_symbol(
+    module: &JITModule,
+    name: &str,
+    cctx: &cranelift_codegen::Context,
+    lsda: Option<Vec<u8>>,
+) -> Option<crate::vm::jit::artifact::Symbol> {
+    use crate::vm::jit::{artifact, reloc};
+    let unwind = cctx
+        .compiled_code()
+        .and_then(|cc| cc.create_unwind_info(module.isa()).ok().flatten());
+    artifact::capture(artifact::Captured {
+        module,
+        func: 0,
+        role: crate::vm::jit::JitSymbolRole::FastBody,
+        name,
+        ir_func: &cctx.func,
+        compiled: cctx.compiled_code().expect("the probe function compiled"),
+        sites: &reloc::Sites::default(),
+        ordinals: &artifact::Ordinals::default(),
+        unwind,
+        lsda,
+    })
+}
+
+/// The host address of one of the probe's imports.
+fn import_address(name: &str) -> Option<u64> {
+    match name {
+        "probe_raise" => Some(probe_raise as *const u8 as u64),
+        "probe_mark" => Some(probe_mark as *const u8 as u64),
+        "_Unwind_Resume" => Some(_Unwind_Resume as *const u8 as u64),
+        _ => None,
+    }
+}

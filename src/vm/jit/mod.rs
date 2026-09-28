@@ -37,6 +37,8 @@ mod reloc;
 pub(crate) use reloc::{Body, SigPart, Site};
 #[cfg(feature = "cranelift")]
 mod translate;
+#[cfg(feature = "cranelift")]
+mod unwind;
 
 #[cfg(feature = "cranelift")]
 pub(crate) use compiler::{start, stop};

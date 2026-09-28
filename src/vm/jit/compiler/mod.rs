@@ -134,10 +134,6 @@ struct PendingJitSymbol {
     size: u64,
 }
 
-/// DW.ref indirection cell for the personality CIE: one cell shared by every FDE in
-/// the table.
-static PERS_REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 // ===== LSDA generation (layout copied line for line from the ABI; do not invent) =====
 
 mod lsda;

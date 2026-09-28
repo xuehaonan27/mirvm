@@ -48,6 +48,14 @@ pub(crate) use super::macos::unwind::{deregister_frame, register_frame};
 pub fn register_frame_section(mut bytes: Vec<u8>) {
     bytes.extend_from_slice(&[0, 0, 0, 0]);
     let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    // The registration entry point mutates the unwinder's own record list, which is not reentrant:
+    // mirvm registers from every Engine's compile worker, and two sections handed over at once can
+    // interleave inside that list. One process lock makes the handover atomic in time, which is all
+    // the list needs; the bytes themselves are already process-lifetime.
+    static REGISTER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = REGISTER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     register_section(bytes.as_ptr());
 }
 

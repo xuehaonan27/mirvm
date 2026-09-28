@@ -72,6 +72,38 @@ pub(crate) fn stat_value(name: &str) -> u64 {
     STAT[index].load(Ordering::Relaxed)
 }
 
+// ===== JIT code store counters =====
+// The observable half of "any doubt is a miss": what the store answered, what it did not hold, and what
+// it held and could not be used. Counted on the compile worker's cold path, so the cost is one relaxed
+// increment per compile or lookup, and dumped with the helper buckets.
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+static CACHE_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// An entry was linked and published from the store.
+pub(crate) fn cache_hit() {
+    CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The store held nothing for this fragment and key.
+pub(crate) fn cache_miss() {
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The store held something that could not be used, which is why the function was compiled.
+pub(crate) fn cache_refused() {
+    CACHE_REFUSED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The store counters, for a diagnostic that must name them.
+fn cache_counts() -> (u64, u64, u64) {
+    (
+        CACHE_HITS.load(Ordering::Relaxed),
+        CACHE_MISSES.load(Ordering::Relaxed),
+        CACHE_REFUSED.load(Ordering::Relaxed),
+    )
+}
+
 extern "C" fn stat_dump() {
     let mut line = String::from("mirvm-jit-stats:");
     for (i, n) in STAT_NAMES.iter().enumerate() {
@@ -79,6 +111,12 @@ extern "C" fn stat_dump() {
         if v != 0 {
             line.push_str(&format!(" {n}={v}"));
         }
+    }
+    let (hits, misses, refused) = cache_counts();
+    if hits + misses + refused != 0 {
+        line.push_str(&format!(
+            " cache_hits={hits} cache_misses={misses} cache_refused={refused}"
+        ));
     }
     eprintln!("{line}");
 }
