@@ -355,14 +355,14 @@ impl<'a> Compiler<'a> {
             host_syscall_trace,
             pending_unwind: Vec::new(),
             values,
-            sites: Vec::new(),
-            site_data: Vec::new(),
+            sites: reloc::Sites::default(),
             artifacts: Vec::new(),
+            ordinals: None,
             reload: crate::options::jit_reload(),
             #[cfg(test)]
             fail_after_symbol: None,
             #[cfg(test)]
-            last_artifact: None,
+            last_entry: None,
         };
         // The trace domain can only publish bodies once its boundary trampoline
         // exists: a trace body reads the recorder from the pinned register, so

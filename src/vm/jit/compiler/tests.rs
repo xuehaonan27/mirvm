@@ -425,13 +425,14 @@ fn a_compiled_body_runs_from_its_artifact() {
     }
 
     // What a store would hold: the encoded bytes, decoded again.
+    let captured = compiler.last_entry.as_ref().expect("the body was captured");
     let entry = artifact::Entry {
-        func: 0,
+        fragment: captured.fragment,
         symbols: vec![
-            compiler
-                .last_artifact
-                .clone()
-                .expect("the body was captured"),
+            captured
+                .symbol(JitSymbolRole::FastBody)
+                .expect("the body symbol was captured")
+                .clone(),
         ],
     };
     let bytes = entry.encode().expect("an artifact encodes");
@@ -442,15 +443,15 @@ fn a_compiled_body_runs_from_its_artifact() {
     // activation. The link is what this test proves, so the poll resolves to a no-op; every other name
     // comes from the one import table, as it does in the compile path.
     extern "C" fn probe_poll() {}
+    let ordinals = artifact::Ordinals::of(&shared.module.funcs[0]).expect("the body has ordinals");
     let linked = artifact::link(&entry, &[JitSymbolRole::FastBody], |target| match target {
-        artifact::Target::Site(site) => artifact::site_value(&shared, 0, site),
         artifact::Target::Named(name) if name.as_ref() == "mirvm_poll_signals" => {
             Some(probe_poll as *const u8 as u64)
         }
         artifact::Target::Named(name) => imports::whitelist()
             .get(name.as_ref())
             .map(|addr| *addr as u64),
-        artifact::Target::Local(_) => None,
+        target => artifact::target_value(&shared, 0, &ordinals, target),
     })
     .expect("the probe body links back");
 
@@ -467,4 +468,81 @@ fn a_compiled_body_runs_from_its_artifact() {
     );
     // Published code lives to process end in production; keep that same lifetime here.
     std::mem::forget(compiler);
+}
+
+/// The store's precondition: one body's artifact is the same bytes in two programs that number its
+/// functions and place its frozen addresses differently. Everything a program decides — a function id,
+/// a link address, a stub address, a PLT slot — is recorded as the fragment's own reference ordinal,
+/// so an entry written by one program is readable by the next.
+#[test]
+fn an_entry_depends_on_the_body_and_not_on_the_program() {
+    /// The probe calls its callee through the PLT slot and reads a frozen link address: one fragment
+    /// reference of each kind this test needs, in the canonical order the walk gives them.
+    fn probe(frozen: u64, callee: u32) -> ir::FuncBody {
+        let slot = || ir::Slot {
+            off: 0,
+            width: ir::Width::W64,
+        };
+        ir::FuncBody {
+            frame_size: 16,
+            frame_align: 8,
+            ret: ir::RetAbi::Zst,
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![
+                ir::Block {
+                    stmts: vec![ir::Stmt::Assign {
+                        dst: ir::ScalarPlace::Slot(slot()),
+                        rv: ir::Rvalue::Use(ir::Operand::AddrImm(ir::LinkAddr(frozen))),
+                    }],
+                    term: ir::Terminator::Call {
+                        callee,
+                        args: Vec::new(),
+                        ret: ir::RetDest::Ignore,
+                        target: 1,
+                        unwind: ir::UnwindAction::Continue,
+                        role: ir::CallRole::Normal,
+                    },
+                },
+                ir::Block {
+                    stmts: Vec::new(),
+                    term: ir::Terminator::Return,
+                },
+            ],
+            name: "artifact_probe".into(),
+        }
+    }
+
+    /// Compile one function of one program and hand back the entry it captured.
+    fn entry_of(funcs: Vec<ir::FuncBody>, which: u32) -> artifact::Entry {
+        let shared = Shared::new(ir::Module {
+            funcs: funcs.into(),
+            ..ir::Module::default()
+        });
+        let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
+        compiler.reload = true;
+        compiler.compile(which);
+        let entry = compiler
+            .last_entry
+            .clone()
+            .expect("the function was captured");
+        std::mem::forget(compiler);
+        entry
+    }
+
+    let callee = || body("artifact_callee", Terminator::Return);
+    // The same fragment at function 0 with its callee at 1, and at function 1 with its callee at 0;
+    // the frozen address differs too, because a program places its data where it likes.
+    let first = entry_of(vec![probe(0x6a00_0000_1000, 1), callee()], 0);
+    let second = entry_of(vec![callee(), probe(0x6a00_0000_9000, 0)], 1);
+
+    assert_eq!(
+        first.fragment, second.fragment,
+        "the same body is not the same fragment in two programs"
+    );
+    assert_eq!(
+        first.encode().expect("the entry encodes"),
+        second.encode().expect("the entry encodes"),
+        "the entry carries the program that compiled it"
+    );
 }

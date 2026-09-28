@@ -29,10 +29,9 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) func: u32,
     /// Where a site's baked value is published for the module's lookup hook ([`crate::vm::jit::reloc`]).
     pub(super) values: &'a std::sync::Arc<reloc::Values>,
-    /// The sites this body named, in emission order. Read out after the build.
-    pub(super) sites: Vec<Site>,
-    /// Their module-level data ids, parallel to `sites`.
-    pub(super) site_data: Vec<u32>,
+    /// The sites this body named, in emission order, with their module data ids. Read out after the
+    /// build.
+    pub(super) sites: reloc::Sites,
     /// The block and statement being translated right now: an interior-pointer site names the body
     /// position it belongs to, so the loader can find it again in the resident body.
     pub(super) block: u32,
@@ -106,20 +105,15 @@ impl Translator<'_, '_> {
     /// and the recorded site is what a stored entry replays later. A raw `iconst` of an address would
     /// leave the backend with nothing to report, so the stored entry could not find it.
     pub(super) fn site(&mut self, site: Site, value: u64) -> Value {
-        let name = reloc::name(self.func, self.sites.len());
-        if let Ok(mut values) = self.values.lock() {
-            values.insert(name.clone().into_boxed_str(), value as usize);
-        }
-        // A preemptible declaration: the module resolves the name through the lookup hook above, and a
-        // name it cannot resolve is a zero rather than a failure of the whole compile.
-        let data = self
-            .module
-            .declare_data(&name, Linkage::Preemptible, false, false)
-            .expect("a site symbol is well formed");
-        self.site_data.push(data.as_u32());
-        self.sites.push(site);
-        let global = self.module.declare_data_in_func(data, self.b.func);
-        self.b.ins().global_value(types::I64, global)
+        reloc::emit_site(
+            self.module,
+            self.values,
+            self.b,
+            self.func,
+            site,
+            value,
+            &mut self.sites,
+        )
     }
 
     /// The statement being translated, for a helper that re-matches it.
