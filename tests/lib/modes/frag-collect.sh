@@ -52,8 +52,10 @@ mode_run() {
     [ -n "$packs_before" ] || abort_test "the publish wrote no pack"
 
     # 2) the manifests are the only thing that keeps fragments alive: without them the same bytes are
-    #    dead, and the store's own accounting says so.
-    rm -f "$HOME_DIR"/cache/units/*
+    #    dead, and the store's own accounting says so. Every family that names fragments counts — the
+    #    per-unit manifests, the closure manifest, and the program's own L2 entry, which became a
+    #    manifest of fragments when the body store landed.
+    rm -f "$HOME_DIR"/cache/units/* "$HOME_DIR"/cache/deps/* "$HOME_DIR"/cache/ir/*
     read -r live_frags live_bytes dead_bytes unique_bytes <<<"$(account)"
     [ "$live_frags" -eq 0 ] || abort_test "a fragment survived its manifest: $(account)"
     [ "$dead_bytes" -eq "$unique_bytes" ] || abort_test "dead bytes are not the distinct bytes: $(account)"

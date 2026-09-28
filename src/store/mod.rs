@@ -198,7 +198,9 @@ families! {
     // owners: image::deps, image::collect — the lowered registry dependency closure; keyed by base key
     // + `--extern` stamps.
     Cache DEPS            "deps"            generation("img") flag(Deps);
-    // owners: image::program — one program's post-mono engine IR; keyed by rustc args + dep-info, `build_id` first.
+    // owners: image::program, image::collect — one program's post-mono engine IR; keyed by rustc args
+    // + dep-info, `build_id` first. The entry is a fragment manifest behind a header, so collection
+    // marks the bodies it names.
     Cache IR              "ir"              generation("bin") flag(Ir);
     // owners: store::frags, image::collect — the shared canonical function bodies every manifest
     // references by content address; a pack is reachable only through the manifests that name its

@@ -5,9 +5,11 @@
 //! Refcounts are rejected on purpose: a crash between two counter updates would strand bytes with no
 //! way back or drop bytes a live manifest still names.
 //!
-//! Both manifest families use one format ([`manifest::File`]), so one walk serves them: the closure
-//! manifest in `cache/deps` and the per-unit manifests in `cache/units`. A file from another build is
-//! no more reachable than a missing one, so only current-generation files mark anything.
+//! Every manifest family uses one format ([`manifest::File`]), so one walk serves them: the closure
+//! manifest in `cache/deps`, the per-unit manifests in `cache/units`, and — since an L2 program entry
+//! became a manifest of fragments too — the program entries in `cache/ir`, whose file is the same
+//! manifest behind a header the loader also reads. A file from another build is no more reachable than
+//! a missing one, so only current-generation files mark anything.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -26,6 +28,18 @@ pub(crate) fn live_fragments(root: &Path) -> HashSet<[u8; 32]> {
         super::units::EXT,
         &mut live,
     );
+    // A program entry carries a header before its manifest, so it needs its own read: same manifest,
+    // one field more.
+    let ir = crate::store::IR.dir_in(root);
+    if let Ok(read) = std::fs::read_dir(&ir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|found| found != "bin") {
+                continue;
+            }
+            super::program::mark_live(&path, &mut live);
+        }
+    }
     live
 }
 
