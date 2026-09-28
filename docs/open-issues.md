@@ -134,18 +134,6 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   succeeds), run it again (it fails). The defect is the resolver round trip — its own fresh resolution
   produces a graph its lock reader rejects — not the fixture. Found while measuring the unit home rule.
 
-- **E39** `OPEN` (narrowed): a stored unit layer is not yet safe to run in every session that loads it.
-  The wrong-value case is gone: the home rule no longer consults the load set (an instance's home is
-  the rule's answer whether or not the layer is loaded), a stack the store cannot provide *whole* is
-  not used at all, the writer and the loader share one portability predicate (frozen relocations, TLS
-  templates and GOT slots may not name a *higher* layer or the delta), and the verifier's frozen-range
-  and load-map checks cover an arena's whole mapped region rather than its used prefix. With those,
-  `c_argon2` and `c_p256` run correctly cold and warm, `c_crossbeam` and `c_zip_arch` too — and
-  `c_tokio_mt`'s warm run now **segfaults before the guest writes anything** (interpreter and JIT
-  alike, `MIRVM_NO_IR_CACHE` irrelevant, `prepare` clean). That is the one remaining shape: a program
-  whose own instances are all residue in the delta while one layer is loaded, and something in that
-  combination is not what the loaded layer's bodies and the delta's instance agree on.
-
 ## D. Distribution and product
 
 - **D2** `UNSCHEDULED`: release form and naming — miri-style first, JDK-style self-contained tarball

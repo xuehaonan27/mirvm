@@ -138,6 +138,16 @@ or a symbol a lower layer owns) is what makes "a unit is valid above any stack t
 symbols" literal rather than aspirational; the loader rebuilds them from the prefix and the slot it
 chose. The closure manifest already looks position-independent only because its stack is fixed.
 
+An index entry is a link address too: `fn_entry_syms` and `static_syms` bind a name to an address, and
+the session above resolves those names straight to those addresses. A layer may publish only entries in
+its own slot or in one below it — never a higher unit's slot and never the delta — and the writer
+refuses a layer that carries one outside that span while the loader re-checks it, because the store
+outlives the build that wrote it. A relocation that reaches too far is the milder shape of the two: the
+loading session re-derives its meaning through the binding walk, whereas an index entry is taken
+verbatim, so a session that loads this unit without the other has nothing to bind the name to. Entry
+and static addresses are each classified in their own spline: the two splines share a numbering and a
+step, so an address names a slot only under the kind it is.
+
 A **fragment** is one `FuncBody` in canonical form: the `name` field is lifted into the manifest, and
 each of the five reference sites is rewritten to a dense ordinal in order of first appearance.
 `CallForeign`/GOT names are stable C symbols and stay inline. Fragment bytes = one encoding-version
@@ -196,19 +206,23 @@ never wrong when it is not.
 ### 3.5 Load path
 
 Pre-session, per crate in topological order: compute `unit_key` (rlib stamp — no tcx), pick the
-newest valid manifest, validate exact-equality header material and generation, mark the rest for
-lowering. The stack becomes `[base, unit_1 … unit_n]` with k by load order; union lookups,
-cumulative offsets, fingerprint prefix-truncation and the key chain are the existing `ImageStack`
-mechanics. During the session the multi-way split lowers only missing homes and publishes them;
-absorb at the end is unchanged. The L2 chain grows from `base ⊕ aggregate` to
-`base ⊕ (unit_key, manifest_digest)*`, same mechanism.
+newest valid manifest, validate exact-equality header material and generation. The stack becomes
+`[base, unit_1 … unit_n]` with k by load order; union lookups, cumulative offsets, fingerprint
+prefix-truncation and the key chain are the existing `ImageStack` mechanics.
 
-A layer the stack provides is **immutable**: the session lowers the homes whose manifest missed and
-never writes into a loaded one, so a home whose layer loaded cannot grow. An instance such a layer
-does not already name — rustc instantiates some dependency generics in the instantiating crate, so
-its mangled name carries this program — is therefore residue in the delta rather than an addition to
-a shared manifest. Without that rule a session that loaded a lower unit would republish it from one
-program's view, and the next run would refuse the manifest it had just written.
+A layer the stack provides is **immutable**, and that decides the whole load rule. A session that
+loaded *any* layer lowers no home: the loaded layer answers some instances and statics by symbol, so
+the homes such a session would lower are laid out differently from the manifests written above them,
+and a stack the store cannot provide *whole* is not used at all — the session lowers everything into
+the delta instead of assembling a stack no manifest describes. An instance a loaded layer does not
+already name — rustc instantiates some dependency generics in the instantiating crate, so its mangled
+name carries this program — is therefore residue in the delta rather than an addition to a shared
+manifest. Without that rule a session that loaded a lower unit would republish it from one program's
+view, and the next run would refuse the manifest it had just written. The store consequently converges
+from cold sessions only; growing it incrementally (lowering exactly the missing units above the loaded
+ones and publishing those) is deferred, and the stable home rule — a placement that does not consult
+the load set — is its first half. Absorb at the end is unchanged. The L2 chain grows from
+`base ⊕ aggregate` to `base ⊕ (unit_key, manifest_digest)*`, same mechanism.
 
 Decode of one function costs postcard + one binding walk (the `rebase.rs` shape: a few table lookups
 per reference). The lazy table amortizes it behind the heat order; the §2.6 baseline gates of the
@@ -316,6 +330,12 @@ deleted and replaced, not phased out.
   to this ledger.
 - Binding-walk cost on the warm path is unmeasured; if it erodes the L2 gate, the counter-move is
   caching bound bodies in the L2 entry (space traded back for time, per program).
+- The store grows only from cold sessions (§3.5): a session that loaded any layer publishes nothing,
+  because a home lowered beside a loaded layer is laid out differently from the manifests written
+  above it. Growing it in place — lowering exactly the units whose manifest missed and publishing
+  those above the loaded ones — needs the whole placement rule to be independent of the load set, of
+  which the stable home rule is the first half; it is deferred until stored units per cold run is
+  measured and too low, and the store's coverage per program is the number to watch.
 - open-issues G5 asks whether cross-project sharing is needed at all and whether tainted images
   should become project-local; this RFC is the "yes, and finer" answer to the first question and
   leaves the second untouched. Deciding this RFC closes that branch of G5.
