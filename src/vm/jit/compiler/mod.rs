@@ -102,20 +102,19 @@ struct Compiler<'a> {
     /// The values this compiler's sites baked, by site name ([`reloc`]).
     values: std::sync::Arc<reloc::Values>,
     /// The sites of the body being compiled, in emission order.
-    sites: Vec<Site>,
-    /// Their module-level data ids, parallel to `sites`: how a relocation's target maps back to the
-    /// site it belongs to.
-    site_data: Vec<u32>,
+    sites: reloc::Sites,
     /// The artifact of the function being compiled, one symbol at a time, while a reload is on.
     artifacts: Vec<artifact::Symbol>,
+    /// The body's canonical reference numbering, while an entry for it is being built.
+    ordinals: Option<artifact::Ordinals>,
     /// Whether this compiler links what it just compiled back from its artifact and publishes that,
     /// instead of publishing the module's own code (`MIRVM_JIT_RELOAD`).
     reload: bool,
     #[cfg(test)]
     fail_after_symbol: Option<JitSymbolRole>,
-    /// The last fast body captured for a reload, for the test that links one back by hand.
+    /// The last entry captured, for tests that link one back or compare two sessions' artifacts.
     #[cfg(test)]
-    last_artifact: Option<artifact::Symbol>,
+    last_entry: Option<artifact::Entry>,
 }
 
 struct PendingJitSymbol {

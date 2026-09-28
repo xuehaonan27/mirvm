@@ -18,8 +18,10 @@ use cranelift_codegen::ir::{ExternalName, Function};
 use cranelift_jit::JITModule;
 use cranelift_module::Module;
 
+use crate::vm::ir;
+
 use super::reloc::{self, Site};
-use super::state::JitSymbolRole;
+use super::state::{CodeDomain, JitSymbolRole};
 use super::{Body, SigPart};
 
 /// Encoding version, part of what an entry's bytes mean.
@@ -49,15 +51,112 @@ impl Kind {
 }
 
 /// What a relocation's value is named by.
+///
+/// The names in the first group are *references of the fragment itself*, by the ordinal the canonical
+/// walk gives them, or the entry's own function: the loading session answers them from the body it is
+/// compiling, which is what makes one entry valid in any program that binds the same fragment.
+/// `Body` names a location in that body, canonical for the same reason. `Named` and `Local` need no
+/// body: a helper of the import whitelist (or another symbol of this entry), and an offset the backend
+/// resolved to a label inside the symbol.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Target {
+    /// The id of the function this entry compiles, as the slow-path helpers take it.
+    OwnId,
+    /// A function id the body names, by canonical ordinal, as the helpers take it.
+    FuncId(u32),
+    /// The address of the PLT slot a call goes through, for the function it names.
+    Slot { domain: CodeDomain, func: Ref },
+    /// The runtime address of an asm stub the body names, by canonical ordinal.
+    Stub(u32),
+    /// The runtime address of a frozen link address the body names, by canonical ordinal.
+    Link(u32),
+    /// A location inside the resident decoded body.
+    Body(Body),
     /// A symbol of the import whitelist, or another symbol of this entry.
     Named(Box<str>),
-    /// A site of the recording vocabulary: the program's own frozen data, function ids, stub
-    /// addresses, PLT slots and resident bodies.
-    Site(Site),
-    /// An offset inside this symbol's own code, for a reference the backend resolved to a label.
+    /// An offset inside this symbol's own code.
     Local(u32),
+}
+
+/// Which function a relocation names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Ref {
+    /// The function this entry compiles.
+    Own,
+    /// A function the body names, by canonical ordinal.
+    Ordinal(u32),
+}
+
+/// The canonical ordinals of one body: what each reference site of the fragment stands for, in the
+/// numbering the fragment encoding gives it.
+///
+/// The JIT records a site as the ordinal its body carries, never as the value this session baked, so
+/// the artifact is a function of the body alone. Two programs that bind the same fragment therefore
+/// produce the same bytes, and the value the code needs is resolved again when the entry is linked.
+#[derive(Default)]
+pub(crate) struct Ordinals {
+    fragment: [u8; 32],
+    targets: Vec<ir::frag::Target>,
+    by_target: std::collections::HashMap<ir::frag::Target, u32>,
+}
+
+impl Ordinals {
+    /// Number one body's reference sites, exactly as [`ir::frag::canonical`] does, and take the
+    /// fragment id over the same canonical bytes: the id is what an entry is keyed by, and a body whose
+    /// bytes do not encode has no entry at all.
+    pub(crate) fn of(body: &ir::FuncBody) -> Option<Ordinals> {
+        let canonical = ir::frag::canonical(body);
+        let bytes = ir::frag::encode_canonical(&canonical.body).ok()?;
+        let targets = canonical.targets;
+        Some(Ordinals {
+            fragment: ir::frag::id_of(&bytes),
+            by_target: targets
+                .iter()
+                .enumerate()
+                .map(|(ordinal, target)| (*target, ordinal as u32))
+                .collect(),
+            targets,
+        })
+    }
+
+    /// The fragment this body *is*, which is the entry's semantic key.
+    pub(crate) fn fragment(&self) -> [u8; 32] {
+        self.fragment
+    }
+
+    /// What one ordinal of the body names.
+    pub(crate) fn target(&self, ordinal: u32) -> Option<ir::frag::Target> {
+        self.targets.get(ordinal as usize).copied()
+    }
+
+    fn ordinal(&self, target: ir::frag::Target) -> Option<u32> {
+        self.by_target.get(&target).copied()
+    }
+
+    /// The site a recorded translator site becomes at rest. `None` when the body does not carry the
+    /// reference the code baked, which would mean the body and the code disagree.
+    fn site(&self, site: &Site, func: u32) -> Option<Target> {
+        let callee = |id: ir::FuncId| -> Option<Ref> {
+            match id == func {
+                true => Some(Ref::Own),
+                false => Some(Ref::Ordinal(self.ordinal(ir::frag::Target::Func(id))?)),
+            }
+        };
+        Some(match site {
+            Site::Frozen(addr) => Target::Link(self.ordinal(ir::frag::Target::Link(*addr))?),
+            Site::Func(id) => match callee(*id)? {
+                // The helpers take a func id itself, so `Own` is the id and not a PLT slot.
+                Ref::Own => Target::OwnId,
+                Ref::Ordinal(ordinal) => Target::FuncId(ordinal),
+            },
+            Site::Slot { domain, func } => Target::Slot {
+                domain: *domain,
+                func: callee(*func)?,
+            },
+            Site::Stub(id) => Target::Stub(self.ordinal(ir::frag::Target::Asm(*id))?),
+            Site::Body(part) => Target::Body(*part),
+        })
+    }
 }
 
 /// One relocation the backend left in the code.
@@ -81,9 +180,14 @@ pub(crate) struct Symbol {
 }
 
 /// Everything one compiled function publishes, in the order its symbols were defined.
+///
+/// The entry does not carry the function id it was compiled for: the id is the program's, the key is
+/// the fragment's, and the session that links the entry back knows which function it is compiling.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Entry {
-    pub func: u32,
+    /// The fragment the entry's code was compiled from: its semantic key, and the one thing the
+    /// loading session has to find in the entry before binding anything.
+    pub fragment: [u8; 32],
     pub symbols: Vec<Symbol>,
 }
 
@@ -110,18 +214,32 @@ impl Entry {
     }
 }
 
+/// One symbol's capture input: what the backend produced for it, and the body's numbering.
+pub(crate) struct Captured<'a> {
+    pub module: &'a JITModule,
+    pub func: u32,
+    pub role: JitSymbolRole,
+    pub name: &'a str,
+    pub ir_func: &'a Function,
+    pub compiled: &'a cranelift_codegen::CompiledCode,
+    pub sites: &'a reloc::Sites,
+    pub ordinals: &'a Ordinals,
+}
+
 /// Read one defined symbol back out of the backend: its code, and every relocation in it named in
 /// canonical form. `None` when the code carries something this engine cannot replay — the entry is
 /// then not storable rather than silently incomplete.
-pub(crate) fn capture(
-    module: &JITModule,
-    role: JitSymbolRole,
-    name: &str,
-    ir_func: &Function,
-    compiled: &cranelift_codegen::CompiledCode,
-    sites: &[Site],
-    site_data: &[u32],
-) -> Option<Symbol> {
+pub(crate) fn capture(input: Captured<'_>) -> Option<Symbol> {
+    let Captured {
+        module,
+        func,
+        role,
+        name,
+        ir_func,
+        compiled,
+        sites,
+        ordinals,
+    } = input;
     let user_names = ir_func.params.user_named_funcs();
     let mut relocs = Vec::new();
     for reloc in compiled.buffer.relocs() {
@@ -141,15 +259,14 @@ pub(crate) fn capture(
             FinalizedRelocTarget::ExternalName(ExternalName::User(reference)) => {
                 let user = user_names.get(*reference)?;
                 if user.namespace == reloc::DATA_NAMESPACE {
-                    let ordinal = site_data.iter().position(|id| *id == user.index)?;
-                    Target::Site(sites[ordinal])
+                    ordinals.site(&sites.at(user.index)?, func)?
                 } else {
-                    let name = module
+                    let declared = module
                         .declarations()
                         .get_functions()
                         .find(|(id, _)| id.as_u32() == user.index)
                         .and_then(|(_, declaration)| declaration.name.clone())?;
-                    Target::Named(name.into())
+                    Target::Named(canonical_name(&declared))
                 }
             }
             // A libcall or a named runtime symbol is not part of this engine's vocabulary.
@@ -165,10 +282,27 @@ pub(crate) fn capture(
     }
     Some(Symbol {
         role,
-        name: name.into(),
+        name: canonical_name(name),
         code: compiled.code_buffer().to_vec(),
         relocs,
     })
+}
+
+/// The name one of this compiler's own symbols carries in an entry.
+///
+/// The backend mints `f{func}`, `g{func}` and `p{func}` — the program's function id is in the name so
+/// the module can hold several compiles at once — but no entry may depend on a program's numbering, so
+/// the id is dropped here and the entry refers to its own symbols by role. A name that is not one of
+/// those three is a helper of the import whitelist (or a trampoline, which no entry may name) and keeps
+/// the name the whitelist gives it.
+fn canonical_name(name: &str) -> Box<str> {
+    let numbered = matches!(name.as_bytes().first(), Some(b'f' | b'g' | b'p'))
+        && name.len() > 1
+        && name[1..].bytes().all(|byte| byte.is_ascii_digit());
+    match numbered {
+        true => name[..1].into(),
+        false => name.into(),
+    }
 }
 
 /// One symbol as it landed in the linked region.
@@ -257,8 +391,10 @@ pub(crate) fn link(
                     .map(|(_, _, addr)| *addr)
                     .or_else(|| resolve(&reloc.target))
                     .ok_or_else(|| format!("unresolved symbol `{name}`"))?,
-                Target::Site(_) => {
-                    resolve(&reloc.target).ok_or_else(|| format!("unresolved site {reloc:?}"))?
+                // Everything else is a reference of the fragment, an interior of the body it belongs
+                // to, or this entry's own id: the caller answers those from the body it links for.
+                _ => {
+                    resolve(&reloc.target).ok_or_else(|| format!("unresolved target {reloc:?}"))?
                 }
             };
             let what = (value as i64).wrapping_add(reloc.addend) as u64;
@@ -298,33 +434,62 @@ pub(crate) fn link(
     })
 }
 
-/// What a site names *now*, in this process.
+/// What a linked target is *now*, in this process: the value the translator baked for the site the
+/// target names.
 ///
-/// The vocabulary is process-independent; the values are not. A stored entry carries the site, and
-/// the link asks this function for the address to patch in, which is the same answer the translator
-/// baked when it first compiled the body. `func` is the body the sites belong to: the resident
-/// decoded body is what a `BodyRef` re-derives its interior from.
-pub(crate) fn site_value(shared: &crate::vm::ctx::Shared, func: u32, site: &Site) -> Option<u64> {
-    match site {
-        // The body's own frozen addresses are this process's fixed addresses.
-        Site::Frozen(addr) => Some(addr.0),
-        // A function id immediate: the value the helpers take *is* the id.
-        Site::Func(id) => Some(u64::from(*id)),
-        Site::Stub(id) => shared.instance.asm_stub_addrs.get(*id as usize).copied(),
-        Site::Slot { domain, func } => {
+/// The vocabulary is program-independent; the values are not. A stored entry carries the target, and
+/// the link asks this function for the address to patch in, reading the fragment's own references back
+/// out of the body's canonical ordinals — the same answers the translator baked when it first compiled
+/// the body, one indirection later. `func` is the body the sites belong to: the resident decoded body
+/// is what a `BodyRef` re-derives its interior from.
+pub(crate) fn target_value(
+    shared: &crate::vm::ctx::Shared,
+    func: u32,
+    ordinals: &Ordinals,
+    target: &Target,
+) -> Option<u64> {
+    let callee = |reference: &Ref| -> Option<ir::FuncId> {
+        match reference {
+            Ref::Own => Some(func),
+            Ref::Ordinal(ordinal) => match ordinals.target(*ordinal)? {
+                ir::frag::Target::Func(id) => Some(id),
+                _ => None,
+            },
+        }
+    };
+    match target {
+        // The value the helpers take *is* the id.
+        Target::OwnId => Some(u64::from(func)),
+        Target::FuncId(ordinal) => match ordinals.target(*ordinal)? {
+            ir::frag::Target::Func(id) => Some(u64::from(id)),
+            _ => None,
+        },
+        Target::Slot { domain, func } => {
+            let callee = callee(func)?;
             let slots = shared.jit.slots_for(*domain);
             slots
                 .slots_fast
-                .get(*func as usize)
+                .get(callee as usize)
                 .map(|slot| slot as *const std::sync::atomic::AtomicU64 as u64)
         }
-        Site::Body(part) => body_interior(shared, func, part),
+        Target::Stub(ordinal) => match ordinals.target(*ordinal)? {
+            ir::frag::Target::Asm(id) => shared.instance.asm_stub_addrs.get(id as usize).copied(),
+            _ => None,
+        },
+        // The body's own frozen addresses are this process's fixed addresses; a load that has to place
+        // another process's layout translates them through its LoadMap here instead.
+        Target::Link(ordinal) => match ordinals.target(*ordinal)? {
+            ir::frag::Target::Link(addr) => Some(addr.0),
+            _ => None,
+        },
+        Target::Body(part) => body_value(shared, func, part),
+        Target::Named(_) | Target::Local(_) => None,
     }
 }
 
 /// The address of one interior of the resident decoded body: the statement, rvalue, builtin,
 /// signature, symbol bytes or trap message a slow-path helper re-matches.
-fn body_interior(shared: &crate::vm::ctx::Shared, func: u32, part: &Body) -> Option<u64> {
+fn body_value(shared: &crate::vm::ctx::Shared, func: u32, part: &Body) -> Option<u64> {
     use crate::vm::ir::{Stmt, Terminator};
     let body = shared.module.funcs.get(func as usize)?;
     let block = |block: &u32| body.blocks.get(*block as usize);

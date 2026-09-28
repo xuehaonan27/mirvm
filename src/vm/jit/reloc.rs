@@ -87,6 +87,39 @@ pub(crate) fn name(func: u32, ordinal: usize) -> String {
 /// data; a relocation's target tells the two apart by this number).
 pub(crate) const DATA_NAMESPACE: u32 = 1;
 
+/// The sites one compile staged, in emission order, and the module data ids they were declared as.
+///
+/// The two lists are parallel: a relocation's target carries the data id, and the id maps back onto the
+/// site the code baked. A site is recorded once, where it is emitted, so the identity and the value
+/// cannot drift apart.
+#[derive(Default)]
+pub(crate) struct Sites {
+    identities: Vec<Site>,
+    data: Vec<u32>,
+}
+
+impl Sites {
+    pub(crate) fn len(&self) -> usize {
+        self.identities.len()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.identities.clear();
+        self.data.clear();
+    }
+
+    pub(crate) fn push(&mut self, site: Site, data: u32) {
+        self.identities.push(site);
+        self.data.push(data);
+    }
+
+    /// The site the module declared under one data id.
+    pub(crate) fn at(&self, data: u32) -> Option<Site> {
+        let at = self.data.iter().position(|id| *id == data)?;
+        self.identities.get(at).copied()
+    }
+}
+
 /// Where each recorded site landed, read from the compiled code's relocation list.
 ///
 /// A site's symbol is a data declaration, so its relocation carries the module-level data id; that id
@@ -95,8 +128,7 @@ pub(crate) const DATA_NAMESPACE: u32 = 1;
 pub(crate) fn placed(
     func: &cranelift_codegen::ir::Function,
     compiled: &cranelift_codegen::CompiledCode,
-    sites: &[Site],
-    data: &[u32],
+    sites: &Sites,
 ) -> Vec<Placed> {
     let names = func.params.user_named_funcs();
     let mut placed = Vec::new();
@@ -112,12 +144,12 @@ pub(crate) fn placed(
         if name.namespace != DATA_NAMESPACE {
             continue;
         }
-        let Some(ordinal) = data.iter().position(|id| *id == name.index) else {
+        let Some(site) = sites.at(name.index) else {
             continue;
         };
         placed.push(Placed {
             offset: reloc.offset,
-            site: sites[ordinal],
+            site,
         });
     }
     placed
@@ -128,6 +160,45 @@ pub(crate) fn placed(
 pub(crate) fn lookup(values: &Values, name: &str) -> Option<*const u8> {
     let address = *values.lock().ok()?.get(name)?;
     Some(address as *const u8)
+}
+
+/// Bake one site: the value this process uses now, recorded under a name the backend reports back.
+///
+/// Every address a guest body names goes through here — the translator's bodies through
+/// `Translator::site`, and a wrapper symbol the backend does not build from a body through this
+/// function directly. A raw `iconst` of an address would leave the backend with nothing to report, so
+/// a stored entry could not find it.
+pub(crate) fn emit_site(
+    module: &mut cranelift_jit::JITModule,
+    values: &Values,
+    b: &mut cranelift_frontend::FunctionBuilder,
+    func: u32,
+    site: Site,
+    value: u64,
+    sites: &mut Sites,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::{InstBuilder, Value, types};
+    use cranelift_module::Module;
+    let name = name(func, sites.len());
+    if let Ok(mut values) = values.lock() {
+        // One name per site, and one value per name: a second emission under the same name would
+        // overwrite the first site's value, which the backend resolves at finalize and cannot tell
+        // apart from the original.
+        debug_assert!(
+            !values.contains_key(name.as_str()),
+            "site name {name} is already baked"
+        );
+        values.insert(name.clone().into_boxed_str(), value as usize);
+    }
+    // A preemptible declaration: the module resolves the name through the site lookup hook, and a name
+    // it cannot resolve is a zero rather than a failure of the whole compile.
+    let data = module
+        .declare_data(&name, cranelift_module::Linkage::Preemptible, false, false)
+        .expect("a site symbol is well formed");
+    sites.push(site, data.as_u32());
+    let global = module.declare_data_in_func(data, b.func);
+    let value: Value = b.ins().global_value(types::I64, global);
+    value
 }
 
 /// Forget one function's names: the module caches what it resolved, so the value only has to live

@@ -5,10 +5,12 @@
 use super::*;
 
 impl<'a> Compiler<'a> {
-    /// Capture one wrapper symbol's artifact. A wrapper carries no data site — it calls the body and
-    /// a helper — so its relocation table is names and offsets only.
+    /// Capture one wrapper symbol's artifact. A wrapper is built here rather than by the translator,
+    /// so it carries only the sites this file emits into it — the id the stack guard takes, whose
+    /// value is the entry's own function.
     fn capture_wrapper(
         &mut self,
+        func: u32,
         role: JitSymbolRole,
         name: &str,
         cctx: &cranelift_codegen::Context,
@@ -17,7 +19,16 @@ impl<'a> Compiler<'a> {
             return;
         }
         let symbol = cctx.compiled_code().and_then(|compiled| {
-            artifact::capture(&self.module, role, name, &cctx.func, compiled, &[], &[])
+            artifact::capture(artifact::Captured {
+                module: &self.module,
+                func,
+                role,
+                name,
+                ir_func: &cctx.func,
+                compiled,
+                sites: &self.sites,
+                ordinals: self.ordinals.as_ref()?,
+            })
         });
         match symbol {
             Some(symbol) => self.artifacts.push(symbol),
@@ -133,12 +144,22 @@ impl<'a> Compiler<'a> {
         // longer have to live, and the table must not grow with the process's compile count.
         reloc::forget(&self.values, func, self.sites.len());
         self.sites.clear();
-        self.site_data.clear();
         self.register_pending_eh_frames();
         let mut ranges = self.finalized_symbol_ranges(symbols);
 
         let mut fast = self.module.get_finalized_function(guarded_id) as u64;
         let mut packed = self.module.get_finalized_function(packed_id) as u64;
+        #[cfg(test)]
+        {
+            self.last_entry = Some(artifact::Entry {
+                fragment: self
+                    .ordinals
+                    .as_ref()
+                    .map(artifact::Ordinals::fragment)
+                    .unwrap_or_default(),
+                symbols: self.artifacts.clone(),
+            });
+        }
         // `MIRVM_JIT_RELOAD`: what gets published is what the artifact linked back. The module's own
         // code stays in its arena — cranelift-jit releases nothing per function — but nothing calls
         // it, so the run proves the stored form rather than the session that produced it. The linked
@@ -171,12 +192,13 @@ impl<'a> Compiler<'a> {
     /// the whole link a miss, leaving the module's own code published.
     fn relink(&mut self, func: u32) -> Option<artifact::Linked> {
         let entry = artifact::Entry {
-            func,
+            fragment: self.ordinals.as_ref()?.fragment(),
             symbols: std::mem::take(&mut self.artifacts),
         };
         let bytes = entry.encode().ok()?;
         let entry = artifact::Entry::decode(&bytes).ok()?;
         let shared = self.shared;
+        let ordinals = self.ordinals.as_ref()?;
         let linked = artifact::link(
             &entry,
             &[
@@ -185,14 +207,12 @@ impl<'a> Compiler<'a> {
                 JitSymbolRole::Packed,
             ],
             |target| match target {
-                artifact::Target::Site(site) => artifact::site_value(shared, func, site),
                 // Every helper generated code may call is in the one import table, so what a name
                 // means here is what it meant at compile time.
                 artifact::Target::Named(name) => imports::whitelist()
                     .get(name.as_ref())
                     .map(|addr| *addr as u64),
-                // A local reference is resolved inside the link.
-                artifact::Target::Local(_) => None,
+                target => artifact::target_value(shared, func, ordinals, target),
             },
         )
         .ok()?;
@@ -226,7 +246,17 @@ impl<'a> Compiler<'a> {
             b.switch_to_block(entry);
             let params = b.block_params(entry).to_vec();
             let guard = self.module.declare_func_in_func(self.stack_guard, b.func);
-            let fv = b.ins().iconst(types::I64, func as i64);
+            // The guard's first argument is this function's id, and an id is a program's number: it
+            // goes through the site vocabulary so a stored entry replays it as the entry's own id.
+            let fv = reloc::emit_site(
+                &mut self.module,
+                &self.values,
+                &mut b,
+                func,
+                Site::Func(func),
+                u64::from(func),
+                &mut self.sites,
+            );
             let explicit = u64::from(body.frame_size)
                 .saturating_add(u64::from(body.frame_align.saturating_sub(16)));
             let frame = b.ins().iconst(types::I64, explicit as i64);
@@ -251,7 +281,7 @@ impl<'a> Compiler<'a> {
             self.pending_unwind.push((id, ui, None));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
-        self.capture_wrapper(JitSymbolRole::Guarded, &format!("g{func}"), &cctx);
+        self.capture_wrapper(func, JitSymbolRole::Guarded, &format!("g{func}"), &cctx);
         self.module.clear_context(&mut cctx);
         Some((
             id,
@@ -410,8 +440,7 @@ impl<'a> Compiler<'a> {
                 shared: self.shared,
                 func,
                 values: &self.values,
-                sites: Vec::new(),
-                site_data: Vec::new(),
+                sites: reloc::Sites::default(),
                 block: 0,
                 item: 0,
                 domain: self.domain,
@@ -450,7 +479,6 @@ impl<'a> Compiler<'a> {
             tr.build(func, body);
             has_try_call = tr.has_try_call;
             self.sites = std::mem::take(&mut tr.sites);
-            self.site_data = std::mem::take(&mut tr.site_data);
             b.seal_all_blocks();
             b.finalize();
         }
@@ -485,7 +513,7 @@ impl<'a> Compiler<'a> {
         // counts must agree.
         let placed = {
             let compiled = cctx.compiled_code()?;
-            reloc::placed(&cctx.func, compiled, &self.sites, &self.site_data)
+            reloc::placed(&cctx.func, compiled, &self.sites)
         };
         // A recorded site is not always placed: the optimizer removes a block or a fold, and the
         // instruction with it, so the two counts are reported rather than compared — what a stored
@@ -502,23 +530,21 @@ impl<'a> Compiler<'a> {
             // registration yet (the loaded-address unwind proof is a later step), so such a body keeps
             // the module's own code.
             let name = format!("f{func}");
-            let symbol = artifact::capture(
-                &self.module,
-                JitSymbolRole::FastBody,
-                &name,
-                &cctx.func,
-                cctx.compiled_code()?,
-                &self.sites,
-                &self.site_data,
-            );
+            // The body's own reference numbering: what an entry records instead of this session's
+            // addresses and ids, and what makes it a store candidate at all.
+            self.ordinals = artifact::Ordinals::of(body);
+            let symbol = artifact::capture(artifact::Captured {
+                module: &self.module,
+                func,
+                role: JitSymbolRole::FastBody,
+                name: &name,
+                ir_func: &cctx.func,
+                compiled: cctx.compiled_code()?,
+                sites: &self.sites,
+                ordinals: self.ordinals.as_ref().expect("just set"),
+            });
             match symbol {
-                Some(symbol) if !has_try_call => {
-                    #[cfg(test)]
-                    {
-                        self.last_artifact = Some(symbol.clone());
-                    }
-                    self.artifacts.push(symbol);
-                }
+                Some(symbol) if !has_try_call => self.artifacts.push(symbol),
                 // A kind this engine cannot replay: this compiler keeps publishing the module's code.
                 _ => self.reload = false,
             }
@@ -601,7 +627,7 @@ impl<'a> Compiler<'a> {
             self.pending_unwind.push((id, ui, None));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
-        self.capture_wrapper(JitSymbolRole::Packed, &format!("p{func}"), &cctx);
+        self.capture_wrapper(func, JitSymbolRole::Packed, &format!("p{func}"), &cctx);
         self.module.clear_context(&mut cctx);
         Some((
             id,
