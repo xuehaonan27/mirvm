@@ -138,10 +138,12 @@ impl<'a> Compiler<'a> {
     /// Build a compiler for an explicit code domain. The plain domain is what every
     /// production path uses; the trace domain's semantics are exercised by tests
     /// before it is wired to activation entry.
-    pub(super) fn with_domain(shared: &'a Shared, domain: CodeDomain) -> Self {
+    /// A compiler for one domain at one tier. The tier is the optimization level and therefore part
+    /// of the jit-key every entry this compiler writes is filed under.
+    pub(super) fn with_tier(shared: &'a Shared, domain: CodeDomain, tier: Tier) -> Self {
         // MIRVM_JIT_STATS=1 turns on helper call-frequency counters; process-wide, once.
         stat_init();
-        let isa = domain_isa(domain);
+        let isa = isa_for(domain, tier);
         // The key is taken from the ISA the module is about to be built with: the same host flags, the
         // same codegen options and the same domain must hold for an entry to be reusable.
         let jit_key = artifact::JitKey::of(isa.as_ref(), domain);
@@ -359,6 +361,8 @@ impl<'a> Compiler<'a> {
             pending_unwind: Vec::new(),
             values,
             sites: reloc::Sites::default(),
+            tier,
+            published: std::collections::HashSet::new(),
             artifacts: Vec::new(),
             ordinals: None,
             reload: crate::options::jit_reload(),

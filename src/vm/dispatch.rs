@@ -92,7 +92,14 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         if prev + 1 == jit.threshold
             && let Some(q) = jit.queue.lock().unwrap().as_ref()
         {
-            let _ = q.send(func);
+            // The tier is the heat ledger's answer for this function, not this call's: a function a
+            // previous run found hot is built optimized the first time it is asked for, and everything
+            // else starts cheap. Only one request is raised per function while it is interpreted, which
+            // is why the policy lives here rather than in a second threshold.
+            let _ = q.send(crate::vm::jit::Request {
+                func,
+                tier: jit.tier_for(func),
+            });
         }
         // SYNC verification mode: once submitted (now or earlier), wait for publication or
         // the failure sentinel. With threshold = 1 this turns "request compilation on the

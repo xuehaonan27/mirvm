@@ -103,6 +103,12 @@ struct Compiler<'a> {
     values: std::sync::Arc<reloc::Values>,
     /// The sites of the body being compiled, in emission order.
     sites: reloc::Sites,
+    /// Which optimization level this compiler builds at: part of the jit-key, and the only thing that
+    /// distinguishes the two compilers one Engine runs.
+    tier: Tier,
+    /// The functions this compiler published. Compilation is once per tier, so a second request for a
+    /// tier that already answered is a no-op while the *other* tier's answer is an upgrade.
+    published: std::collections::HashSet<u32>,
     /// The artifact of the function being compiled, one symbol at a time, while a reload is on.
     artifacts: Vec<artifact::Symbol>,
     /// The body's canonical reference numbering, while an entry for it is being built.
@@ -151,7 +157,7 @@ pub fn start(shared: &std::sync::Arc<Shared>) {
         return;
     }
     shared.jit.stopping.store(false, Ordering::Release);
-    let (tx, rx): (Sender<u32>, Receiver<u32>) = std::sync::mpsc::channel();
+    let (tx, rx): (Sender<Request>, Receiver<Request>) = std::sync::mpsc::channel();
     *shared.jit.queue.lock().unwrap() = Some(tx);
     // A failed compilation or a dead worker just stays interpreted; no semantic
     // path depends on the JIT.
@@ -180,20 +186,47 @@ pub fn stop(shared: &Shared) {
 
 pub(super) fn worker(
     shared: std::sync::Arc<Shared>,
-    rx: Receiver<u32>,
+    rx: Receiver<Request>,
     domain: CodeDomain,
     heat: crate::vm::jit::Heat,
 ) {
     let dbg = crate::options::jit_debug();
-    let mut c = Compiler::with_domain(&shared, domain);
-    // Before a single request is served: link what the store already holds for the functions the last
-    // run found hot. The first call into one of them then finds a published entry instead of enqueueing
-    // a compile, which is the whole point of a heat order.
+    // One compiler per tier: each has its own ISA, its own module and so its own jit-key, which is what
+    // lets one fragment have an entry at each level. Both publish into the same slots, so dispatch reads
+    // whichever was published last.
+    let mut baseline = Compiler::with_tier(&shared, domain, Tier::Baseline);
+    let mut optimized = Compiler::with_tier(&shared, domain, Tier::Optimized);
+    // Before a single request is served: link what the store holds for the functions the last run found
+    // hot. A stored optimized entry wins, because that is the tier the function is about to be asked
+    // for; otherwise the baseline entry is linked and the upgrade threshold will replace it later, and
+    // either way the first call finds a published entry instead of enqueueing a compile.
     let mut observed: Vec<u32> = Vec::new();
-    if c.jit_cache {
-        c.prelink(&heat.order);
+    // The set the tier policy reads: a function in this order is asked for optimized the first time
+    // this session compiles it.
+    shared.jit.set_hot(&heat.order);
+    if baseline.jit_cache {
+        let mut prelinked = 0u64;
+        for func in &heat.order {
+            let Some(body) = shared.module.funcs.get(*func as usize) else {
+                continue;
+            };
+            if optimized.load_cached(*func, body) || baseline.load_cached(*func, body) {
+                prelinked += 1;
+            }
+        }
+        if prelinked != 0 {
+            helpers::cache_prelinked(prelinked);
+            if dbg {
+                eprintln!("mirvm-jit-debug: prelinked {prelinked} entries from the heat order");
+            }
+        }
     }
-    while let Ok(func) = rx.recv() {
+    while let Ok(request) = rx.recv() {
+        let func = request.func;
+        let c = match request.tier {
+            Tier::Baseline => &mut baseline,
+            Tier::Optimized => &mut optimized,
+        };
         if shared.jit.stopping.load(Ordering::Acquire) {
             break;
         }
@@ -205,6 +238,8 @@ pub(super) fn worker(
         }
         c.compile(func);
         observed.push(func);
+        // The other compiler is not consulted here: a function is compiled once per tier, and the
+        // upgrade request a hot function raises is what replaces a baseline entry with an optimized one.
         if dbg {
             let s = shared.jit.slots[func as usize].load(Ordering::Acquire);
             let ok = s != 0 && s != FAIL_SENTINEL;
@@ -225,21 +260,24 @@ pub(super) fn worker(
     }
     // The order requests arrived in is this program's heat order for the next run.
     heat.write(&observed);
-    // Whatever the batch still holds is worth a file: the next session can only reuse what is in the
+    // Whatever a batch still holds is worth a file: the next session can only reuse what is in the
     // store, and a worker that exits with entries staged would lose them.
-    if c.jit_cache {
-        let session = std::mem::take(&mut c.jit_staging);
-        if let Err(error) = session.publish()
-            && dbg
-        {
-            eprintln!("mirvm-jit-debug: cannot publish JIT entries: {error}");
+    for c in [&mut baseline, &mut optimized] {
+        if c.jit_cache {
+            let session = std::mem::take(&mut c.jit_staging);
+            if let Err(error) = session.publish()
+                && dbg
+            {
+                eprintln!("mirvm-jit-debug: cannot publish JIT entries: {error}");
+            }
         }
     }
     // Published JIT code may still be live on a sleeping stack in the process-wide
     // thread pool. Teardown has to join the compile thread rather than race libc
-    // cleanup, and it must not destruct the JITModule either, since that would unmap
+    // cleanup, and it must not destruct the JITModules either, since that would unmap
     // published code. The address space is reclaimed in one go at process exit.
-    std::mem::forget(c);
+    std::mem::forget(baseline);
+    std::mem::forget(optimized);
 }
 
 // ===== Runtime helpers (compiled code calls back into the engine through imported symbols) =====

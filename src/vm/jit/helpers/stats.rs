@@ -80,6 +80,8 @@ static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 static CACHE_REFUSED: AtomicU64 = AtomicU64::new(0);
 static CACHE_PRELINKED: AtomicU64 = AtomicU64::new(0);
+static TIER_BASELINE: AtomicU64 = AtomicU64::new(0);
+static TIER_OPTIMIZED: AtomicU64 = AtomicU64::new(0);
 
 /// An entry was linked and published from the store.
 pub(crate) fn cache_hit() {
@@ -96,10 +98,19 @@ pub(crate) fn cache_refused() {
     CACHE_REFUSED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Entries linked from the heat order before any request was served: what warmup traded a compile
-/// wave for.
+/// Entries linked from the store before any request was served: what warmup traded a compile wave for.
 pub(crate) fn cache_prelinked(count: u64) {
     CACHE_PRELINKED.fetch_add(count, Ordering::Relaxed);
+}
+
+/// Functions this session answered at the cheap tier, and at the optimized one. The split is what the
+/// adaptive policy is judged by.
+pub(crate) fn tier_baseline() {
+    TIER_BASELINE.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn tier_optimized() {
+    TIER_OPTIMIZED.fetch_add(1, Ordering::Relaxed);
 }
 
 /// The store counters, for a diagnostic that must name them.
@@ -122,8 +133,11 @@ extern "C" fn stat_dump() {
     let (hits, misses, refused) = cache_counts();
     if hits + misses + refused != 0 {
         line.push_str(&format!(
-            " cache_hits={hits} cache_misses={misses} cache_refused={refused} cache_prelinked={}",
-            CACHE_PRELINKED.load(Ordering::Relaxed)
+            " cache_hits={hits} cache_misses={misses} cache_refused={refused} \
+             cache_prelinked={} tier_baseline={} tier_optimized={}",
+            CACHE_PRELINKED.load(Ordering::Relaxed),
+            TIER_BASELINE.load(Ordering::Relaxed),
+            TIER_OPTIMIZED.load(Ordering::Relaxed)
         ));
     }
     eprintln!("{line}");

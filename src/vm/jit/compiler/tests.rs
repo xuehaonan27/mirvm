@@ -9,7 +9,7 @@ use super::*;
 /// hit would replace the compile the test is about. The store's own paths are covered by its unit
 /// tests and by the `fib32-jit-cache` gate.
 fn test_compiler(shared: &Shared, domain: CodeDomain) -> Compiler<'_> {
-    let mut compiler = Compiler::with_domain(shared, domain);
+    let mut compiler = Compiler::with_tier(shared, domain, Tier::Optimized);
     compiler.jit_cache = false;
     compiler
 }
@@ -57,7 +57,7 @@ fn both_code_domains_compile_the_same_body() {
 /// so the two domains cannot share one `Flags`.
 #[test]
 fn trace_domain_enables_the_pinned_register_and_plain_does_not() {
-    let trace = trace_domain_flags();
+    let trace = domain_flags(Tier::Optimized, true);
     assert!(
         trace.enable_pinned_reg(),
         "trace domain must enable the pinned register ({})",
