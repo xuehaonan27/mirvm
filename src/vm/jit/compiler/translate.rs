@@ -60,6 +60,7 @@ impl<'a> Compiler<'a> {
     /// Compile one function that crossed the threshold. A rejected or failed request
     /// stays interpreted, silently.
     pub(super) fn compile(&mut self, func: u32) {
+        let started = helpers::ledger_on().then(std::time::Instant::now);
         let jit = &self.shared.jit;
         if self.domain == CodeDomain::Trace && jit.trace_enter.load(Ordering::Acquire) == 0 {
             // Without the boundary pin a trace body has no recorder to read, so
@@ -171,6 +172,23 @@ impl<'a> Compiler<'a> {
         // is written only by an explicit stop.
         jit.publish_compiled_entries_for(self.domain, func, fast, packed, ranges);
         self.published.insert(func);
+        if let Some(started) = started {
+            // The time is read before the sizes are gathered: the ledger must not price the work it
+            // does to describe itself.
+            let micros = started.elapsed().as_micros() as u64;
+            helpers::ledger_row(
+                helpers::Built::Compiled,
+                u64::from(artifact::Ordinals::of(body).map_or(0, |ordinals| ordinals.size())),
+                entry.as_ref().map_or(0, |entry| {
+                    entry
+                        .symbols
+                        .iter()
+                        .map(|symbol| symbol.code.len() as u64)
+                        .sum()
+                }),
+                micros,
+            );
+        }
         match self.tier {
             Tier::Baseline => helpers::tier_baseline(),
             Tier::Optimized => helpers::tier_optimized(),
@@ -212,6 +230,7 @@ impl<'a> Compiler<'a> {
     /// same two entries a compile would. Everything a doubt can do is a miss, which spends a compile
     /// and nothing else.
     pub(super) fn load_cached(&mut self, func: u32, body: &ir::FuncBody) -> bool {
+        let started = helpers::ledger_on().then(std::time::Instant::now);
         let Some(ordinals) = artifact::Ordinals::of(body) else {
             return false;
         };
@@ -290,6 +309,19 @@ impl<'a> Compiler<'a> {
             .jit
             .publish_compiled_entries_for(self.domain, func, guarded, packed, ranges);
         self.published.insert(func);
+        if let Some(started) = started {
+            let micros = started.elapsed().as_micros() as u64;
+            helpers::ledger_row(
+                helpers::Built::Linked,
+                u64::from(ordinals.size()),
+                entry
+                    .symbols
+                    .iter()
+                    .map(|symbol| symbol.code.len() as u64)
+                    .sum(),
+                micros,
+            );
+        }
         match self.tier {
             Tier::Baseline => helpers::tier_baseline(),
             Tier::Optimized => helpers::tier_optimized(),

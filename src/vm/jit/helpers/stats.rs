@@ -143,11 +143,105 @@ extern "C" fn stat_dump() {
     eprintln!("{line}");
 }
 
-/// Called once from `Compiler::new`: enables the stats from the environment and registers
-/// the exit dump.
+/// Called from `Compiler::new`, which one Engine does once per tier: the environment is read and the
+/// exit dump registered exactly once per process, so the counters are not printed twice.
 pub(crate) fn stat_init() {
-    if crate::options::jit_stats() {
-        STAT_ON.store(true, Ordering::Relaxed);
-        crate::os::process::atexit_native(stat_dump);
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        if crate::options::jit_stats() {
+            STAT_ON.store(true, Ordering::Relaxed);
+            crate::os::process::atexit_native(stat_dump);
+        }
+        if crate::options::jit_ledger() {
+            LEDGER_ON.store(true, Ordering::Relaxed);
+            crate::os::process::atexit_native(ledger_dump);
+        }
+    });
+}
+
+// ===== the compile-time ledger (MIRVM_JIT_LEDGER=1) =====
+// What the pre-linking floor and the tier thresholds are priced from: one row per function this
+// process built or linked out of the JIT store, with the two sizes that decide whether linking a
+// small body is cheaper than compiling it. Measurement only — the knob is off unless asked for, and
+// the row costs one lock per compile or link, which is nothing beside either.
+static LEDGER_ON: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Built {
+    Compiled,
+    Linked,
+}
+
+impl Built {
+    fn name(self) -> &'static str {
+        match self {
+            Built::Compiled => "compiled",
+            Built::Linked => "linked",
+        }
+    }
+}
+
+/// One measured function: how it was produced, the canonical body's size, the machine code it became,
+/// and how long the producing call took.
+struct Row {
+    built: Built,
+    body: u64,
+    code: u64,
+    micros: u64,
+}
+
+static LEDGER: std::sync::Mutex<Vec<Row>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether the ledger is on, so a caller can skip the work that only feeds it.
+#[inline]
+pub(crate) fn ledger_on() -> bool {
+    LEDGER_ON.load(Ordering::Relaxed)
+}
+
+pub(crate) fn ledger_row(built: Built, body: u64, code: u64, micros: u64) {
+    if let Ok(mut rows) = LEDGER.lock() {
+        rows.push(Row {
+            built,
+            body,
+            code,
+            micros,
+        });
+    }
+}
+
+extern "C" fn ledger_dump() {
+    let Ok(mut rows) = LEDGER.lock() else {
+        return;
+    };
+    // One summary per kind, then the rows by body size: the floor is the size where the two per-kind
+    // costs cross, so the sizes have to be comparable across rows.
+    for kind in [Built::Compiled, Built::Linked] {
+        let (mut count, mut body, mut code, mut micros) = (0u64, 0u64, 0u64, 0u64);
+        for row in rows.iter().filter(|row| row.built == kind) {
+            count += 1;
+            body += row.body;
+            code += row.code;
+            micros += row.micros;
+        }
+        if count == 0 {
+            continue;
+        }
+        eprintln!(
+            "mirvm-jit-ledger: {} count={count} body_bytes={body} code_bytes={code} micros={micros} \
+             body_per_us={:.1} code_per_body={:.2}",
+            kind.name(),
+            body as f64 / micros.max(1) as f64,
+            code as f64 / body.max(1) as f64,
+        );
+    }
+    rows.sort_by_key(|row| row.body);
+    for row in rows.iter() {
+        eprintln!(
+            "mirvm-jit-ledger-row: {} body={} code={} micros={}",
+            row.built.name(),
+            row.body,
+            row.code,
+            row.micros
+        );
     }
 }

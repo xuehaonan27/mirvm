@@ -96,6 +96,9 @@ pub(crate) enum Ref {
 #[derive(Default)]
 pub(crate) struct Ordinals {
     fragment: [u8; 32],
+    /// The canonical body's length, which is the size a decision about this body is priced on (the
+    /// pre-linking floor, the ledger). Free here: the canonical bytes are what the id is taken over.
+    size: u32,
     targets: Vec<ir::frag::Target>,
     by_target: std::collections::HashMap<ir::frag::Target, u32>,
 }
@@ -110,6 +113,7 @@ impl Ordinals {
         let targets = canonical.targets;
         Some(Ordinals {
             fragment: ir::frag::id_of(&bytes),
+            size: u32::try_from(bytes.len()).ok()?,
             by_target: targets
                 .iter()
                 .enumerate()
@@ -122,6 +126,11 @@ impl Ordinals {
     /// The fragment this body *is*, which is the entry's semantic key.
     pub(crate) fn fragment(&self) -> [u8; 32] {
         self.fragment
+    }
+
+    /// The canonical body's length in bytes.
+    pub(crate) fn size(&self) -> u32 {
+        self.size
     }
 
     /// What one ordinal of the body names.
