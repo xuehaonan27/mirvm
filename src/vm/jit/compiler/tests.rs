@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// A compiler for a test that drives the pipeline directly.
+///
+/// The store is off: a body these tests build can share a fragment with a real program, and a cache
+/// hit would replace the compile the test is about. The store's own paths are covered by its unit
+/// tests and by the `fib32-jit-cache` gate.
+fn test_compiler(shared: &Shared, domain: CodeDomain) -> Compiler<'_> {
+    let mut compiler = Compiler::with_domain(shared, domain);
+    compiler.jit_cache = false;
+    compiler
+}
+
 /// The trace domain must compile the same guest IR as the plain domain.
 /// The domain may only change how recorder state is addressed (the pinned
 /// register); if it changed guest codegen, the trace and plain runs of one
@@ -16,7 +27,7 @@ fn both_code_domains_compile_the_same_body() {
             funcs: vec![body("domain_body", Terminator::Return)].into(),
             ..ir::Module::default()
         });
-        let mut compiler = Compiler::with_domain(&shared, domain);
+        let mut compiler = test_compiler(&shared, domain);
         compiler.compile(0);
         // Each domain publishes into its own slot set; the trace entry must
         // not appear in the plain slots, which is the isolation the split
@@ -132,7 +143,7 @@ fn trace_entry_pins_the_recorder_and_restores_it_even_when_it_unwinds() {
         funcs: vec![body("domain_body", Terminator::Return)].into(),
         ..ir::Module::default()
     });
-    let mut compiler = Compiler::with_domain(&shared, CodeDomain::Trace);
+    let mut compiler = test_compiler(&shared, CodeDomain::Trace);
     let enter = shared.jit.trace_enter.load(Ordering::Acquire);
     assert_ne!(enter, 0, "the trace domain published no boundary entry");
 
@@ -225,7 +236,7 @@ fn trace_domain_compiles_a_pinned_syscall_body() {
         funcs: vec![probe].into(),
         ..ir::Module::default()
     });
-    let mut compiler = Compiler::with_domain(&shared, CodeDomain::Trace);
+    let mut compiler = test_compiler(&shared, CodeDomain::Trace);
     compiler.compile(0);
     assert_ne!(
         shared.jit.slots_for(CodeDomain::Trace).slots[0].load(Ordering::Acquire),
@@ -273,7 +284,7 @@ fn real_compilation_registers_every_executable_role() {
         funcs: vec![caller, callee].into(),
         ..ir::Module::default()
     });
-    let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
+    let mut compiler = test_compiler(&shared, CodeDomain::Plain);
 
     compiler.compile(0);
 
@@ -316,7 +327,7 @@ fn failed_request_cannot_leak_symbols_into_the_next_compile_batch() {
         .into(),
         ..ir::Module::default()
     });
-    let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
+    let mut compiler = test_compiler(&shared, CodeDomain::Plain);
     compiler.fail_after_symbol = Some(JitSymbolRole::FastBody);
 
     compiler.compile(0);
@@ -396,7 +407,7 @@ fn a_compiled_body_runs_from_its_artifact() {
         funcs: vec![body].into(),
         ..ir::Module::default()
     });
-    let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
+    let mut compiler = test_compiler(&shared, CodeDomain::Plain);
     // Collect the artifact, and on a pair whose call relocation this linker applies, also publish what
     // it links back (the compiler path); the body-level link below is what every pair proves.
     compiler.reload = true;
@@ -428,6 +439,7 @@ fn a_compiled_body_runs_from_its_artifact() {
     let captured = compiler.last_entry.as_ref().expect("the body was captured");
     let entry = artifact::Entry {
         fragment: captured.fragment,
+        jit: captured.jit.clone(),
         symbols: vec![
             captured
                 .symbol(JitSymbolRole::FastBody)
@@ -519,7 +531,7 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
             funcs: funcs.into(),
             ..ir::Module::default()
         });
-        let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
+        let mut compiler = test_compiler(&shared, CodeDomain::Plain);
         compiler.reload = true;
         compiler.compile(which);
         let entry = compiler
@@ -536,6 +548,10 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
     let first = entry_of(vec![probe(0x6a00_0000_1000, 1), callee()], 0);
     let second = entry_of(vec![callee(), probe(0x6a00_0000_9000, 0)], 1);
 
+    assert!(
+        first.symbol(JitSymbolRole::FastBody).is_some(),
+        "the compared entries hold the body, or the comparison proves nothing"
+    );
     assert_eq!(
         first.fragment, second.fragment,
         "the same body is not the same fragment in two programs"

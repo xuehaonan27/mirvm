@@ -29,6 +29,7 @@
 
 pub(crate) mod entry;
 pub(crate) mod frags;
+pub(crate) mod jit;
 pub(crate) mod report;
 
 use std::path::{Path, PathBuf};
@@ -97,6 +98,7 @@ pub(crate) enum FamilyFlag {
     Deps,
     Ir,
     Frags,
+    Jit,
     Units,
     Scripts,
     Target,
@@ -202,6 +204,10 @@ families! {
     // references by content address; a pack is reachable only through the manifests that name its
     // fragments.
     Cache FRAGS           "frags"           pack flag(Frags);
+    // owners: store::jit, vm::jit::compiler — one compiled symbol's code per `(fragment, jit-key)`,
+    // reachable only through the fragment id it was compiled from. Packs like the fragment store, and
+    // purged whole: what is live inside is the fragments the manifests name.
+    Cache JIT             "jit"             pack flag(Jit);
     // owners: image::units, image::collect — one manifest per crate, content-named by unit key +
     // manifest digest so a grown unit adds a manifest instead of overwriting the one a running program
     // pinned. Generational like the closure manifest its format matches: a manifest another build

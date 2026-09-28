@@ -142,6 +142,9 @@ impl<'a> Compiler<'a> {
         // MIRVM_JIT_STATS=1 turns on helper call-frequency counters; process-wide, once.
         stat_init();
         let isa = domain_isa(domain);
+        // The key is taken from the ISA the module is about to be built with: the same host flags, the
+        // same codegen options and the same domain must hold for an entry to be reusable.
+        let jit_key = artifact::JitKey::of(isa.as_ref(), domain);
         let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         jb.symbols(
             whitelist()
@@ -359,6 +362,12 @@ impl<'a> Compiler<'a> {
             artifacts: Vec::new(),
             ordinals: None,
             reload: crate::options::jit_reload(),
+            // A trace body is never cached: it assumes a pinned recorder register and a live session,
+            // so its code is meaningless outside the session that built it (§1 of the JIT design).
+            jit_cache: domain == CodeDomain::Plain && !crate::options::no_jit_cache(),
+            jit_key,
+            jit_staging: crate::store::jit::Session::default(),
+            jit_index: None,
             #[cfg(test)]
             fail_after_symbol: None,
             #[cfg(test)]

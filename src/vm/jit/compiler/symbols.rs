@@ -11,6 +11,23 @@ impl<'a> Compiler<'a> {
         if self.pending_unwind.is_empty() {
             return;
         }
+        let frames = self
+            .pending_unwind
+            .drain(..)
+            .map(|(id, ui, lsda)| (self.module.get_finalized_function(id) as u64, ui, lsda))
+            .collect();
+        self.register_eh_frames(frames);
+    }
+
+    /// Register a batch of CFA programs at the addresses the code ended up at.
+    ///
+    /// The same path serves a fresh compile (the addresses the module finalized) and a stored entry
+    /// (the addresses the link placed it at): the FDE is synthesized here from the stored program, so
+    /// no absolute address survives in the stored form.
+    pub(super) fn register_eh_frames(&self, frames: Vec<(u64, UnwindInfo, Option<Vec<u8>>)>) {
+        if frames.is_empty() {
+            return;
+        }
         use gimli::RunTimeEndian;
         use gimli::write::{Address, EhFrame, EndianVec, FrameTable};
         unsafe extern "C" {
@@ -31,9 +48,8 @@ impl<'a> Compiler<'a> {
             Address::Constant(&PERS_REF as *const std::sync::atomic::AtomicU64 as u64),
         ));
         let cie_pers_id = table.add_cie(cie_pers);
-        for (id, ui, lsda) in self.pending_unwind.drain(..) {
+        for (addr, ui, lsda) in frames {
             if let UnwindInfo::SystemV(info) = ui {
-                let addr = self.module.get_finalized_function(id) as u64;
                 match lsda {
                     Some(bytes) => {
                         let lsda_addr = bytes.as_ptr() as u64;

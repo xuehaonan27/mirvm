@@ -13,9 +13,11 @@ impl<'a> Compiler<'a> {
         func: u32,
         role: JitSymbolRole,
         name: &str,
+        unwind: Option<cranelift_codegen::isa::unwind::UnwindInfo>,
+        lsda: Option<Vec<u8>>,
         cctx: &cranelift_codegen::Context,
     ) {
-        if !self.reload {
+        if !self.reload && !self.jit_cache {
             return;
         }
         let symbol = cctx.compiled_code().and_then(|compiled| {
@@ -28,12 +30,19 @@ impl<'a> Compiler<'a> {
                 compiled,
                 sites: &self.sites,
                 ordinals: self.ordinals.as_ref()?,
+                unwind,
+                lsda,
             })
         });
         match symbol {
             Some(symbol) => self.artifacts.push(symbol),
-            // A kind this engine cannot replay: this compiler keeps publishing the module's code.
-            None => self.reload = false,
+            // A kind this engine cannot replay: this compiler keeps publishing the module's code, and a
+            // partial entry is not storable either, because the loader links an entry whole.
+            None => {
+                self.reload = false;
+                self.jit_cache = false;
+                self.artifacts.clear();
+            }
         }
     }
 
@@ -75,32 +84,13 @@ impl<'a> Compiler<'a> {
             }
             return;
         }
+        // A stored entry is the whole product of a compile: reuse it before spending one. The callees
+        // are pre-warmed either way, because a stored body calls through the same PLT slots.
+        if self.jit_cache && self.load_cached(func, body) {
+            return;
+        }
         let abi = callee_abi(body).expect("admit already checked the shape");
-
-        // Pre-warm the fast slots of PLT-visible callees: an uncompiled one gets a c2i
-        // trampoline (fast shape, so its call sites keep a constant shape). Callees that
-        // do not fit the fast shape are excluded; their call sites go straight to c2i
-        // (cold path).
-        let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
-        for blk in &body.blocks {
-            if let Terminator::Call {
-                callee, args, ret, ..
-            } = &blk.term
-                && *callee != func
-                && !callees.iter().any(|(c, _)| c == callee)
-                && let Some(cabi) = callee_abi(&self.shared.module.funcs[*callee as usize])
-                && cabi.nparams == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
-            {
-                callees.push((*callee, cabi));
-            }
-        }
-        for (c, cabi) in callees {
-            if jit.slots_for(self.domain).slots_fast[c as usize].load(Ordering::Acquire) == 0
-                && let Some((tramp, ranges)) = self.define_c2i_trampoline(c, cabi)
-            {
-                jit.publish_c2i_entry_for(self.domain, c, tramp as u64, ranges);
-            }
-        }
+        self.prewarm_callees(func, body);
 
         // Silent-failure discipline: a compile failure keeps the function interpreted
         // and never writes a panic to stderr, because the differential oracle compares
@@ -149,23 +139,21 @@ impl<'a> Compiler<'a> {
 
         let mut fast = self.module.get_finalized_function(guarded_id) as u64;
         let mut packed = self.module.get_finalized_function(packed_id) as u64;
-        #[cfg(test)]
+        // One entry for this function, built here and used by everyone below: the store keeps it, and
+        // a reload links it back. Building it before either means the two can never disagree.
+        let entry = self.finish_entry();
+        if self.jit_cache
+            && let Some(entry) = &entry
         {
-            self.last_entry = Some(artifact::Entry {
-                fragment: self
-                    .ordinals
-                    .as_ref()
-                    .map(artifact::Ordinals::fragment)
-                    .unwrap_or_default(),
-                symbols: self.artifacts.clone(),
-            });
+            self.stage_entry(entry);
         }
         // `MIRVM_JIT_RELOAD`: what gets published is what the artifact linked back. The module's own
         // code stays in its arena — cranelift-jit releases nothing per function — but nothing calls
         // it, so the run proves the stored form rather than the session that produced it. The linked
         // region is process-lifetime, like every published entry.
         if self.reload
-            && let Some(linked) = self.relink(func)
+            && let Some(entry) = &entry
+            && let Some(linked) = self.relink(entry, func)
             && let Some(guarded) = linked.entry(JitSymbolRole::Guarded)
             && let Some(reloaded) = linked.entry(JitSymbolRole::Packed)
         {
@@ -184,19 +172,143 @@ impl<'a> Compiler<'a> {
         jit.publish_compiled_entries_for(self.domain, func, fast, packed, ranges);
     }
 
-    /// Link this function back from its artifact, through the encoded form.
+    /// Give every PLT-visible callee of this body a fast slot: an uncompiled one gets a c2i
+    /// trampoline (fast shape, so its call sites keep a constant shape). Callees that do not fit the
+    /// fast shape are excluded; their call sites go straight to c2i (cold path).
+    fn prewarm_callees(&mut self, func: u32, body: &ir::FuncBody) {
+        let jit = &self.shared.jit;
+        let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
+        for blk in &body.blocks {
+            if let Terminator::Call {
+                callee, args, ret, ..
+            } = &blk.term
+                && *callee != func
+                && !callees.iter().any(|(c, _)| c == callee)
+                && let Some(cabi) = callee_abi(&self.shared.module.funcs[*callee as usize])
+                && cabi.nparams == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
+            {
+                callees.push((*callee, cabi));
+            }
+        }
+        for (c, cabi) in callees {
+            if jit.slots_for(self.domain).slots_fast[c as usize].load(Ordering::Acquire) == 0
+                && let Some((tramp, ranges)) = self.define_c2i_trampoline(c, cabi)
+            {
+                jit.publish_c2i_entry_for(self.domain, c, tramp as u64, ranges);
+            }
+        }
+    }
+
+    /// Publish this function's code from the store, if the store holds an entry for its fragment under
+    /// this compiler's key.
     ///
-    /// The bytes are what a store would hold, so the reload decodes what it encoded: a field the two
-    /// sides disagree on cannot hide behind a same-session shortcut. Every relocation resolves against
-    /// live state — the same answers the translator baked — and a target that does not resolve makes
-    /// the whole link a miss, leaving the module's own code published.
-    fn relink(&mut self, func: u32) -> Option<artifact::Linked> {
-        let entry = artifact::Entry {
-            fragment: self.ordinals.as_ref()?.fragment(),
-            symbols: std::mem::take(&mut self.artifacts),
+    /// The entry is compared field by field before anything is linked: the digest is a key, not a proof.
+    /// A hit that links registers the stored unwind material at the loaded addresses and publishes the
+    /// same two entries a compile would. Everything a doubt can do is a miss, which spends a compile
+    /// and nothing else.
+    fn load_cached(&mut self, func: u32, body: &ir::FuncBody) -> bool {
+        let Some(ordinals) = artifact::Ordinals::of(body) else {
+            return false;
         };
-        let bytes = entry.encode().ok()?;
-        let entry = artifact::Entry::decode(&bytes).ok()?;
+        let key = crate::store::jit::key(&ordinals.fragment(), &self.jit_key.digest());
+        let Some(bytes) = self.jit_index().read(&key) else {
+            return false;
+        };
+        let Some(entry) = artifact::Entry::decode(&bytes)
+            .ok()
+            .filter(|entry| entry.fragment == ordinals.fragment() && entry.jit == self.jit_key)
+        else {
+            return false;
+        };
+        self.prewarm_callees(func, body);
+        let shared = self.shared;
+        let roles = [
+            JitSymbolRole::FastBody,
+            JitSymbolRole::Guarded,
+            JitSymbolRole::Packed,
+        ];
+        let Ok(linked) = artifact::link(&entry, &roles, |target| match target {
+            // One import table, so what a helper name means here is what it meant when the entry was
+            // written.
+            artifact::Target::Named(name) => imports::whitelist()
+                .get(name.as_ref())
+                .map(|addr| *addr as u64),
+            target => artifact::target_value(shared, func, &ordinals, target),
+        }) else {
+            return false;
+        };
+        // The stored CFA programs become FDEs at the addresses the link placed the symbols at, exactly
+        // as a fresh compile registers its own.
+        let frames = entry
+            .symbols
+            .iter()
+            .filter_map(|symbol| {
+                let linked = linked.entry(symbol.role)?;
+                let unwind = symbol.unwind.clone()?;
+                Some((linked, unwind, symbol.lsda.clone()))
+            })
+            .collect();
+        self.register_eh_frames(frames);
+        let ranges = linked_ranges(shared, func, &linked);
+        let (Some(guarded), Some(packed)) = (
+            linked.entry(JitSymbolRole::Guarded),
+            linked.entry(JitSymbolRole::Packed),
+        ) else {
+            return false;
+        };
+        // Published code lives to process end, so the mapping must not be unmapped with the handle.
+        std::mem::forget(linked);
+        if crate::options::jit_debug() {
+            eprintln!("mirvm-jit-debug: f{func} published from a stored entry");
+        }
+        self.shared
+            .jit
+            .publish_compiled_entries_for(self.domain, func, guarded, packed, ranges);
+        true
+    }
+
+    /// The store index, loaded once per compiler: what this session can reuse is what was there when it
+    /// started, which is exactly the entries a previous session published.
+    fn jit_index(&mut self) -> &crate::store::jit::Index {
+        self.jit_index
+            .get_or_insert_with(crate::store::jit::Index::load)
+    }
+
+    /// This function's entry, or `None` when there is nothing to store or link: no artifact was
+    /// captured, or the body's references could not be numbered.
+    fn finish_entry(&mut self) -> Option<artifact::Entry> {
+        let fragment = self.ordinals.as_ref()?.fragment();
+        Some(artifact::Entry {
+            fragment,
+            jit: self.jit_key.clone(),
+            symbols: std::mem::take(&mut self.artifacts),
+        })
+    }
+
+    /// Stage one entry for the store, publishing the batch once it is worth a file. The bytes are what
+    /// a reader decodes, so the round trip through the encoder happens before anything is written.
+    fn stage_entry(&mut self, entry: &artifact::Entry) {
+        let Ok(bytes) = entry.encode() else { return };
+        self.jit_staging
+            .add(entry.fragment, self.jit_key.digest(), bytes);
+        if self.jit_staging.worth_publishing() {
+            let session = std::mem::take(&mut self.jit_staging);
+            if let Err(error) = session.publish()
+                && crate::options::jit_debug()
+            {
+                eprintln!("mirvm-jit-debug: cannot publish JIT entries: {error}");
+            }
+        }
+    }
+
+    /// Link one entry back, through the encoded form.
+    ///
+    /// The bytes are what a store holds, so the reload decodes what it encoded: a field the two sides
+    /// disagree on cannot hide behind a same-session shortcut. Every relocation resolves against live
+    /// state — the same answers the translator baked — and a target that does not resolve makes the
+    /// whole link a miss, leaving the module's own code published.
+    fn relink(&mut self, entry: &artifact::Entry, func: u32) -> Option<artifact::Linked> {
+        let entry = artifact::Entry::decode(&entry.encode().ok()?).ok()?;
         let shared = self.shared;
         let ordinals = self.ordinals.as_ref()?;
         let linked = artifact::link(
@@ -274,14 +386,23 @@ impl<'a> Compiler<'a> {
             }
             return None;
         }
-        if let Some(ui) = cctx
+        // The CFA program goes to the batch that registers today's code *and* into the artifact: a
+        // later session registers it again at the address it links the entry to.
+        let unwind = cctx
             .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
-        {
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten());
+        if let Some(ui) = unwind.clone() {
             self.pending_unwind.push((id, ui, None));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
-        self.capture_wrapper(func, JitSymbolRole::Guarded, &format!("g{func}"), &cctx);
+        self.capture_wrapper(
+            func,
+            JitSymbolRole::Guarded,
+            &format!("g{func}"),
+            unwind,
+            None,
+            &cctx,
+        );
         self.module.clear_context(&mut cctx);
         Some((
             id,
@@ -494,18 +615,15 @@ impl<'a> Compiler<'a> {
             }
             return None;
         }
-        if let Some(ui) = cctx
+        let unwind = cctx
             .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
-        {
-            // A function with a try_call gets an LSDA, and it must list every call site,
-            // handler-less ones included; build_lsda explains why.
-            let lsda = if has_try_call {
-                Some(build_lsda(&collect_call_sites(&cctx)))
-            } else {
-                None
-            };
-            self.pending_unwind.push((id, ui, lsda));
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten());
+        // A function with a try_call gets an LSDA, and it must list every call site, handler-less ones
+        // included; build_lsda explains why. The artifact keeps a copy, so a later session reconstructs
+        // the same FDE and landing pads at the address it links the entry to.
+        let lsda = has_try_call.then(|| build_lsda(&collect_call_sites(&cctx)));
+        if let Some(ui) = unwind.clone() {
+            self.pending_unwind.push((id, ui, lsda.clone()));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
         // The site table, read from the backend's relocation list while the code is still in hand. A
@@ -525,10 +643,7 @@ impl<'a> Compiler<'a> {
                 self.sites.len()
             );
         }
-        if self.reload {
-            // A body that can be unwound into carries an LSDA, and a linked entry has no unwind
-            // registration yet (the loaded-address unwind proof is a later step), so such a body keeps
-            // the module's own code.
+        if self.reload || self.jit_cache {
             let name = format!("f{func}");
             // The body's own reference numbering: what an entry records instead of this session's
             // addresses and ids, and what makes it a store candidate at all.
@@ -542,11 +657,36 @@ impl<'a> Compiler<'a> {
                 compiled: cctx.compiled_code()?,
                 sites: &self.sites,
                 ordinals: self.ordinals.as_ref().expect("just set"),
+                unwind,
+                lsda,
             });
             match symbol {
-                Some(symbol) if !has_try_call => self.artifacts.push(symbol),
-                // A kind this engine cannot replay: this compiler keeps publishing the module's code.
-                _ => self.reload = false,
+                // A body that can be unwound into keeps the module's own code while a linked entry has
+                // no unwind registration; its artifact is still complete, so it is storable.
+                Some(symbol) => {
+                    #[cfg(test)]
+                    {
+                        // The body's own entry, independent of whether the wrappers could be captured:
+                        // the tests link one back and compare two sessions' bytes.
+                        self.last_entry = Some(artifact::Entry {
+                            fragment: self
+                                .ordinals
+                                .as_ref()
+                                .map(artifact::Ordinals::fragment)
+                                .unwrap_or_default(),
+                            jit: self.jit_key.clone(),
+                            symbols: vec![symbol.clone()],
+                        });
+                    }
+                    self.artifacts.push(symbol);
+                }
+                // A kind this engine cannot replay: this compiler keeps publishing the module's code,
+                // and a partial entry is not storable either.
+                None => {
+                    self.reload = false;
+                    self.jit_cache = false;
+                    self.artifacts.clear();
+                }
             }
         }
         self.shared.jit.record_sites(self.domain, func, placed);
@@ -620,14 +760,21 @@ impl<'a> Compiler<'a> {
             }
             return None;
         }
-        if let Some(ui) = cctx
+        let unwind = cctx
             .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
-        {
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten());
+        if let Some(ui) = unwind.clone() {
             self.pending_unwind.push((id, ui, None));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
-        self.capture_wrapper(func, JitSymbolRole::Packed, &format!("p{func}"), &cctx);
+        self.capture_wrapper(
+            func,
+            JitSymbolRole::Packed,
+            &format!("p{func}"),
+            unwind,
+            None,
+            &cctx,
+        );
         self.module.clear_context(&mut cctx);
         Some((
             id,

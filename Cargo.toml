@@ -22,7 +22,7 @@ cranelift = [
 blake3 = "1.8"
 # Keep the cranelift family on one version; gimli is aligned with the one
 # cranelift-codegen uses internally (the types interop).
-cranelift-codegen = { version = "0.133.1", optional = true, features = ["unwind"] }
+cranelift-codegen = { version = "0.133.1", optional = true, features = ["unwind", "enable-serde"] }
 cranelift-frontend = { version = "0.133.1", optional = true }
 cranelift-jit = { version = "0.133.1", optional = true }
 cranelift-module = { version = "0.133.1", optional = true }

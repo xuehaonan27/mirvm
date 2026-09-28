@@ -168,7 +168,7 @@ pub(crate) struct Reloc {
     pub target: Target,
 }
 
-/// One symbol of a compiled function: its code and the absolutes in it.
+/// One symbol of a compiled function: its code, the absolutes in it, and how to unwind through it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Symbol {
     pub role: JitSymbolRole,
@@ -177,6 +177,56 @@ pub(crate) struct Symbol {
     pub name: Box<str>,
     pub code: Vec<u8>,
     pub relocs: Vec<Reloc>,
+    /// The CFA program the loading session turns into this symbol's FDE at the address it lands at.
+    /// The backend gives one for every defined symbol of a target with unwind info.
+    pub unwind: Option<cranelift_codegen::isa::unwind::UnwindInfo>,
+    /// The LSDA body of a symbol that can be unwound into, with its code-relative landing pads.
+    pub lsda: Option<Vec<u8>>,
+}
+
+/// Everything that decides the code and is not the fragment: the jit-key of the cache family.
+///
+/// Two entries of one fragment are interchangeable exactly when this material is equal, so the store
+/// keys by its digest and the loading session compares it field by field before it links anything.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct JitKey {
+    /// The build that produced the entry: helper ABI, translator behaviour and TLS offsets are
+    /// build-stable, so no finer versioning is needed and no cross-build reuse is promised.
+    pub build_id: String,
+    /// The target the code was built for.
+    pub triple: String,
+    /// The codegen options, one `name=value` per line: the optimization level is one of them.
+    pub options: String,
+    /// The ISA-dependent options, host CPU detection included, one `name=value` per line. Two hosts
+    /// that enable different instructions must not share code.
+    pub isa: String,
+    /// The code domain: one namespace per vmctx regime, so a T→R flip cannot reuse the other's code.
+    pub domain: CodeDomain,
+}
+
+impl JitKey {
+    /// Take the key of the ISA one domain was built with.
+    pub(crate) fn of(isa: &dyn cranelift_codegen::isa::TargetIsa, domain: CodeDomain) -> JitKey {
+        let lines = |values: Vec<cranelift_codegen::settings::Value>| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        JitKey {
+            build_id: crate::options::build::BUILD_ID.to_string(),
+            triple: isa.triple().to_string(),
+            options: lines(isa.flags().iter().collect()),
+            isa: lines(isa.isa_flags()),
+            domain,
+        }
+    }
+
+    /// The digest the store keys entries by.
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        *blake3::hash(&postcard::to_stdvec(self).unwrap_or_default()).as_bytes()
+    }
 }
 
 /// Everything one compiled function publishes, in the order its symbols were defined.
@@ -188,6 +238,8 @@ pub(crate) struct Entry {
     /// The fragment the entry's code was compiled from: its semantic key, and the one thing the
     /// loading session has to find in the entry before binding anything.
     pub fragment: [u8; 32],
+    /// What the code was built with, for the exact comparison a digest alone cannot give.
+    pub jit: JitKey,
     pub symbols: Vec<Symbol>,
 }
 
@@ -224,6 +276,9 @@ pub(crate) struct Captured<'a> {
     pub compiled: &'a cranelift_codegen::CompiledCode,
     pub sites: &'a reloc::Sites,
     pub ordinals: &'a Ordinals,
+    /// The CFA program the backend built for this symbol, and its LSDA when it has one.
+    pub unwind: Option<cranelift_codegen::isa::unwind::UnwindInfo>,
+    pub lsda: Option<Vec<u8>>,
 }
 
 /// Read one defined symbol back out of the backend: its code, and every relocation in it named in
@@ -239,6 +294,8 @@ pub(crate) fn capture(input: Captured<'_>) -> Option<Symbol> {
         compiled,
         sites,
         ordinals,
+        unwind,
+        lsda,
     } = input;
     let user_names = ir_func.params.user_named_funcs();
     let mut relocs = Vec::new();
@@ -285,6 +342,8 @@ pub(crate) fn capture(input: Captured<'_>) -> Option<Symbol> {
         name: canonical_name(name),
         code: compiled.code_buffer().to_vec(),
         relocs,
+        unwind,
+        lsda,
     })
 }
 
@@ -476,10 +535,12 @@ pub(crate) fn target_value(
             ir::frag::Target::Asm(id) => shared.instance.asm_stub_addrs.get(id as usize).copied(),
             _ => None,
         },
-        // The body's own frozen addresses are this process's fixed addresses; a load that has to place
-        // another process's layout translates them through its LoadMap here instead.
+        // The body's own frozen addresses, through this Engine's load map: a link address is the
+        // artifact's, and where the instance put that memory is the LoadMap's to say. The two coincide
+        // for a fixed-base arena and differ for a dynamic one, which is exactly why the translator asks
+        // the same question the same way.
         Target::Link(ordinal) => match ordinals.target(*ordinal)? {
-            ir::frag::Target::Link(addr) => Some(addr.0),
+            ir::frag::Target::Link(addr) => Some(shared.instance.resolve_link_addr(addr)),
             _ => None,
         },
         Target::Body(part) => body_value(shared, func, part),

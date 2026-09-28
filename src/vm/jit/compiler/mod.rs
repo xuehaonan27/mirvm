@@ -110,6 +110,16 @@ struct Compiler<'a> {
     /// Whether this compiler links what it just compiled back from its artifact and publishes that,
     /// instead of publishing the module's own code (`MIRVM_JIT_RELOAD`).
     reload: bool,
+    /// Whether this compiler publishes completed entries into the JIT code store (`cache/jit`).
+    jit_cache: bool,
+    /// The key every entry this compiler writes is filed under: the codegen inputs that are not the
+    /// fragment.
+    jit_key: artifact::JitKey,
+    /// Entries captured but not yet published, as one pack per batch.
+    jit_staging: crate::store::jit::Session,
+    /// The store's index, loaded on the first lookup: a session reuses what was published before it
+    /// started, never what it just wrote itself.
+    jit_index: Option<crate::store::jit::Index>,
     #[cfg(test)]
     fail_after_symbol: Option<JitSymbolRole>,
     /// The last entry captured, for tests that link one back or compare two sessions' artifacts.
@@ -200,6 +210,16 @@ pub(super) fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: 
             if let Some(sites) = shared.jit.recorded_sites(domain, func) {
                 eprintln!("mirvm-jit-debug: f{func} {sites} recorded sites");
             }
+        }
+    }
+    // Whatever the batch still holds is worth a file: the next session can only reuse what is in the
+    // store, and a worker that exits with entries staged would lose them.
+    if c.jit_cache {
+        let session = std::mem::take(&mut c.jit_staging);
+        if let Err(error) = session.publish()
+            && dbg
+        {
+            eprintln!("mirvm-jit-debug: cannot publish JIT entries: {error}");
         }
     }
     // Published JIT code may still be live on a sleeping stack in the process-wide
