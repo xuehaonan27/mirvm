@@ -187,6 +187,20 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    the call encoding, veneers and write/execute discipline of the macOS pair are that pair's item
    (§6), and a kind this engine does not apply is a miss, never a guess.
 3. **The store family** — packs, keys, generation, purge; cross-process warm runs; the §4 gates.
+   Implemented: `store::jit` holds one entry per `(fragment, jit-key)` in packs whose index is keyed by
+   that pair and whose records carry their own BLAKE3, so a lookup is a binary search and every read is
+   verified; the family is in the register, so `mirvm cache status` accounts for it and
+   `cache purge --jit` takes it whole, with liveness scored against the fragments the manifests name.
+   The jit-key is the build id, the triple, the codegen options and the ISA-dependent options — host
+   CPU detection included — plus the code domain, and the entry stores the material itself, so a read
+   compares it field by field before anything is linked. The compile worker looks the store up before
+   it compiles, links a hit, registers the stored CFA programs as FDEs at the loaded addresses and
+   publishes the same two entries a compile would; a miss compiles, stages the entry and publishes the
+   batch as one pack when it is worth a file, and `MIRVM_NO_JIT_CACHE=1` bypasses the whole family.
+   `fib32-jit-cache` is the standing case: cold stores, warm reuses at least one entry, the bypassed
+   run compiles, and all three agree on stdout. The loaded-address unwind proof of §4 (a panic crossing
+   a *loaded* frame) and the linker-honesty counter are not built yet; the FDE path they exercise is
+   the same one a fresh compile registers through.
 4. **Startup pre-linking by heat order**, then **adaptive tiers** on the D16 measurement ledger.
 
 Step 1 needs canonical fragment ids only as *names* (the encoding pass of
@@ -200,6 +214,8 @@ share that keystone and are otherwise parallel.
 - Whether `.eh_frame` batches should merge across load waves or stay one section per wave.
 - The concrete adaptive-tier statistic (call count, self time, or the heat file's order) and its
   hysteresis — tuned from measurement, recorded here once chosen.
+- The loaded-address unwind proof and the linker-honesty counter are the §4 gates step 3 still owes;
+  both need the same thing, an entry whose link is followed by a real unwind, so they close together.
 - macOS pair items: `MAP_JIT`, `pthread_jit_write_protect_np`, the code-arena placement rules, and the
   `Arm64Call` encoding — a `bl` patches one instruction field, in range or through a veneer, and which
   of the two is decided when the entry lands, so the pair owns both the decision and the space a
