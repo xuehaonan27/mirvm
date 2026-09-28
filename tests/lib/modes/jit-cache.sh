@@ -5,7 +5,12 @@
 #   2) warm — the same run must publish at least one entry *from the store* (`MIRVM_JIT_DEBUG` says so)
 #      and must produce byte-identical stdout and exit code, which is the stale-semantics catcher;
 #   3) bypass — `MIRVM_NO_JIT_CACHE=1` must produce the same output, so a stored run and a compiling
-#      one stay comparable.
+#      one stay comparable;
+#   4) honesty — a corrupted store must be refused rather than used: the same output again, no hit
+#      counted, and the run says it compiled.
+#
+# The counters come from the `mirvm-jit-stats` line, so this case also proves that what the store
+# answered is observable.
 #
 # The case is Linux/x86_64 only: the linker applies that pair's relocation kinds, and a pair whose call
 # encoding it does not apply yet (the macOS item of the design) stores nothing.
@@ -73,5 +78,19 @@ mode_run() {
     cmp -s "$TMP/cold.out" "$TMP/bypass.out" \
         || abort_test "the bypassed run and the stored run disagree on stdout"
 
-    ok "cold stored, warm reused, bypass compiled, all three agree"
+    # 4) a corrupted pack: the bytes a record carries must be verified before they are linked. One byte
+    #    in the middle of the pack is enough to break the record's own hash.
+    pack=$(ls "$JIT_DIR"/*.pack | head -1)
+    middle=$(( $(wc -c <"$pack") / 2 ))
+    printf '\xff' | dd of="$pack" bs=1 seek="$middle" conv=notrunc 2>/dev/null
+    run corrupt MIRVM_JIT_STATS=1
+    [ "$(cat "$TMP/corrupt.code")" = 0 ] || abort_test "corrupt-store run exited $(cat "$TMP/corrupt.code")"
+    cmp -s "$TMP/cold.out" "$TMP/corrupt.out" \
+        || abort_test "a corrupted entry changed the guest output"
+    stats=$(grep -o "cache_hits=[0-9]* cache_misses=[0-9]* cache_refused=[0-9]*" "$TMP/corrupt.err" | tail -1)
+    [ -n "$stats" ] || abort_test "the run did not report the store counters"
+    hits=$(printf '%s' "$stats" | sed -n 's/.*cache_hits=\([0-9]*\).*/\1/p')
+    [ "$hits" = 0 ] || abort_test "a corrupted entry was used ($stats)"
+
+    ok "cold stored, warm reused, bypass compiled, corruption refused, outputs agree"
 }
