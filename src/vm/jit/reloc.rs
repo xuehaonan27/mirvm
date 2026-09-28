@@ -21,7 +21,7 @@ use crate::vm::ir;
 use super::CodeDomain;
 
 /// One place a compiled body names something that exists only in this process.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Site {
     /// A frozen-region address: a static, a constant's bytes, a promoted allocation.
     Frozen(ir::LinkAddr),
@@ -42,7 +42,7 @@ pub(crate) enum Site {
 ///
 /// The loader re-derives the address from the body it demands before publishing the entry, so the
 /// variant names the interior rather than an offset into an allocation that did not survive.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Body {
     /// The `item`-th statement of `block`, for the helpers that re-match it.
     Stmt { block: u32, item: u32 },
@@ -57,7 +57,7 @@ pub(crate) enum Body {
 }
 
 /// The two halves of a foreign call's signature data a helper may need.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum SigPart {
     /// The `ForeignSig` itself.
     Signature,
@@ -85,7 +85,7 @@ pub(crate) fn name(func: u32, ordinal: usize) -> String {
 
 /// The module's namespace for data objects (`cranelift-module` mints one for functions and one for
 /// data; a relocation's target tells the two apart by this number).
-const DATA_NAMESPACE: u32 = 1;
+pub(crate) const DATA_NAMESPACE: u32 = 1;
 
 /// Where each recorded site landed, read from the compiled code's relocation list.
 ///

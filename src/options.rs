@@ -298,6 +298,8 @@ entries! {
     dev  jit_debug       env("MIRVM_JIT_DEBUG")       default("off") => reads(bool, |o| o.jit_debug);
     /// Dump CLIF for functions whose compilation fails.
     dev  jit_debug_dump  env("MIRVM_JIT_DEBUG_DUMP")  default("off") => reads(bool, |o| o.jit_debug_dump);
+    /// Publish what each compiled function's artifact links back to, not the module's own code.
+    dev  jit_reload      env("MIRVM_JIT_RELOAD")      default("off") => reads(bool, |o| o.jit_reload);
     /// Log build-script scheduling.
     dev  debug_bldrs     env("MIRVM_DEBUG_BLDRS")     default("off") => reads(bool, |o| o.debug_bldrs);
     /// Log resolver feature unification.
@@ -560,6 +562,7 @@ struct Options {
     encoded_rustflags_append: Option<String>,
     jit_debug: bool,
     jit_debug_dump: bool,
+    jit_reload: bool,
     debug_bldrs: bool,
     debug_unify: bool,
     c2_debug: bool,
@@ -610,6 +613,7 @@ impl Options {
                 .filter(|value| !value.is_empty()),
             jit_debug: flag("jit_debug"),
             jit_debug_dump: flag("jit_debug_dump"),
+            jit_reload: flag("jit_reload"),
             debug_bldrs: flag("debug_bldrs"),
             debug_unify: flag("debug_unify"),
             c2_debug: flag("c2_debug"),

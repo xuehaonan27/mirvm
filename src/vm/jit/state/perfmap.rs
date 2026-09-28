@@ -6,10 +6,11 @@
 //! file writes out of the file a reader opens to understand the slot table.
 
 use super::*;
+use serde::{Deserialize, Serialize};
 
 /// A machine-code range visible to a profiler. Wider than `guest_code`: wrappers must show
 /// up in perf output, but they must not pose as an extra MIRVM guest backtrace frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JitSymbolRole {
     FastBody,
     Guarded,

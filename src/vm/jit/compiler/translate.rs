@@ -5,6 +5,27 @@
 use super::*;
 
 impl<'a> Compiler<'a> {
+    /// Capture one wrapper symbol's artifact. A wrapper carries no data site — it calls the body and
+    /// a helper — so its relocation table is names and offsets only.
+    fn capture_wrapper(
+        &mut self,
+        role: JitSymbolRole,
+        name: &str,
+        cctx: &cranelift_codegen::Context,
+    ) {
+        if !self.reload {
+            return;
+        }
+        let symbol = cctx.compiled_code().and_then(|compiled| {
+            artifact::capture(&self.module, role, name, &cctx.func, compiled, &[], &[])
+        });
+        match symbol {
+            Some(symbol) => self.artifacts.push(symbol),
+            // A kind this engine cannot replay: this compiler keeps publishing the module's code.
+            None => self.reload = false,
+        }
+    }
+
     pub(super) fn fast_sig(&mut self, abi: CalleeAbi) -> Signature {
         let mut sig = self.module.make_signature();
         for _ in 0..abi.nparams {
@@ -114,15 +135,71 @@ impl<'a> Compiler<'a> {
         self.sites.clear();
         self.site_data.clear();
         self.register_pending_eh_frames();
-        let ranges = self.finalized_symbol_ranges(symbols);
+        let mut ranges = self.finalized_symbol_ranges(symbols);
 
-        let fast = self.module.get_finalized_function(guarded_id) as u64;
-        let packed = self.module.get_finalized_function(packed_id) as u64;
+        let mut fast = self.module.get_finalized_function(guarded_id) as u64;
+        let mut packed = self.module.get_finalized_function(packed_id) as u64;
+        // `MIRVM_JIT_RELOAD`: what gets published is what the artifact linked back. The module's own
+        // code stays in its arena — cranelift-jit releases nothing per function — but nothing calls
+        // it, so the run proves the stored form rather than the session that produced it. The linked
+        // region is process-lifetime, like every published entry.
+        if self.reload
+            && let Some(linked) = self.relink(func)
+            && let Some(guarded) = linked.entry(JitSymbolRole::Guarded)
+            && let Some(reloaded) = linked.entry(JitSymbolRole::Packed)
+        {
+            fast = guarded;
+            packed = reloaded;
+            ranges = linked_ranges(self.shared, func, &linked);
+            std::mem::forget(linked);
+        }
+        // A capture that stopped early leaves the symbols it had already taken: they describe a
+        // function this session publishes from the module instead.
+        self.artifacts.clear();
         // Publish order: fast first (self-recursion and other compiled callers reach
         // it), then packed (only the interpreter can enter compiled code through it).
         // Every memory range is complete before these two Release stores; the perf map
         // is written only by an explicit stop.
         jit.publish_compiled_entries_for(self.domain, func, fast, packed, ranges);
+    }
+
+    /// Link this function back from its artifact, through the encoded form.
+    ///
+    /// The bytes are what a store would hold, so the reload decodes what it encoded: a field the two
+    /// sides disagree on cannot hide behind a same-session shortcut. Every relocation resolves against
+    /// live state — the same answers the translator baked — and a target that does not resolve makes
+    /// the whole link a miss, leaving the module's own code published.
+    fn relink(&mut self, func: u32) -> Option<artifact::Linked> {
+        let entry = artifact::Entry {
+            func,
+            symbols: std::mem::take(&mut self.artifacts),
+        };
+        let bytes = entry.encode().ok()?;
+        let entry = artifact::Entry::decode(&bytes).ok()?;
+        let shared = self.shared;
+        let linked = artifact::link(
+            &entry,
+            &[
+                JitSymbolRole::FastBody,
+                JitSymbolRole::Guarded,
+                JitSymbolRole::Packed,
+            ],
+            |target| match target {
+                artifact::Target::Site(site) => artifact::site_value(shared, func, site),
+                // Every helper generated code may call is in the one import table, so what a name
+                // means here is what it meant at compile time.
+                artifact::Target::Named(name) => imports::whitelist()
+                    .get(name.as_ref())
+                    .map(|addr| *addr as u64),
+                // A local reference is resolved inside the link.
+                artifact::Target::Local(_) => None,
+            },
+        )
+        .ok()?;
+        if crate::options::jit_debug() {
+            eprintln!("mirvm-jit-debug: f{func} linked back from its artifact");
+        }
+        Some(linked)
     }
 
     /// Published fast entry. Keeping the check in a separate slot-free
@@ -174,6 +251,7 @@ impl<'a> Compiler<'a> {
             self.pending_unwind.push((id, ui, None));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
+        self.capture_wrapper(JitSymbolRole::Guarded, &format!("g{func}"), &cctx);
         self.module.clear_context(&mut cctx);
         Some((
             id,
@@ -419,6 +497,32 @@ impl<'a> Compiler<'a> {
                 self.sites.len()
             );
         }
+        if self.reload {
+            // A body that can be unwound into carries an LSDA, and a linked entry has no unwind
+            // registration yet (the loaded-address unwind proof is a later step), so such a body keeps
+            // the module's own code.
+            let name = format!("f{func}");
+            let symbol = artifact::capture(
+                &self.module,
+                JitSymbolRole::FastBody,
+                &name,
+                &cctx.func,
+                cctx.compiled_code()?,
+                &self.sites,
+                &self.site_data,
+            );
+            match symbol {
+                Some(symbol) if !has_try_call => {
+                    #[cfg(test)]
+                    {
+                        self.last_artifact = Some(symbol.clone());
+                    }
+                    self.artifacts.push(symbol);
+                }
+                // A kind this engine cannot replay: this compiler keeps publishing the module's code.
+                _ => self.reload = false,
+            }
+        }
         self.shared.jit.record_sites(self.domain, func, placed);
         self.module.clear_context(&mut cctx);
         Some((
@@ -497,6 +601,7 @@ impl<'a> Compiler<'a> {
             self.pending_unwind.push((id, ui, None));
         }
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
+        self.capture_wrapper(JitSymbolRole::Packed, &format!("p{func}"), &cctx);
         self.module.clear_context(&mut cctx);
         Some((
             id,
@@ -508,4 +613,17 @@ impl<'a> Compiler<'a> {
             },
         ))
     }
+}
+
+/// The perf-map ranges of linked code: the addresses the link produced, not the module's, with the
+/// same roles and sizes so a profiler reads the running code.
+fn linked_ranges(shared: &Shared, func: u32, linked: &artifact::Linked) -> Vec<JitSymbolRange> {
+    let name = &shared.module.funcs[func as usize].name;
+    linked
+        .symbols
+        .iter()
+        .map(|symbol| {
+            JitSymbolRange::new(shared.id, func, symbol.role, symbol.addr, symbol.size, name)
+        })
+        .collect()
 }

@@ -348,3 +348,123 @@ fn failed_request_cannot_leak_symbols_into_the_next_compile_batch() {
     );
     std::mem::forget(compiler);
 }
+
+/// The in-process reload proof (`jit-code-cache-design.md` §5 step 2): compile one body, serialize
+/// it, link the artifact back and run *that* code.
+///
+/// The differential is the module's own entry for the same body: both must compute the frozen word
+/// the immediate names plus the added constant. The published entry must be the linked one, so a
+/// linker that quietly republished the compile session's code fails here rather than passing.
+#[test]
+fn a_compiled_body_runs_from_its_artifact() {
+    const FROZEN: u64 = 0x6a00_0000_1234;
+    const ADDED: u64 = 7;
+    let slot = || ir::Slot {
+        off: 0,
+        width: ir::Width::W64,
+    };
+    let body = ir::FuncBody {
+        frame_size: 16,
+        frame_align: 8,
+        ret: ir::RetAbi::Scalar(slot()),
+        params: Vec::new(),
+        caller_loc_off: None,
+        blocks: vec![ir::Block {
+            stmts: vec![
+                ir::Stmt::Assign {
+                    dst: ir::ScalarPlace::Slot(slot()),
+                    rv: ir::Rvalue::Use(ir::Operand::AddrImm(ir::LinkAddr(FROZEN))),
+                },
+                ir::Stmt::Assign {
+                    dst: ir::ScalarPlace::Slot(slot()),
+                    rv: ir::Rvalue::IntBin {
+                        op: ir::IntBinOp::Add,
+                        signed: false,
+                        a: ir::Operand::Slot(slot()),
+                        b: ir::Operand::Imm {
+                            bits: ADDED,
+                            width: ir::Width::W64,
+                        },
+                    },
+                },
+            ],
+            term: ir::Terminator::Return,
+        }],
+        name: "reload_probe".into(),
+    };
+    let shared = Shared::new(ir::Module {
+        funcs: vec![body].into(),
+        ..ir::Module::default()
+    });
+    let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
+    // Collect the artifact, and on a pair whose call relocation this linker applies, also publish what
+    // it links back (the compiler path); the body-level link below is what every pair proves.
+    compiler.reload = true;
+    compiler.compile(0);
+
+    let published = shared.jit.slots_fast[0].load(Ordering::Acquire);
+    assert_ne!(published, 0, "no entry was published");
+    assert!(
+        shared
+            .jit
+            .recorded_sites(CodeDomain::Plain, 0)
+            .is_some_and(|sites| sites > 0),
+        "the body recorded no site, so the reload would prove nothing"
+    );
+    if cfg!(target_arch = "x86_64") {
+        let module_entry = match compiler.module.get_name("g0") {
+            Some(cranelift_module::FuncOrDataId::Func(id)) => {
+                compiler.module.get_finalized_function(id) as u64
+            }
+            other => panic!("the module has no guarded entry for f0: {other:?}"),
+        };
+        assert_ne!(
+            published, module_entry,
+            "the published entry is the module's own code, so nothing was linked back"
+        );
+    }
+
+    // What a store would hold: the encoded bytes, decoded again.
+    let entry = artifact::Entry {
+        func: 0,
+        symbols: vec![
+            compiler
+                .last_artifact
+                .clone()
+                .expect("the body was captured"),
+        ],
+    };
+    let bytes = entry.encode().expect("an artifact encodes");
+    let entry = artifact::Entry::decode(&bytes).expect("an artifact decodes");
+    // The body alone: it names the frozen word and nothing else, so its relocation table is what every
+    // pair applies.
+    // The body polls signals at every block entry, and that helper reads the calling thread's Engine
+    // activation. The link is what this test proves, so the poll resolves to a no-op; every other name
+    // comes from the one import table, as it does in the compile path.
+    extern "C" fn probe_poll() {}
+    let linked = artifact::link(&entry, &[JitSymbolRole::FastBody], |target| match target {
+        artifact::Target::Site(site) => artifact::site_value(&shared, 0, site),
+        artifact::Target::Named(name) if name.as_ref() == "mirvm_poll_signals" => {
+            Some(probe_poll as *const u8 as u64)
+        }
+        artifact::Target::Named(name) => imports::whitelist()
+            .get(name.as_ref())
+            .map(|addr| *addr as u64),
+        artifact::Target::Local(_) => None,
+    })
+    .expect("the probe body links back");
+
+    // A fast body takes the guest fast ABI, which for this body is one scalar result. The module's own
+    // body is not called for comparison: it polls signals, and that helper needs an Engine activation
+    // the test does not build, so the interpreter's arithmetic is the reference here.
+    type Fast = extern "C" fn() -> u64;
+    let linked: Fast =
+        unsafe { std::mem::transmute(linked.entry(JitSymbolRole::FastBody).unwrap()) };
+    assert_eq!(
+        linked(),
+        FROZEN + ADDED,
+        "the linked code did not compute the frozen word plus the immediate"
+    );
+    // Published code lives to process end in production; keep that same lifetime here.
+    std::mem::forget(compiler);
+}
