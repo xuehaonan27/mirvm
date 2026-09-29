@@ -3,6 +3,25 @@
 
 use super::*;
 
+/// Register the symbols one table holds.
+///
+/// A bare identifier registers the symbol of that name: every `mirvm_*` helper is called by the
+/// name it is written under, so writing it twice would only invite the two spellings to drift. A
+/// `"name" => address` pair is for a symbol whose Rust name is not the C name it must resolve to,
+/// which is the libc string family here.
+macro_rules! import_symbols {
+    ($table:ident; $( $symbol:ident ),* $(,)?) => {
+        $(
+            $table.insert(stringify!($symbol), $symbol as *const u8 as usize);
+        )*
+    };
+    ($table:ident; $( $name:literal => $address:expr ),* $(,)?) => {
+        $(
+            $table.insert($name, $address as usize);
+        )*
+    };
+}
+
 /// Everything generated code may call, in one table.
 ///
 /// The module registers these symbols, and a stored entry resolves its call relocations through the
@@ -12,123 +31,61 @@ pub(crate) fn whitelist() -> &'static std::collections::HashMap<&'static str, us
     static TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, usize>> =
         std::sync::OnceLock::new();
     TABLE.get_or_init(|| {
-        let mut table: std::collections::HashMap<&'static str, usize> = [
-            ("mirvm_c2i", mirvm_c2i as *const u8 as usize),
-            (
-                "mirvm_call_main_catch",
-                mirvm_call_main_catch as *const u8 as usize,
-            ),
-            (
-                "mirvm_jit_unreachable",
-                mirvm_jit_unreachable as *const u8 as usize,
-            ),
-            (
-                "mirvm_jit_div_zero",
-                mirvm_jit_div_zero as *const u8 as usize,
-            ),
-            (
-                "mirvm_volatile_load",
-                mirvm_volatile_load as *const u8 as usize,
-            ),
-            (
-                "mirvm_volatile_store",
-                mirvm_volatile_store as *const u8 as usize,
-            ),
-            (
-                "mirvm_call_indirect",
-                mirvm_call_indirect as *const u8 as usize,
-            ),
-            (
-                "mirvm_jit_terminate_abort",
-                mirvm_jit_terminate_abort as *const u8 as usize,
-            ),
-            (
-                "mirvm_call_terminate",
-                mirvm_call_terminate as *const u8 as usize,
-            ),
-            (
-                "mirvm_exception_is_engine_fault",
-                mirvm_exception_is_engine_fault as *const u8 as usize,
-            ),
-            ("_Unwind_Resume", _Unwind_Resume as *const u8 as usize),
-            ("mirvm_jit_trap", mirvm_jit_trap as *const u8 as usize),
-            ("mirvm_simd_stmt", mirvm_simd_stmt as *const u8 as usize),
-            ("mirvm_simd_rv", mirvm_simd_rv as *const u8 as usize),
-            ("mirvm_tls_ref", mirvm_tls_ref as *const u8 as usize),
-            (
-                "mirvm_call_foreign",
-                mirvm_call_foreign as *const u8 as usize,
-            ),
-            (
-                "mirvm_call_builtin",
-                mirvm_call_builtin as *const u8 as usize,
-            ),
-            ("mirvm_alloc", mirvm_alloc as *const u8 as usize),
-            (
-                "mirvm_jit_stack_guard",
-                mirvm_jit_stack_guard as *const u8 as usize,
-            ),
-            (
-                "mirvm_poll_signals",
-                mirvm_poll_signals as *const u8 as usize,
-            ),
-            (
-                "mirvm_host_syscall_trace",
-                mirvm_host_syscall_trace as *const u8 as usize,
-            ),
-            ("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8 as usize),
-            (
-                "mirvm_bin128_divrem",
-                mirvm_bin128_divrem as *const u8 as usize,
-            ),
-            ("mirvm_f128_bin", mirvm_f128_bin as *const u8 as usize),
-            ("mirvm_f128_cmp", mirvm_f128_cmp as *const u8 as usize),
-            ("mirvm_f128_un", mirvm_f128_un as *const u8 as usize),
-            ("mirvm_f128_math", mirvm_f128_math as *const u8 as usize),
-            (
-                "mirvm_f128_from_scalar",
-                mirvm_f128_from_scalar as *const u8 as usize,
-            ),
-            (
-                "mirvm_f128_to_scalar",
-                mirvm_f128_to_scalar as *const u8 as usize,
-            ),
-            (
-                "mirvm_f128_from_wide",
-                mirvm_f128_from_wide as *const u8 as usize,
-            ),
-            (
-                "mirvm_f128_to_wide",
-                mirvm_f128_to_wide as *const u8 as usize,
-            ),
-            (
-                "mirvm_float_to_wide",
-                mirvm_float_to_wide as *const u8 as usize,
-            ),
-            ("mirvm_wide_to_f16", mirvm_wide_to_f16 as *const u8 as usize),
-            ("mirvm_wide_to_f32", mirvm_wide_to_f32 as *const u8 as usize),
-            ("mirvm_wide_to_f64", mirvm_wide_to_f64 as *const u8 as usize),
-            ("mirvm_f16_bin", mirvm_f16_bin as *const u8 as usize),
-            ("mirvm_f16_cmp", mirvm_f16_cmp as *const u8 as usize),
-            ("mirvm_f16_neg", mirvm_f16_neg as *const u8 as usize),
-            ("mirvm_f16_cast", mirvm_f16_cast as *const u8 as usize),
-            ("mirvm_f16_to_int", mirvm_f16_to_int as *const u8 as usize),
-            (
-                "mirvm_f16_from_int",
-                mirvm_f16_from_int as *const u8 as usize,
-            ),
-            ("mirvm_f16_math_un", mirvm_f16_math_un as *const u8 as usize),
-            (
-                "mirvm_f16_math_bin",
-                mirvm_f16_math_bin as *const u8 as usize,
-            ),
-            ("mirvm_f16_fma", mirvm_f16_fma as *const u8 as usize),
-            ("memmove", crate::os::process::memmove_addr() as usize),
-            ("memset", crate::os::process::memset_addr() as usize),
-            ("memcmp", crate::os::process::memcmp_addr() as usize),
-        ]
-        .into_iter()
-        .collect();
+        let mut table: std::collections::HashMap<&'static str, usize> =
+            std::collections::HashMap::new();
+        import_symbols!(table;
+            mirvm_c2i,
+            mirvm_call_main_catch,
+            mirvm_jit_unreachable,
+            mirvm_jit_div_zero,
+            mirvm_volatile_load,
+            mirvm_volatile_store,
+            mirvm_call_indirect,
+            mirvm_jit_terminate_abort,
+            mirvm_call_terminate,
+            mirvm_exception_is_engine_fault,
+            _Unwind_Resume,
+            mirvm_jit_trap,
+            mirvm_simd_stmt,
+            mirvm_simd_rv,
+            mirvm_tls_ref,
+            mirvm_call_foreign,
+            mirvm_call_builtin,
+            mirvm_alloc,
+            mirvm_jit_stack_guard,
+            mirvm_poll_signals,
+            mirvm_host_syscall_trace,
+            mirvm_bin128_ovf,
+            mirvm_bin128_divrem,
+            mirvm_f128_bin,
+            mirvm_f128_cmp,
+            mirvm_f128_un,
+            mirvm_f128_math,
+            mirvm_f128_from_scalar,
+            mirvm_f128_to_scalar,
+            mirvm_f128_from_wide,
+            mirvm_f128_to_wide,
+            mirvm_float_to_wide,
+            mirvm_wide_to_f16,
+            mirvm_wide_to_f32,
+            mirvm_wide_to_f64,
+            mirvm_f16_bin,
+            mirvm_f16_cmp,
+            mirvm_f16_neg,
+            mirvm_f16_cast,
+            mirvm_f16_to_int,
+            mirvm_f16_from_int,
+            mirvm_f16_math_un,
+            mirvm_f16_math_bin,
+            mirvm_f16_fma,
+        );
+        // memmove(d, s, n) -> d; memset(d, c, n) -> d; memcmp(s1, s2, n) -> c_int. The address
+        // comes from the platform layer, which is where the C library is named.
+        import_symbols!(table;
+            "memmove" => crate::os::process::memmove_addr(),
+            "memset" => crate::os::process::memset_addr(),
+            "memcmp" => crate::os::process::memcmp_addr(),
+        );
         table.extend(math_symbols());
         table
     })
