@@ -584,6 +584,15 @@ fn body_value(shared: &crate::vm::ctx::Shared, func: u32, part: &Body) -> Option
                 SigPart::Signature => sig as *const _ as u64,
                 SigPart::Symbol => sym.as_ptr() as u64,
             }),
+            // An indirect call carries the signature of a native callee (a runtime `dlsym` result)
+            // and no symbol: the same site, re-matched on the terminator the writer read it from.
+            Terminator::CallIndirect {
+                native_sig: Some(sig),
+                ..
+            } => Some(match part {
+                SigPart::Signature => sig as *const _ as u64,
+                SigPart::Symbol => return None,
+            }),
             _ => None,
         },
         Body::TrapReason { block: b, item } => {
