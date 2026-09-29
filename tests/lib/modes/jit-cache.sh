@@ -10,8 +10,9 @@
 #      counted, and the run says it compiled;
 #   5) unwind — the loaded-frame unwind proof runs here, alone: it resumes through linked frames, and a
 #      registration another test starts meanwhile can end the unwinder's walk early;
-#   6) identity — two cold runs in homes of their own store byte-identical entries, because an entry is
-#      a function of the fragment and the key and not of the process that compiled it.
+#   6) determinism — two cold runs in homes of their own, one with one frontend thread and one with
+#      eight, store byte-identical entries: an entry is a function of the fragment and the key, not of
+#      the process that compiled it nor of how the session was threaded.
 #
 # The counters come from the `mirvm-jit-stats` line, so this case also proves that what the store
 # answered is observable.
@@ -128,21 +129,24 @@ mode_run() {
     grep -q "1 passed" "$TMP/unwind.txt" \
         || abort_test "the loaded-frame unwind proof did not run: $(tail -3 "$TMP/unwind.txt")"
 
-    # 6) an entry is a function of the fragment and the key, not of the process that compiled it: two
-    #    cold runs in homes of their own must store byte-identical entries. A compiler address baked
-    #    into the code is what this catches, and inside one process it is invisible — the code runs on
-    #    the address it was built with.
-    for tag in a b; do
+    # 6) an entry is a function of the fragment and the key — not of the process that compiled it, and
+    #    not of how that session was threaded: two cold runs in homes of their own, one with one
+    #    frontend thread and one with eight, must store byte-identical entries. A compiler address
+    #    baked into the code is what this catches, and inside one process it is invisible, because the
+    #    code runs on the address it was built with.
+    for pair in a:1 b:8; do
+        local tag=${pair%%:*} threads=${pair##*:}
         rm -rf "$TMP/ident-$tag"
         mkdir -p "$TMP/ident-$tag/cache"
         cp -r "$HOME_DIR/data" "$TMP/ident-$tag/data"
         cp -r "$HOME_DIR/cache/base" "$TMP/ident-$tag/cache/base"
         env MIRVM_HOME="$TMP/ident-$tag" MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 \
+            MIRVM_THREADS="$threads" \
             "$MIRVM" run "${pre[@]}" "$DATA_DIR/$input" >"$TMP/ident-$tag.out" 2>&1 \
-            || abort_test "the identity run $tag failed: $(tail -3 "$TMP/ident-$tag.out")"
+            || abort_test "the determinism run $tag (threads=$threads) failed: $(tail -3 "$TMP/ident-$tag.out")"
     done
     cmp -s "$TMP/ident-a.out" "$TMP/ident-b.out" \
-        || abort_test "two compiling runs disagree on stdout"
+        || abort_test "the one-thread and eight-thread runs disagree on stdout"
     python3 - "$TMP/ident-a" "$TMP/ident-b" >"$TMP/ident.txt" 2>&1 <<'IDENTITY'
 import glob, struct, sys
 
@@ -175,5 +179,5 @@ IDENTITY
     grep -qE "^[1-9][0-9]* entries identical$" "$TMP/ident.txt" \
         || abort_test "the two cold stores differ: $(tail -2 "$TMP/ident.txt")"
 
-    ok "cold stored, warm reused, bypass compiled, corruption refused, misses rebuilt, frame unwound, entries identical across processes"
+    ok "cold stored, warm reused, bypass compiled, corruption refused, misses rebuilt, frame unwound, entries identical across processes and thread counts"
 }
