@@ -64,7 +64,9 @@ case_init() {
     export TOOLCHAIN CARGO RUSTC
 
     TMP=$(mktemp -d) || { echo "ERROR cannot create a temporary directory" >&2; exit 69; }
-    trap 'rm -rf "$TMP"' EXIT
+    # MIRVM_GATE_KEEP_TMP=1 leaves the case's scratch directory in place, for a failure whose summary
+    # is not enough; same family as MIRVM_GATE_KEEP_CACHE.
+    trap 'if [ -z "${MIRVM_GATE_KEEP_TMP:-}" ]; then rm -rf "$TMP"; else echo "kept case scratch: $TMP"; fi' EXIT
     export TMP
 
     [ "$want_product" -eq 1 ] || return 0
@@ -172,6 +174,35 @@ run_case_cmd() {
 # filters anything else has to say why in its own header.
 normalize_stderr() {
     sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$1" >"$2"
+}
+
+# crash_report <exit-code> <out-prefix>: the context a signal or a timeout leaves behind. Such a run
+# is killed, so its verdict line is the *wrapper's* ("dumped core", or nothing for a timeout), and
+# the last lines of the run's own streams are the only place the reason can be. A mode that reports a
+# killed run calls this before it returns; a mode that compares streams already dumps both sides.
+crash_report() {
+    local code=$1 prefix=$2 why=""
+    if [ "$code" -ge 128 ]; then
+        case $((code - 128)) in
+            4) why="SIGILL" ;;
+            5) why="SIGTRAP" ;;
+            6) why="SIGABRT" ;;
+            7) why="SIGBUS" ;;
+            8) why="SIGFPE" ;;
+            9) why="SIGKILL" ;;
+            11) why="SIGSEGV" ;;
+            *) why="signal $((code - 128))" ;;
+        esac
+    elif [ "$code" -eq 124 ]; then
+        why="case timeout"
+    else
+        return 0
+    fi
+    echo "--- killed by $why (exit=$code); the run's own last words ---"
+    echo "--- stderr (last 12 lines) ---"
+    tail -12 "$prefix.err" | cut -c1-200
+    echo "--- stdout (last 5 lines) ---"
+    tail -5 "$prefix.out" | cut -c1-200
 }
 
 # compare_streams <label> <authority-prefix> <subject-prefix> [authority-name] [subject-name]:

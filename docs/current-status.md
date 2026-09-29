@@ -118,7 +118,7 @@ Measured on this tree against the Linux x86_64 release build, with the cases tha
 - `cargo test --locked --all-features`: 499 pass, 1 ignored.
 - `make test` (the fast tier, 73 cases): 69 pass / 4 fail; one run measured 68 pass / 5 fail because
   `quality` was RED on E48's flaky test.
-- `make smoke` (fast + smoke, 119 cases): 107 pass / 12 fail.
+- `make smoke` (fast + smoke, 119 cases): 108 pass / 11 fail.
 - `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
   which is `repo-quality`'s 13 source checks.
 - Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
@@ -128,10 +128,10 @@ The fast tier's failures are the four `cargo-diff` rows that report FAIL rather 
 materialized project directory is absent (`ecosystem`, `ffi_zlib`, `ripgrep_regex`, `warning_return`;
 G2).
 
-The smoke tier adds eight: the seven real-project REDs of E47 — four rayon-family timeouts (`rayon`,
-`flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`, `wasmtime_wat`) and one genuine trap
-(`png_round`: `foreign llvm.x86.pclmulqdq.512`, the intrinsic queue) — plus `main-panic-jit` (E45).
-`tokei` is a gate-tier case and is not in this tier.
+The smoke tier adds seven: E47's four rayon-family timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`)
+and its `png_round` trap (`foreign llvm.x86.pclmulqdq.512`, the intrinsic queue C6), plus the two
+activation-order aborts of E49 (`mlua_lua`, `wasmtime_wat`). `tokei` is a gate-tier case and is not in
+this tier.
 
 `fib(32)` is RED: the best of three runs is about 8.7s against its 80ms gate (E40). Output is correct
 and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not be claimed.

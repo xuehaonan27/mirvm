@@ -59,18 +59,27 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   merged section per Engine re-registered at a point the guest cannot be unwinding at. The repository
   gate runs its tests on one thread for the same reason. Analysis in
   [jit-code-cache-design.md](designs/jit-code-cache-design.md) §6.
-- **E45** `OPEN`: `main-panic-jit` expects an uncaught guest panic's stderr to carry a symbolized
-  `lang_start_internal` frame (`release=true.*_3std2rt19lang_start_internal0C`), and the report prints
-  only the location line and the `RUST_BACKTRACE` note — identically with the JIT on
-  (`MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1`), with `MIRVM_JIT=off`, and with `MIRVM_NO_JIT_CACHE=1`,
-  so the interpreter/JIT difference the case was written for no longer exists. Either the expectation
-  is stale (the interpreter leg's `stderr_absent=release=false` then holds vacuously) or the symbolized
-  frame was lost; decide which, then fix the expectation or restore the frame.
-- **E47** `OPEN`: seven real-project corpus cases are RED on the Linux verify host — four rayon-family
-  timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`, `wasmtime_wat`) and one
-  genuine Trap (`png_round`, `llvm.x86.pclmulqdq.512`, the intrinsic queue C6). The smoke tier runs
-  them and counts them, so they are RED in every `make smoke` and `make gate`; the four timeouts are
-  wall-clock, the two aborts happen with no diagnostic kept.
+- **E47** `OPEN`: five real-project corpus cases are RED on the Linux verify host — four rayon-family
+  timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`) and one genuine Trap (`png_round`,
+  `llvm.x86.pclmulqdq.512`, the intrinsic queue C6, whose repair is the intrinsic queue). The smoke
+  tier runs them and counts them, so they are RED in every `make smoke` and `make gate`; the four
+  timeouts are wall-clock.
+- **E49** `OPEN`: `mlua_lua` and `wasmtime_wat` abort (exit 134) with `mirvm[m4-engine]: Engine
+  activation exited out of order` — `ActivationGuard::drop`'s invariant, which requires `current`,
+  `current_activation` and `active_engines.last()` to all be this guard's own
+  (`src/vm/ctx/activation.rs`). Both drivers print every line their oracle expects (the last ones are
+  `done` and `trap null = uninitialized element`), so the guest work completes and the stack is found
+  skewed at engine teardown; both run a guest VM whose error path leaves a frame without the matching
+  Rust unwind (Lua's `longjmp` error raise, a wasm trap). The corpus mode's new crash report is where
+  this was read. Measured state at the mismatch, with a dump added to that branch: the guard being
+  dropped is the outermost one (`activation=1`, `prev=null`) while the thread's `current_activation` is
+  1583, `active_engines` holds three entries for one engine, and `depth` is 6 with a live shadow stack
+  — so a normal exit reaches the outermost guard with bookkeeping left over from the guest's error
+  path. The candidate mechanism is that a guest `longjmp` skips Rust-frame cleanup (activation pops
+  and shadow-frame pops both), and that the outer drop is where it surfaces; what closing needs is
+  whether the skips are the activation guards or the shadow frames, and then either a checkpoint the
+  `setjmp` side records and the `longjmp` side restores, or a guest-level control transfer that does
+  not cross host Rust frames at all.
 - **E48** `OPEN`: `vm::embed_tests::capture::host_syscall_variants_preserve_libc_result_and_errno` is
   intermittently RED, and reddens `quality` with it, so a suite run's failure set is not reproducible.
   The observed report is `plain/jit/success: function did not compile`: `jit.slots[0]` is still 0 after

@@ -2,7 +2,9 @@
 # corpus: run one real-crate driver under mirvm and judge it the way the manifest says -- exit code,
 # byte-equal oracle stdout, or a registered expected failure. An absent needs= path is a host
 # capability SKIP. Deps/IR images are purged after each driver so one driver cannot inherit another's
-# cache (MIRVM_GATE_KEEP_CACHE=1 bypasses, for triage only).
+# cache (MIRVM_GATE_KEEP_CACHE=1 bypasses, for triage only). A run killed by a signal or by the case
+# timeout also reports the tail of both streams: for those two verdicts the last lines are the only
+# diagnostic there is, and reporting one `first_err` line (often the timeout wrapper's) is not one.
 # fields: input(required) verdict env needs args group xfail
 
 MODE_FIELDS="input verdict env needs args group xfail"
@@ -52,6 +54,7 @@ mode_run() {
             first_err=$(grep -m1 -iE 'error|panic|unsupported|unimplemented|not (yet )?(implemented|supported)|no (shim|intrinsic)|abort' "$TMP/run.err" | head -c 200)
             [ -n "$first_err" ] || first_err=$(tail -1 "$TMP/run.err" | head -c 200)
             bad "$name (${secs}s, exit=$code) :: $first_err"
+            crash_report "$code" "$TMP/run"
             return 1 ;;
         oracle:*)
             local oracle=$DATA_DIR/fixtures/oracles/${verdict#oracle:}.txt
