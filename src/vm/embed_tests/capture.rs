@@ -3,6 +3,23 @@
 
 use super::*;
 
+/// Why one JIT leg did not publish, for the failure report: whether the call reached the JIT at all
+/// (`counted`), whether a compile service was there to take the request, and whether the engine was
+/// on its way down. The check itself can only see the slot, so a red run has to state the rest.
+fn jit_state(engine: &Engine) -> String {
+    let jit = &engine.shared().jit;
+    format!(
+        "enabled={} threshold={} sync={} counted={} queue={} worker={} stopping={}",
+        jit.enabled,
+        jit.threshold,
+        jit.sync,
+        jit.counters[0].load(Ordering::Acquire),
+        jit.queue.lock().unwrap().is_some(),
+        jit.worker.lock().unwrap().is_some(),
+        jit.stopping.load(Ordering::Acquire),
+    )
+}
+
 fn host_syscall_module(builtin: Builtin, nr: i64, args: &[u64]) -> Module {
     let result = word(0);
     let errno = word(8);
@@ -91,7 +108,10 @@ fn host_syscall_variants_preserve_libc_result_and_errno() {
             );
             let success = unsafe { run_export(&success_engine, "probe", &[]) };
             if jit && success_engine.shared().jit.slots[0].load(Ordering::Acquire) == 0 {
-                failures.push(format!("{path}/{mode}/success: function did not compile"));
+                failures.push(format!(
+                    "{path}/{mode}/success: function did not compile ({})",
+                    jit_state(&success_engine)
+                ));
             }
             success_engine.wait_closed().unwrap();
             if !matches!(
@@ -106,7 +126,10 @@ fn host_syscall_variants_preserve_libc_result_and_errno() {
             let failure_engine = engine(host_syscall_module(builtin.clone(), -1, &[]), jit);
             let failure = unsafe { run_export(&failure_engine, "probe", &[]) };
             if jit && failure_engine.shared().jit.slots[0].load(Ordering::Acquire) == 0 {
-                failures.push(format!("{path}/{mode}/failure: function did not compile"));
+                failures.push(format!(
+                    "{path}/{mode}/failure: function did not compile ({})",
+                    jit_state(&failure_engine)
+                ));
             }
             failure_engine.wait_closed().unwrap();
             if !matches!(

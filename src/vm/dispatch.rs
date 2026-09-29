@@ -96,10 +96,21 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
             // previous run found hot is built optimized the first time it is asked for, and everything
             // else starts cheap. Only one request is raised per function while it is interpreted, which
             // is why the policy lives here rather than in a second threshold.
-            let _ = q.send(crate::vm::jit::Request {
+            if q.send(crate::vm::jit::Request {
                 func,
                 tier: jit.tier_for(func),
-            });
+            })
+            .is_err()
+            {
+                // No service is listening: the worker never started, died, or is a parent's that a
+                // fork did not bring across. Staying interpreted is the semantics, but a silent
+                // "the JIT is on and nothing is ever compiled" is not diagnosable, so say it once
+                // per function. Debug severity, because a forked child is a legitimate case.
+                crate::diag_debug!(
+                    Jit,
+                    "f{func}: the compile service is gone; this function stays interpreted"
+                );
+            }
         }
         // SYNC verification mode: once submitted (now or earlier), wait for publication or
         // the failure sentinel. With threshold = 1 this turns "request compilation on the

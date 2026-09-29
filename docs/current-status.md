@@ -115,7 +115,7 @@ Measured on this tree against the Linux x86_64 release build, with the cases tha
 `the proxy helper` ([environment.md](environment.md)); `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 498 pass, 1 ignored.
+- `cargo test --locked --all-features`: 499 pass, 1 ignored.
 - `make test` (the fast tier, 73 cases): 69 pass / 4 fail; one run measured 68 pass / 5 fail because
   `quality` was RED on E48's flaky test.
 - `make smoke` (fast + smoke, 119 cases): 107 pass / 12 fail.
