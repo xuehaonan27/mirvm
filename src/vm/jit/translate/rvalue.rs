@@ -607,10 +607,12 @@ impl Translator<'_, '_> {
             }
             R::TlsRef(id) => {
                 // The mirvm_tls_ref helper shares its body with semantics::tls::tls_addr: the
-                // per-thread instance block is materialized lazily.
+                // per-thread instance block is materialized lazily. The id is this program's
+                // numbering, so it goes through the site vocabulary: a stored entry that baked
+                // another program's id would name another slot, or no slot at all.
+                let iv = self.site(Site::Tls(*id), u64::from(*id));
                 let fref = self.module.declare_func_in_func(self.tls_ref, self.b.func);
-                let i = self.b.ins().iconst(types::I64, i64::from(*id));
-                let call = self.b.ins().call(fref, &[i]);
+                let call = self.b.ins().call(fref, &[iv]);
                 self.b.inst_results(call)[0]
             }
             // ===== The three SIMD rvalues, through the mirvm_simd_rv helper, which shares

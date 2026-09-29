@@ -25,7 +25,7 @@ use super::state::{CodeDomain, JitSymbolRole};
 use super::{Body, SigPart};
 
 /// Encoding version, part of what an entry's bytes mean.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 /// How one relocation's value lands in the code. Mirrors the backend kinds this engine replays.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -64,6 +64,8 @@ pub(crate) enum Target {
     OwnId,
     /// A function id the body names, by canonical ordinal, as the helpers take it.
     FuncId(u32),
+    /// A guest TLS id the body names, by canonical ordinal.
+    Tls(u32),
     /// The address of the PLT slot a call goes through, for the function it names.
     Slot { domain: CodeDomain, func: Ref },
     /// The runtime address of an asm stub the body names, by canonical ordinal.
@@ -163,6 +165,7 @@ impl Ordinals {
                 func: callee(*func)?,
             },
             Site::Stub(id) => Target::Stub(self.ordinal(ir::frag::Target::Asm(*id))?),
+            Site::Tls(id) => Target::Tls(self.ordinal(ir::frag::Target::Tls(*id))?),
             Site::Body(part) => Target::Body(*part),
         })
     }
@@ -532,6 +535,11 @@ pub(crate) fn target_value(
         Target::OwnId => Some(u64::from(func)),
         Target::FuncId(ordinal) => match ordinals.target(*ordinal)? {
             ir::frag::Target::Func(id) => Some(u64::from(id)),
+            _ => None,
+        },
+        // The value the helper takes *is* this session's id for that slot.
+        Target::Tls(ordinal) => match ordinals.target(*ordinal)? {
+            ir::frag::Target::Tls(id) => Some(u64::from(id)),
             _ => None,
         },
         Target::Slot { domain, func } => {
