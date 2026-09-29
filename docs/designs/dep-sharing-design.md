@@ -155,9 +155,11 @@ byte + postcard of the canonical body; fragment id = BLAKE3-256 of those bytes. 
 disambiguators, frozen-layout offsets and id assignments — everything that differs between tokio
 1.x.y and 1.x.z when the code does not — thereby leaves the fragment and moves into the binding.
 
-The **manifest** carries, per function in symbol-sorted order (which makes the manifest digest
-deterministic; the base image's byte-determinism gate is the precedent): the v0 symbol, the fragment
-id, and the binding table that assigns each ordinal one of: unit-local function/TLS/asm index ·
+The **manifest** carries, per function in symbol-sorted order, and every symbol-keyed table it adds
+(the export table, the TLS table, and the entry-link table in address order) in sorted order too, so
+the manifest digest is deterministic (the base image's byte-determinism gate is the precedent; a
+map's own order is its hasher's, and one unit built twice must name one digest). Per function it
+carries: the v0 symbol, the fragment id, and the binding table that assigns each ordinal one of: unit-local function/TLS/asm index ·
 extern function/static/TLS symbol (interned in a per-manifest string table) · frozen offset +
 addend. Beside the function table it stores what the aggregate file stores today: header material
 compared for exact equality on load (`build_id`, base key, the rlib `FileStamp`, lowering
@@ -269,6 +271,11 @@ parent document are the regression fence.
   sharing-acceptance ratio below asserts.
 - **Unit determinism gate**: one unit built twice (threads 1 and 8, separate sessions) yields one
   manifest digest and one fragment set — the base-image byte-determinism gate, generalized.
+  `unit-share`'s last step is it: the same package is built in two sessions whose scheduling differs
+  (one job against eight) and the two runs must leave the unit manifests named identically (they are
+  content-named, so equal names are equal digests) and store no new fragment pack. It caught three
+  order leaks in the manifest's tables — the export and TLS tables were written in their hash maps'
+  order and the entry-link table in lowering's — which are now sorted.
 - **Equivalence gate**: cold full lowering versus a warm unit stack must produce byte-identical guest
   output through the existing diff channel, per the L2 acceptance rule.
 - **Sharing acceptance**: two programs whose closures lower the same bodies produce one stored copy of
