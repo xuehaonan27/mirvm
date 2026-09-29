@@ -159,9 +159,10 @@ pub(crate) fn current() -> Option<&'static UnitTable> {
 /// (their readers simply rebuild).
 const KEEP_PER_UNIT: usize = 3;
 
-/// The extension every unit manifest carries. The name is the one place that spells it, so a reader
-/// that walks the family (`image::collect`) cannot disagree with the writer.
-pub(crate) const EXT: &str = "unit";
+/// The extension every unit manifest carries, owned by the family register that declares the
+/// directory ([`crate::store::UNIT_EXT`]); a reader that walks the family (`image::collect`) cannot
+/// disagree with the writer.
+pub(crate) const EXT: &str = crate::store::UNIT_EXT;
 
 /// One unit manifest's file name: the unit's key and the digest of the manifest's own bytes.
 fn file_name(unit_key: &str, digest: &str) -> String {

@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+#[cfg(feature = "cranelift")]
 use cranelift_codegen::ir::ExternalName;
 
 use crate::vm::ir;
@@ -125,6 +126,7 @@ impl Sites {
 /// A site's symbol is a data declaration, so its relocation carries the module-level data id; that id
 /// maps back onto the site's ordinal through the parallel `data` list the translator filled while
 /// emitting. Anything else in the list (a helper call, a libcall) is not a site.
+#[cfg(feature = "cranelift")]
 pub(crate) fn placed(
     func: &cranelift_codegen::ir::Function,
     compiled: &cranelift_codegen::CompiledCode,
@@ -168,6 +170,7 @@ pub(crate) fn lookup(values: &Values, name: &str) -> Option<*const u8> {
 /// `Translator::site`, and a wrapper symbol the backend does not build from a body through this
 /// function directly. A raw `iconst` of an address would leave the backend with nothing to report, so
 /// a stored entry could not find it.
+#[cfg(feature = "cranelift")]
 pub(crate) fn emit_site(
     module: &mut cranelift_jit::JITModule,
     values: &Values,

@@ -11,30 +11,20 @@
 //! manifest behind a header the loader also reads. A file from another build is no more reachable than
 //! a missing one, so only current-generation files mark anything.
 
-use std::collections::HashSet;
 use std::path::Path;
 
+use crate::store::Live;
 use crate::store::entry;
 
 use super::manifest;
 
-/// What the current-generation manifests name: the fragments in `cache/frags` and the frozen chunks
-/// in `cache/frozen`. One walk fills both, because one manifest names both.
-#[derive(Default)]
-pub(crate) struct Live {
-    pub fragments: HashSet<[u8; 32]>,
-    pub chunks: HashSet<[u8; 32]>,
-}
-
-impl Live {
-    /// Mark one decoded manifest. A manifest whose module carries its frozen region whole names no
-    /// chunks.
-    fn mark(&mut self, file: &manifest::File) {
-        self.fragments
-            .extend(file.funcs.iter().map(|record| record.fragment));
-        if let Some(frozen) = &file.frozen {
-            self.chunks.extend(frozen.chunks.iter().copied());
-        }
+/// Mark one decoded manifest. A manifest whose module carries its frozen region whole names no
+/// chunks.
+fn mark_one(live: &mut Live, file: &manifest::File) {
+    live.fragments
+        .extend(file.funcs.iter().map(|record| record.fragment));
+    if let Some(frozen) = &file.frozen {
+        live.chunks.extend(frozen.chunks.iter().copied());
     }
 }
 
@@ -101,12 +91,13 @@ fn mark(dir: &Path, ext: &str, live: &mut Live) {
         if !entry::is_current_generation(&file.build_id) {
             continue;
         }
-        live.mark(&file);
+        mark_one(live, &file);
     }
 }
-
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     /// A manifest file's bytes with one record per fragment and one chunk per frozen entry. Only the

@@ -32,7 +32,12 @@ mode_run() {
     fi
 
     local out code=0
+    # The fixture crate lives under `data/`, where no build output may land: `make inventory` refuses a
+    # script found there, and a libffi build script vendored into `target/` is exactly that. The target
+    # dir is therefore the repository's own scratch space, which also keeps the heavy `-Zbuild-std`
+    # artifacts incremental across runs.
     out=$(MIRVM_BUILD_ID=0000000000000000 \
+        CARGO_TARGET_DIR="$REPO_ROOT/target/test-state/tsan" \
         RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=1" \
         "${cargo_cmd[@]}" run -Zbuild-std --target x86_64-unknown-linux-gnu --release 2>&1) || code=$?
     printf '%s\n' "$out" | tail -12
