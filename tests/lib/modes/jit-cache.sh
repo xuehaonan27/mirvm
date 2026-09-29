@@ -9,7 +9,9 @@
 #   4) honesty — a corrupted store must be refused rather than used: the same output again, no hit
 #      counted, and the run says it compiled;
 #   5) unwind — the loaded-frame unwind proof runs here, alone: it resumes through linked frames, and a
-#      registration another test starts meanwhile can end the unwinder's walk early.
+#      registration another test starts meanwhile can end the unwinder's walk early;
+#   6) identity — two cold runs in homes of their own store byte-identical entries, because an entry is
+#      a function of the fragment and the key and not of the process that compiled it.
 #
 # The counters come from the `mirvm-jit-stats` line, so this case also proves that what the store
 # answered is observable.
@@ -126,5 +128,52 @@ mode_run() {
     grep -q "1 passed" "$TMP/unwind.txt" \
         || abort_test "the loaded-frame unwind proof did not run: $(tail -3 "$TMP/unwind.txt")"
 
-    ok "cold stored, warm reused, bypass compiled, corruption refused, misses rebuilt, frame unwound"
+    # 6) an entry is a function of the fragment and the key, not of the process that compiled it: two
+    #    cold runs in homes of their own must store byte-identical entries. A compiler address baked
+    #    into the code is what this catches, and inside one process it is invisible — the code runs on
+    #    the address it was built with.
+    for tag in a b; do
+        rm -rf "$TMP/ident-$tag"
+        mkdir -p "$TMP/ident-$tag/cache"
+        cp -r "$HOME_DIR/data" "$TMP/ident-$tag/data"
+        cp -r "$HOME_DIR/cache/base" "$TMP/ident-$tag/cache/base"
+        env MIRVM_HOME="$TMP/ident-$tag" MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 \
+            "$MIRVM" run "${pre[@]}" "$DATA_DIR/$input" >"$TMP/ident-$tag.out" 2>&1 \
+            || abort_test "the identity run $tag failed: $(tail -3 "$TMP/ident-$tag.out")"
+    done
+    cmp -s "$TMP/ident-a.out" "$TMP/ident-b.out" \
+        || abort_test "two compiling runs disagree on stdout"
+    python3 - "$TMP/ident-a" "$TMP/ident-b" >"$TMP/ident.txt" 2>&1 <<'IDENTITY'
+import glob, struct, sys
+
+def load(home):
+    entries = {}
+    for path in glob.glob(home + "/cache/jit/*.pack"):
+        raw = open(path, "rb").read()
+        count = struct.unpack_from("<I", raw, 12)[0]
+        index = struct.unpack_from("<Q", raw, len(raw) - 20)[0]
+        for i in range(count):
+            at = index + i * 76
+            key = raw[at:at + 32].hex()
+            offset, length = struct.unpack_from("<QI", raw, at + 64)
+            entries[key] = raw[offset + 36:offset + 36 + length]
+    return entries
+
+first, second = (load(home) for home in sys.argv[1:3])
+if set(first) != set(second):
+    print("the two stores hold different keys")
+    sys.exit(1)
+differing = [key for key in first if first[key] != second[key]]
+if differing:
+    print(f"{len(differing)} of {len(first)} entries differ between two cold processes")
+    sys.exit(1)
+if not first:
+    print("the cold runs stored nothing, so the comparison proves nothing")
+    sys.exit(1)
+print(f"{len(first)} entries identical")
+IDENTITY
+    grep -qE "^[1-9][0-9]* entries identical$" "$TMP/ident.txt" \
+        || abort_test "the two cold stores differ: $(tail -2 "$TMP/ident.txt")"
+
+    ok "cold stored, warm reused, bypass compiled, corruption refused, misses rebuilt, frame unwound, entries identical across processes"
 }

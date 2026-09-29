@@ -335,12 +335,14 @@ impl Translator<'_, '_> {
                 let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                 let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
                 let nok = self.b.ins().iconst(types::I64, i64::from(*null_ok));
-                let nsig = self.b.ins().iconst(
-                    types::I64,
-                    native_sig
-                        .as_ref()
-                        .map_or(0, |s| s as *const ir::ForeignSig as i64),
-                );
+                // The signature lives in this process's IR, so it is a *recorded* site: a stored entry
+                // replays it by re-matching this terminator (`artifact::body_value`). Baking the
+                // address would hand the next process a pointer into an address space that is gone.
+                let nsig = match native_sig {
+                    Some(sig) => self
+                        .site_foreign_sig(SigPart::Signature, sig as *const ir::ForeignSig as u64),
+                    None => self.b.ins().iconst(types::I64, 0),
+                };
                 let fv = self.site(Site::Func(func), u64::from(func));
                 if let UnwindAction::Cleanup(bb) = unwind {
                     // try_call: the ok block writes back and then jumps to target; the pad jumps to

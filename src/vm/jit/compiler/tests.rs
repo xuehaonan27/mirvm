@@ -562,3 +562,99 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
         "the entry carries the program that compiled it"
     );
 }
+
+/// A native signature an *indirect* call carries is a recorded site, not a raw pointer into the
+/// compiling process's IR.
+///
+/// The signature lives in this process's heap (a `ForeignSig` inside the module), so an entry that
+/// baked its address would be a wild pointer in every other process — exactly the class the entry's
+/// canonical form exists to prevent. Two things are checked: the captured code carries no such
+/// address, and the entry names the site, which is what lets the next process resolve it by
+/// re-matching the body.
+#[test]
+fn an_indirect_native_signature_is_recorded_and_replayed() {
+    use crate::vm::ir::{FfiKind, ForeignSig};
+    use crate::vm::jit::reloc::{Body, SigPart};
+
+    let signature = ForeignSig {
+        args: vec![FfiKind::I32],
+        ret: FfiKind::Void,
+        fixed: None,
+        thunk_args: Vec::new(),
+        unwind: false,
+    };
+    let funcs = vec![ir::FuncBody {
+        frame_size: 16,
+        frame_align: 8,
+        ret: ir::RetAbi::Zst,
+        params: Vec::new(),
+        caller_loc_off: None,
+        blocks: vec![
+            ir::Block {
+                stmts: Vec::new(),
+                term: Terminator::CallIndirect {
+                    callee: ir::Operand::AddrImm(ir::LinkAddr(0x6a00_0000_2000)),
+                    args: Vec::new(),
+                    ret: ir::RetDest::Ignore,
+                    target: 1,
+                    unwind: ir::UnwindAction::Continue,
+                    null_ok: false,
+                    native_sig: Some(signature),
+                },
+            },
+            ir::Block {
+                stmts: Vec::new(),
+                term: Terminator::Return,
+            },
+        ],
+        name: "indirect_native_probe".into(),
+    }];
+    let shared = Shared::new(ir::Module {
+        funcs: funcs.into(),
+        ..ir::Module::default()
+    });
+    let address = match &shared.module.funcs[0].blocks[0].term {
+        Terminator::CallIndirect {
+            native_sig: Some(sig),
+            ..
+        } => sig as *const ForeignSig as u64,
+        other => unreachable!("the probe's terminator changed: {other:?}"),
+    };
+
+    let mut compiler = test_compiler(&shared, CodeDomain::Plain);
+    compiler.reload = true;
+    compiler.compile(0);
+    let entry = compiler
+        .last_entry
+        .clone()
+        .expect("the probe's body was captured");
+    std::mem::forget(compiler);
+
+    let baked = address.to_le_bytes();
+    for symbol in &entry.symbols {
+        assert!(
+            !symbol.code.windows(8).any(|window| window == baked),
+            "{} baked this process's signature address into the entry",
+            symbol.name
+        );
+    }
+    let site = Body::ForeignSig {
+        block: 0,
+        part: SigPart::Signature,
+    };
+    assert!(
+        entry.symbols.iter().any(|symbol| symbol
+            .relocs
+            .iter()
+            .any(|reloc| reloc.target == artifact::Target::Body(site))),
+        "the entry does not name the signature site, so nothing can replay it"
+    );
+    // And the replay resolves that site to *this* process's signature: the address the writer knew,
+    // recovered from the body rather than from the drawing process.
+    let ordinals = artifact::Ordinals::of(&shared.module.funcs[0]).expect("the body numbers");
+    assert_eq!(
+        artifact::target_value(&shared, 0, &ordinals, &artifact::Target::Body(site)),
+        Some(address),
+        "the replayed signature address is not this process's"
+    );
+}

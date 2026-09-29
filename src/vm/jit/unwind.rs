@@ -58,6 +58,9 @@ pub(crate) fn register_frames(
                 }
             }
         }
+        // Only a SystemV program becomes an FDE. A target whose unwinder wants another kind
+        // registers nothing for this symbol, so an entry that carries one is stored without the
+        // frame the loader would need: on such a target a linked frame is a miss, not a walk.
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
