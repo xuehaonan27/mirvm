@@ -1,5 +1,9 @@
 //! Helper call-frequency counters: one bucket per helper family, enabled process-wide by
 //! `MIRVM_JIT_STATS=1` and dumped once at exit.
+//!
+//! The counter, ledger and ledger-row lines are reports rather than diagnostics: their exact shape
+//! is what `jit-stats`, `jit-cache` and the D16 ledger read, so they are written to fd 2 directly
+//! and the general verbosity threshold does not reach them.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

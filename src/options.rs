@@ -707,9 +707,12 @@ pub fn machine_output() -> bool {
 ///
 /// The names are [`crate::diag::Severity`]'s own vocabulary, so a severity this register accepts is
 /// one the emitter can render, and an unknown word is rejected rather than silently read as the
-/// default.
+/// default. `MIRVM_JIT_DEBUG` is the JIT's own spelling of `debug`: its traces are ordinary Debug
+/// diagnostics, so the knob a command already exports keeps selecting them. An explicit
+/// `MIRVM_LOG` wins, which is what makes the two spellings one setting rather than two.
 fn read_log_level() -> Result<crate::diag::Severity, Error> {
     match raw("log_level").as_deref() {
+        None | Some("") if crate::options::jit_debug() => Ok(crate::diag::Severity::Debug),
         None | Some("") => Ok(crate::diag::Severity::Warning),
         Some(name) => crate::diag::Severity::from_name(name).ok_or_else(|| Error::LogLevel {
             env: env_var_name("log_level"),

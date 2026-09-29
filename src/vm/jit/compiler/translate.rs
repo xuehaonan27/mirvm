@@ -78,8 +78,9 @@ impl<'a> Compiler<'a> {
             // Staying interpreted is the intended outcome for a non-admitted function,
             // not a failure; strict mode only records the set. Gated by MIRVM_JIT_DEBUG.
             if jit.sync && crate::options::jit_debug() {
-                eprintln!(
-                    "mirvm-jit-strict: f{func} not admitted ({})",
+                crate::diag_debug!(
+                    Jit,
+                    "f{func} not admitted ({})",
                     self.shared.module.funcs[func as usize].name
                 );
             }
@@ -250,7 +251,7 @@ impl<'a> Compiler<'a> {
             crate::store::jit::Lookup::Bad(reason) => {
                 helpers::cache_refused();
                 if crate::options::jit_debug() {
-                    eprintln!("mirvm-jit-debug: f{func} stored entry refused: {reason}");
+                    crate::diag_debug!(Jit, "f{func} stored entry refused: {reason}");
                 }
                 return false;
             }
@@ -261,8 +262,9 @@ impl<'a> Compiler<'a> {
         let Some(entry) = entry else {
             helpers::cache_refused();
             if crate::options::jit_debug() {
-                eprintln!(
-                    "mirvm-jit-debug: f{func} stored entry refused: not this fragment and key"
+                crate::diag_debug!(
+                    Jit,
+                    "f{func} stored entry refused: not this fragment and key"
                 );
             }
             return false;
@@ -291,7 +293,7 @@ impl<'a> Compiler<'a> {
         let Some(frames) = Self::linked_frames(&linked, &entry) else {
             helpers::cache_refused();
             if crate::options::jit_debug() {
-                eprintln!("mirvm-jit-debug: f{func} stored entry has no registrable frames");
+                crate::diag_debug!(Jit, "f{func} stored entry has no registrable frames");
             }
             return false;
         };
@@ -308,8 +310,9 @@ impl<'a> Compiler<'a> {
         std::mem::forget(linked);
         helpers::cache_hit();
         if crate::options::jit_debug() {
-            eprintln!(
-                "mirvm-jit-debug: f{func} ({}) published from a stored entry",
+            crate::diag_debug!(
+                Jit,
+                "f{func} ({}) published from a stored entry",
                 self.shared.module.funcs[func as usize].name
             );
         }
@@ -403,7 +406,7 @@ impl<'a> Compiler<'a> {
             if let Err(error) = session.publish()
                 && crate::options::jit_debug()
             {
-                eprintln!("mirvm-jit-debug: cannot publish JIT entries: {error}");
+                crate::diag_debug!(Jit, "cannot publish JIT entries: {error}");
             }
         }
     }
@@ -436,7 +439,7 @@ impl<'a> Compiler<'a> {
         )
         .ok()?;
         if crate::options::jit_debug() {
-            eprintln!("mirvm-jit-debug: f{func} linked back from its artifact");
+            crate::diag_debug!(Jit, "f{func} linked back from its artifact");
         }
         Some(linked)
     }
@@ -489,7 +492,7 @@ impl<'a> Compiler<'a> {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if crate::options::jit_debug() {
-                eprintln!("mirvm-jit-debug: guarded entry define failed: {e:#?}");
+                crate::diag_debug!(Jit, "guarded entry define failed: {e:#?}");
             }
             return None;
         }
@@ -524,8 +527,9 @@ impl<'a> Compiler<'a> {
     pub(super) fn strict_fail(&self, func: u32) {
         let jit = &self.shared.jit;
         if jit.sync {
-            eprintln!(
-                "mirvm-jit-strict: f{func} ({}) meets compilation threshold but failed to be compiled",
+            crate::diag_debug!(
+                Jit,
+                "f{func} ({}) meets compilation threshold but failed to be compiled",
                 self.shared.module.funcs[func as usize].name
             );
             jit.slots_for(self.domain).slots[func as usize].store(FAIL_SENTINEL, Ordering::Release);
@@ -590,7 +594,7 @@ impl<'a> Compiler<'a> {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if crate::options::jit_debug() {
-                eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
+                crate::diag_debug!(Jit, "define_function failed: {e:#?}");
             }
             return None;
         }
@@ -704,9 +708,11 @@ impl<'a> Compiler<'a> {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if crate::options::jit_debug() {
-                eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
+                crate::diag_debug!(Jit, "define_function failed: {e:#?}");
             }
             if crate::options::jit_debug_dump() {
+                // A dump payload, not a diagnostic: `MIRVM_JIT_DEBUG_DUMP` owns the exact shape and
+                // the general verbosity threshold must not silently drop it.
                 eprintln!(
                     "mirvm-jit-debug: CLIF dump of failed function f{func}:\n{}",
                     cctx.func.display()
@@ -732,8 +738,9 @@ impl<'a> Compiler<'a> {
         // instruction with it, so the two counts are reported rather than compared — what a stored
         // entry replays is the relocation list, and every relocation that names a site has one.
         if crate::options::jit_debug() {
-            eprintln!(
-                "mirvm-jit-debug: f{func} {} of {} recorded sites placed",
+            crate::diag_debug!(
+                Jit,
+                "f{func} {} of {} recorded sites placed",
                 placed.len(),
                 self.sites.len()
             );
@@ -852,7 +859,7 @@ impl<'a> Compiler<'a> {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if crate::options::jit_debug() {
-                eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
+                crate::diag_debug!(Jit, "define_function failed: {e:#?}");
             }
             return None;
         }

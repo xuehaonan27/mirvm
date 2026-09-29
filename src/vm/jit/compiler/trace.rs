@@ -92,7 +92,7 @@ impl<'a> Compiler<'a> {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if crate::options::jit_debug() {
-                eprintln!("mirvm-jit-debug: trace boundary define failed: {e:#?}");
+                crate::diag_debug!(Jit, "trace boundary define failed: {e:#?}");
             }
             return None;
         }

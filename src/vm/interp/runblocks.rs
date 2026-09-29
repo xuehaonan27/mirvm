@@ -356,7 +356,10 @@ pub(super) fn run_blocks(
             }
             Terminator::Resume => return Exit::Resume,
             Terminator::TerminateAbort => {
-                eprintln!("mirvm[m4-engine]: UnwindTerminate (double panic/ABI boundary) -- abort");
+                crate::diag_error!(
+                    Engine,
+                    "UnwindTerminate (double panic/ABI boundary) -- abort"
+                );
                 std::process::abort()
             }
             Terminator::Unreachable => {
