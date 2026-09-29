@@ -463,6 +463,54 @@ fn fresh_solve_diamond_skips_yanked_and_emits_lock() {
 }
 
 #[test]
+fn a_registry_row_sharing_the_root_name_keeps_its_lock_edges() {
+    // A frontmatter fixture whose file stem is `serde` has a synthetic root named `serde` that
+    // depends on crates.io `serde`: the two are different rows, and the registry one must still
+    // carry its dependency lines, or reading the lock back finds no edge for serde_core.
+    let d = tmpdir("root-name-collides-with-dependency");
+    let root = root_project(
+        &d,
+        "[package]\nname = \"serde\"\nversion = \"0.0.0\"\n\
+             [dependencies]\nserde = \"1\"\n",
+    );
+    let mut src = FakeSource::new(d.join("srcstore"));
+    let mut serde = iv("serde", "1.0.229");
+    serde.deps.push(idep("serde_core", "=1.0.229"));
+    let mut derive = idep("serde_derive", "^1");
+    derive.optional = true; // not activated, so not a lock line
+    serde.deps.push(derive);
+    src.add("serde", vec![serde]);
+    src.add("serde_core", vec![iv("serde_core", "1.0.229")]);
+
+    let plan = resolve(&root, &mut src).unwrap();
+    let text = plan.lock.serialize();
+    let back = Lockfile::parse(&text).unwrap();
+    let registry_row = back
+        .find("serde")
+        .into_iter()
+        .find(|package| package.version == Version::parse("1.0.229").unwrap())
+        .expect("the lock holds the registry serde row");
+    assert_eq!(
+        registry_row
+            .dependencies
+            .iter()
+            .map(|dependency| dependency.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["serde_core"],
+        "the registry row lost the dependency lines that name the root: {text}"
+    );
+
+    // The round trip: the lock this resolver wrote is the lock the next run reads.
+    std::fs::write(d.join("Cargo.lock"), text).unwrap();
+    let second = resolve(&root, &mut src).unwrap();
+    assert_eq!(
+        second.version_map["serde_core"],
+        vec![Version::parse("1.0.229").unwrap()]
+    );
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
 fn feature_unification_optional_forms_and_class_separation() {
     let d = tmpdir("features");
     let root = root_project(
