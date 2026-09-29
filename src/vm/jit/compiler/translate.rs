@@ -13,7 +13,7 @@ impl<'a> Compiler<'a> {
         func: u32,
         role: JitSymbolRole,
         name: &str,
-        unwind: Option<cranelift_codegen::isa::unwind::UnwindInfo>,
+        unwind: cranelift_codegen::isa::unwind::UnwindInfo,
         lsda: Option<Vec<u8>>,
         cctx: &cranelift_codegen::Context,
     ) {
@@ -30,7 +30,7 @@ impl<'a> Compiler<'a> {
                 compiled,
                 sites: &self.sites,
                 ordinals: self.ordinals.as_ref()?,
-                unwind,
+                unwind: Some(unwind),
                 lsda,
             })
         });
@@ -157,14 +157,16 @@ impl<'a> Compiler<'a> {
             && let Some(linked) = self.relink(entry, func)
             && let Some(guarded) = linked.entry(JitSymbolRole::Guarded)
             && let Some(reloaded) = linked.entry(JitSymbolRole::Packed)
+            && let Some(frames) = Self::linked_frames(&linked, entry)
         {
             fast = guarded;
             packed = reloaded;
             ranges = linked_ranges(self.shared, func, &linked);
             // The published code is the linked region, so its CFA programs are registered at the
             // addresses the link placed them at: the module's own FDEs describe code nothing calls,
-            // and an unwind out of a frame without one cannot find its caller.
-            self.register_eh_frames(Self::linked_frames(&linked, entry));
+            // and an unwind out of a frame without one cannot find its caller. A link this session
+            // cannot describe keeps the module's code instead, which is registered already.
+            self.register_eh_frames(frames);
             std::mem::forget(linked);
         }
         // A capture that stopped early leaves the symbols it had already taken: they describe a
@@ -284,8 +286,16 @@ impl<'a> Compiler<'a> {
             return false;
         };
         // The stored CFA programs become FDEs at the addresses the link placed the symbols at, exactly
-        // as a fresh compile registers its own.
-        self.register_eh_frames(Self::linked_frames(&linked, &entry));
+        // as a fresh compile registers its own. An entry whose frames this engine cannot all express
+        // is refused: a partially covered link is a wrong unwind.
+        let Some(frames) = Self::linked_frames(&linked, &entry) else {
+            helpers::cache_refused();
+            if crate::options::jit_debug() {
+                eprintln!("mirvm-jit-debug: f{func} stored entry has no registrable frames");
+            }
+            return false;
+        };
+        self.register_eh_frames(frames);
         let ranges = linked_ranges(shared, func, &linked);
         let (Some(guarded), Some(packed)) = (
             linked.entry(JitSymbolRole::Guarded),
@@ -327,22 +337,39 @@ impl<'a> Compiler<'a> {
         true
     }
 
+    /// This definition's CFA program, or `None` when this engine cannot express it.
+    ///
+    /// A frame without an FDE is a frame an unwind passes over, so a definition that has none is not
+    /// published at all: the callers treat it like a failed definition and the function stays
+    /// interpreted, which is the semantic reference.
+    fn registrable_unwind(
+        &self,
+        cctx: &cranelift_codegen::Context,
+    ) -> Option<cranelift_codegen::isa::unwind::UnwindInfo> {
+        cctx.compiled_code()
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
+            .filter(crate::vm::jit::unwind::is_registrable)
+    }
+
     /// The CFA programs of a linked entry, at the addresses the link placed its symbols at.
     ///
     /// What a session publishes for a linked entry is the linked region, so these are the frames the
-    /// unwinder has to find; the module's own FDEs describe code nothing calls. A symbol without a
-    /// stored CFA program has no FDE, which is the one case an unwind through it cannot cross.
-    fn linked_frames(
+    /// unwinder has to find; the module's own FDEs describe code nothing calls. `None` when any
+    /// symbol's stored program is missing or of a kind this engine cannot express: a link that covers
+    /// only some of its frames is refused whole, because the frames it does not cover are ones an
+    /// unwind would pass over.
+    pub(super) fn linked_frames(
         linked: &artifact::Linked,
         entry: &artifact::Entry,
-    ) -> Vec<(u64, UnwindInfo, Option<Vec<u8>>)> {
+    ) -> Option<Vec<crate::vm::jit::unwind::Frame>> {
         entry
             .symbols
             .iter()
-            .filter_map(|symbol| {
+            .map(|symbol| {
                 let address = linked.entry(symbol.role)?;
                 let unwind = symbol.unwind.clone()?;
-                Some((address, unwind, symbol.lsda.clone()))
+                crate::vm::jit::unwind::is_registrable(&unwind)
+                    .then(|| (address, unwind, symbol.lsda.clone()))
             })
             .collect()
     }
@@ -468,12 +495,8 @@ impl<'a> Compiler<'a> {
         }
         // The CFA program goes to the batch that registers today's code *and* into the artifact: a
         // later session registers it again at the address it links the entry to.
-        let unwind = cctx
-            .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten());
-        if let Some(ui) = unwind.clone() {
-            self.pending_unwind.push((id, ui, None));
-        }
+        let unwind = self.registrable_unwind(&cctx)?;
+        self.pending_unwind.push((id, unwind.clone(), None));
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
         self.capture_wrapper(
             func,
@@ -571,12 +594,8 @@ impl<'a> Compiler<'a> {
             }
             return None;
         }
-        if let Some(ui) = cctx
-            .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
-        {
-            self.pending_unwind.push((id, ui, None));
-        }
+        self.pending_unwind
+            .push((id, self.registrable_unwind(&cctx)?, None));
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
         let symbol = PendingJitSymbol {
             id,
@@ -695,16 +714,12 @@ impl<'a> Compiler<'a> {
             }
             return None;
         }
-        let unwind = cctx
-            .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten());
+        let unwind = self.registrable_unwind(&cctx)?;
         // A function with a try_call gets an LSDA, and it must list every call site, handler-less ones
         // included; build_lsda explains why. The artifact keeps a copy, so a later session reconstructs
         // the same FDE and landing pads at the address it links the entry to.
         let lsda = has_try_call.then(|| build_lsda(&collect_call_sites(&cctx)));
-        if let Some(ui) = unwind.clone() {
-            self.pending_unwind.push((id, ui, lsda.clone()));
-        }
+        self.pending_unwind.push((id, unwind.clone(), lsda.clone()));
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
         // The site table, read from the backend's relocation list while the code is still in hand. A
         // recorded site the list does not mention is an absolute nothing could replay, so the two
@@ -737,7 +752,7 @@ impl<'a> Compiler<'a> {
                 compiled: cctx.compiled_code()?,
                 sites: &self.sites,
                 ordinals: self.ordinals.as_ref().expect("just set"),
-                unwind,
+                unwind: Some(unwind),
                 lsda,
             });
             match symbol {
@@ -841,12 +856,8 @@ impl<'a> Compiler<'a> {
             }
             return None;
         }
-        let unwind = cctx
-            .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten());
-        if let Some(ui) = unwind.clone() {
-            self.pending_unwind.push((id, ui, None));
-        }
+        let unwind = self.registrable_unwind(&cctx)?;
+        self.pending_unwind.push((id, unwind.clone(), None));
         let size = cctx.compiled_code()?.code_buffer().len() as u64;
         self.capture_wrapper(
             func,
