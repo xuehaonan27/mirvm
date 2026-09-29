@@ -30,7 +30,7 @@ mode_run() {
     run() { # <package> <tag> [extra env...]
         local package=$1 tag=$2
         shift 2
-        MIRVM_DEPS=self MIRVM_A2_DEBUG=1 MIRVM_TIMING=1 "$@" \
+        MIRVM_DEPS=self MIRVM_A2_DEBUG=1 MIRVM_TIMING=1 env "$@" \
             "$MIRVM" run "$WS/$package" >"$TMP/$tag.out" 2>"$TMP/$tag.log" \
             || abort_test "$tag exited non-zero: $(tail -3 "$TMP/$tag.log")"
     }
@@ -74,5 +74,23 @@ mode_run() {
     [ "$(ls "$UNITS" | sort)" = "$before" ] \
         || abort_test "the warm rerun stored a manifest the store already had"
 
-    ok "one manifest per unit, shared across programs, with identical output"
+    # 5) the §5 unit determinism gate: one unit built twice, in separate sessions whose scheduling
+    #    differs (one job against eight), yields one manifest digest and one fragment set. The
+    #    manifests are content-named, so equal names are equal digests; the packs are content-named
+    #    too, so a second build that adds no pack stored no fragment the first one had not.
+    rm -rf "$UNITS"
+    run a a-one MIRVM_CLESS_JOBS=1
+    units_one=$(ls "$UNITS" | sort)
+    frags_one=$(ls "$HOME_DIR/cache/frags" 2>/dev/null | sort)
+    rm -rf "$UNITS"
+    run a a-eight MIRVM_CLESS_JOBS=8
+    units_eight=$(ls "$UNITS" | sort)
+    frags_eight=$(ls "$HOME_DIR/cache/frags" 2>/dev/null | sort)
+    [ -n "$units_one" ] || abort_test "the determinism run stored no unit manifest"
+    [ "$units_one" = "$units_eight" ] \
+        || abort_test "one unit built twice has two manifest digests: $units_one vs $units_eight"
+    [ "$frags_one" = "$frags_eight" ] \
+        || abort_test "one unit built twice stored new fragments: $(comm -13 <(echo "$frags_one") <(echo "$frags_eight"))"
+
+    ok "one manifest per unit, shared across programs, with identical output and one digest per unit"
 }

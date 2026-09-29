@@ -531,11 +531,19 @@ impl Tables {
                 .exports
                 .push((name, project_owned(Space::Func, id, unit, symbols)?));
         }
+        // The map's own order is its hasher's, and a manifest is content-addressed: two sessions of
+        // one unit must encode the same bytes, so a symbol-keyed table is written in symbol order.
+        tables.exports.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         for (addr, id) in std::mem::take(&mut module.fn_entry_links) {
             tables
                 .fn_entry_links
                 .push((addr, project_owned(Space::Func, id, unit, symbols)?));
         }
+        // The link table is a map keyed by address, and lowering builds it one function at a time:
+        // its order is the pass's, so it is sorted here for the same reason the symbol tables are.
+        tables
+            .fn_entry_links
+            .sort_unstable_by_key(|(addr, _)| addr.0);
         for site in &mut module.entry_stub_sites {
             tables
                 .entry_stub_funcs
@@ -547,6 +555,7 @@ impl Tables {
                 .tls_syms
                 .push((name.clone(), project_owned(Space::Tls, *id, unit, symbols)?));
         }
+        tables.tls_syms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Ok(tables)
     }
 
