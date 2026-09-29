@@ -32,7 +32,11 @@ fn nested() -> u64 {
 
 fn main() {
     let mut r = 0;
-    for _ in 0..30000 {
+    // An iteration costs about 3.7ms on the Linux verify host -- a panic, its unwind, two Drop
+    // calls and their formatted output run in the interpreter -- so 3000 of them fit the case
+    // budget with room for both native-diff passes and still leave the compile thread time to
+    // publish.
+    for _ in 0..3000 {
         r = nested();
     }
     println!("r={r}");

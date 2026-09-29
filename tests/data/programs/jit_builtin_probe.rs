@@ -4,7 +4,8 @@
 //! mirvm_alloc engine heap entry) + the CatchUnwind arm (catch_unwind catches a panic and
 //! downcasts the payload) + the HostWrite arm (libc write straight through).
 //! Must be byte-for-byte identical across native / JIT-off / JIT=1, with MIRVM_JIT_DEBUG
-//! proving publication. The loops give the asynchronous compile thread time to run.
+//! proving publication. The loops give the asynchronous compile thread time to run and are
+//! sized to the case budget; see `main`.
 
 use std::panic;
 
@@ -70,7 +71,10 @@ fn main() {
     // output that would slow the comparison (catch.rs already covers the default hook's stderr).
     panic::set_hook(Box::new(|_| {}));
     let mut acc = 0u64;
-    for i in 0..30000u64 {
+    // An iteration costs about 4ms on the Linux verify host -- the allocation, formatting and
+    // unwind work below runs in the interpreter -- so 3000 of them fit the case budget with room
+    // for both native-diff passes and still leave the compile thread seconds of guest time.
+    for i in 0..3000u64 {
         acc ^= vec_grow(64);
         acc = acc.wrapping_add(box_big(i as usize));
         acc ^= zeroed_block(128);
