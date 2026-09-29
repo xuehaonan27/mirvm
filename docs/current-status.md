@@ -111,26 +111,27 @@ in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call site n
 
 ## 3. Verified boundaries
 
-Measured on this tree against the Linux x86_64 release build; `tests/README.md` documents the suites.
+Measured on this tree against the Linux x86_64 release build, with the cases that fetch run under
+`withproxy` ([environment.md](environment.md)); `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
 - `cargo test --locked --all-features`: 498 pass, 1 ignored.
-- `make test` (the fast tier, 73 cases): 68 pass / 5 fail; a run in which `jit_unwind_probe` hangs
-  reaches 67 pass / 6 fail (E36).
-- `make smoke` (fast + smoke, 119 cases): 104 pass / 15 fail.
+- `make test` (the fast tier, 73 cases): 69 pass / 4 fail; one run measured 68 pass / 5 fail because
+  `quality` was RED on E48's flaky test.
+- `make smoke` (fast + smoke, 119 cases): 107 pass / 12 fail.
 - `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
   which is `repo-quality`'s 13 source checks.
 - Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
 - Timing gates: `load` 155ms against its 1000ms ceiling; `fib32` RED (E40).
 
-The fast tier's failures are `jit_builtin_probe` (E36) and the four `cargo-diff` rows that report FAIL
-rather than SKIP when their materialized project directory is absent (`ecosystem`, `ffi_zlib`,
-`ripgrep_regex`, `warning_return`; G2); `jit_unwind_probe` joins them only when it hangs (E36).
+The fast tier's failures are the four `cargo-diff` rows that report FAIL rather than SKIP when their
+materialized project directory is absent (`ecosystem`, `ffi_zlib`, `ripgrep_regex`, `warning_return`;
+G2).
 
-The smoke tier adds ten: the seven real-project REDs of E47 — four rayon-family timeouts (`rayon`,
+The smoke tier adds eight: the seven real-project REDs of E47 — four rayon-family timeouts (`rayon`,
 `flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`, `wasmtime_wat`) and one genuine trap
-(`png_round`: `foreign llvm.x86.pclmulqdq.512`, the intrinsic queue) — plus `main-panic-jit` (E45) and
-the two `vmstats-threads-*` cases (E46). `tokei` is a gate-tier case and is not in this tier.
+(`png_round`: `foreign llvm.x86.pclmulqdq.512`, the intrinsic queue) — plus `main-panic-jit` (E45).
+`tokei` is a gate-tier case and is not in this tier.
 
 `fib(32)` is RED: the best of three runs is about 8.7s against its 80ms gate (E40). Output is correct
 and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not be claimed.

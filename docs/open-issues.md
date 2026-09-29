@@ -32,14 +32,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Open defects
 
-- **E36** `OPEN`: the JIT `native-diff` cases hang. `jit_builtin_probe` is deterministic — it spends its
-  whole 120s budget and is killed with `mirvm=124` against `native=0` — and `jit_unwind_probe` did the
-  same in one of two full fast-tier runs (its panic message repeated six times before the kill) while
-  passing in three runs of its own. Neither carries an `xfail=` marker, so a hang fails the mode
-  instead of counting as a known red. `jit_builtin_probe` reproduces on `c82a065` with the platform
-  refactor reverted, so it is not that refactor's regression; naming a handful of modes rather than the
-  whole tier is why per-commit verification missed it. Needs a stack or a bisect from the JIT
-  builtin/unwind path — a `timeout` kill leaves no diagnostic.
 - **E38** `OPEN`: the cargoless resolver cannot read back a lock naming serde 1.0.229. A fresh-mode run
   writes a lock whose `serde` depends on the newly split-out `serde_core`, and the next (lock-mode) run
   fails deterministically with "dependency serde_core of serde …@1.0.229 has no edge assignment record
@@ -53,7 +45,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   pre-linking now exists (`src/vm/jit/state/mod.rs`, `src/vm/jit/compiler/mod.rs`), so the open question
   is which tier `fib` is built at and where the interpreted calls come from. The ceiling is the right
   number — 80ms is what compiled recursion costs — so this closes with a measurement of the interpreted
-  calls, never by raising it.
+  calls, never by raising it. The same question is what makes the JIT probes expensive: 30000
+  iterations of `jit_builtin_probe` cost 129s on that host with 525 functions compiled and every
+  publish accounted for, against 140s with `MIRVM_JIT=off`, and the cost is linear in the iteration
+  count. Its counters at 3000 iterations (`MIRVM_JIT_STATS=1`) read `c2i=3146740 alloc=42930
+  call_terminate=974353 tls_ref=3503 call_indirect=13524 call_builtin=16070`, so the time is not in the
+  compiled bodies.
 - **E43** `OPEN`: a JIT batch's `.eh_frame` registration races guest unwinding. The compile worker
   registers each batch with `__register_frame` while guest threads may already be unwinding, and libgcc
   mutates that list under a lock it does not take on the lookup path, so a panic racing a registration
@@ -69,17 +66,20 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   so the interpreter/JIT difference the case was written for no longer exists. Either the expectation
   is stale (the interpreter leg's `stderr_absent=release=false` then holds vacuously) or the symbolized
   frame was lost; decide which, then fix the expectation or restore the frame.
-- **E46** `OPEN`: `--vm-stats`'s per-entry trap section prints no rows for any program, so
-  `vmstats-threads-spawn` and `vmstats-threads-panic` (which expect `@entry: trap-free`) are RED. The
-  program-entry alias `@entry` now has a reader and no writer: `src/image/base.rs` still removes it,
-  and nothing inserts it — the insertion in `src/lower/mod.rs` was deleted when the lower split into
-  per-home layers, and the alias must come back *before* the per-home export split, because a home's
-  exports are filtered out of `module.exports` by id range.
 - **E47** `OPEN`: seven real-project corpus cases are RED on the Linux verify host — four rayon-family
   timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`, `wasmtime_wat`) and one
   genuine Trap (`png_round`, `llvm.x86.pclmulqdq.512`, the intrinsic queue C6). The smoke tier runs
   them and counts them, so they are RED in every `make smoke` and `make gate`; the four timeouts are
   wall-clock, the two aborts happen with no diagnostic kept.
+- **E48** `OPEN`: `vm::embed_tests::capture::host_syscall_variants_preserve_libc_result_and_errno` is
+  intermittently RED, and reddens `quality` with it, so a suite run's failure set is not reproducible.
+  The observed report is `plain/jit/success: function did not compile`: `jit.slots[0]` is still 0 after
+  `run_export` returned the right value, so that engine ran the function interpreted although the test
+  set `threshold = 1` and `sync = true`. It appeared at host load ~40, immediately after a full
+  `make smoke`: once inside `make test` and twice in the full-suite runs that followed. Three lib-suite
+  runs since, on this tree and on the pre-change tree, are green, as are the isolated runs, the
+  `MIRVM_NO_JIT_CACHE=1` runs and an isolated `MIRVM_HOME`. Closing needs the mechanism — which
+  engine-side step can leave an engine with no publication path — not another green retry.
 
 ## Approved, awaiting construction
 
@@ -118,8 +118,7 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 - **E14** `WORKAROUND`: allocation goes through the mimalloc crate instead of a hand-rolled TLAB, so
   chunk, size-class and remote-free-queue details are absent (`src/vm/heap.rs`).
 - **E15** `WORKAROUND`: `--vm-stats` cannot see indirect fn-pointer out-edges, so its debt reading is
-  permanently "at least this much", and its per-entry section currently prints no rows at all (E46).
-  Closes with an out-edge discovery mechanism beyond incremental hits.
+  permanently "at least this much". Closes with an out-edge discovery mechanism beyond incremental hits.
 - **E16** `UNSCHEDULED`: io_uring pass-through is unproven and has no corpus comparison. No io_uring (or
   tokio-uring) code or design text exists in the tree to compare against.
 - **E17** `UNSCHEDULED`: sessions carrying warnings or errors are still refused admission and
