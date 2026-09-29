@@ -4,8 +4,11 @@ Host, toolchain and network facts that cost real time when rediscovered.
 
 ## Hosts and toolchain
 
-- All building and testing happens on the Linux x86_64 container `dev-cpu-hg`. The macOS checkout can edit
-  and review but cannot build: its cargo registry cache is not writable.
+- Release builds, the timed and corpus tiers and the gate are authoritative on the Linux x86_64
+  container `dev-cpu-hg` (`10.2.201.58:53506`). The macOS checkout has `~/.cargo` read-only, so it
+  cannot fetch a crate it does not already have cached; with the cache warm it does build, lint, run
+  the unit tests (14 of 465 fail under the local sandbox, all `fail to create per-Engine native
+  directory: Operation not permitted`) and the static `make validate inventory` checks.
 - The container ships no Rust. Install `nightly-2026-07-02` with the components listed in
   `rust-toolchain.toml` (`rustc-dev`, `rust-src`, `llvm-tools`, `rustfmt`, `clippy`).
 - Pinned compiler sources live at

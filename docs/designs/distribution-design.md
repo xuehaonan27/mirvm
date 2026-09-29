@@ -184,13 +184,11 @@ design.
 
 ## 5. Open items
 
-- The mode B `.mirvm` package and `mirvm pack` are explicitly scheduled after the JIT CFI/unwind work.
 - Release form and naming are open: MRsDK is rejected, and "kit" naming waits for a mode B physical
   artifact.
-- The approved but unstarted order is phase timing → L2 engine-IR cache → dependency codegen trimming
-  → mode B package → release form, with cold-start leverage construction inserted once the first two
-  finish.
-- The per-phase split inside the load phase is unmeasured, and it is the precondition for L2 design.
+- Of the original order — phase timing, the L2 engine-IR cache, dependency codegen trimming, the mode B
+  package, release form — dependency codegen trimming is the one still unbuilt. The load phase's
+  per-phase split is measured by `MIRVM_TIMING`.
 - Reopens and their triggers: frequent `program.rs` churn hurting the L2 hit rate (the key contains the
   build id, so it stays correct; re-estimate the format freeze once the IR settles); Cargo not
   tolerating artifact-existence checks after emit trimming (establish empirically on landing, else

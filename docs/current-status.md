@@ -18,7 +18,10 @@ contracts are its siblings in `docs/designs/`.
   The translator is exhaustive over the statement, rvalue and terminator tables: frame model v2 with
   memory operands, the full scalar set, 128-bit and atomics, all ABI shapes, the five call helpers,
   and productized unwind with a full LSDA over both CIEs. `MIRVM_JIT_SYNC` publishes synchronously, so
-  `MIRVM_JIT_THRESHOLD=1` differentials prove compiled code really ran.
+  `MIRVM_JIT_THRESHOLD=1` differentials prove compiled code really ran. Compiled symbols persist in the
+  machine-local `cache/jit` store keyed by `(fragment, jit-key)`, with relocation deferred to load: a
+  warm session links the heat order before serving a request and takes each function's tier from
+  `cache/package-heat` (`MIRVM_NO_JIT_CACHE`, `MIRVM_JIT_RELOAD`, `MIRVM_JIT_LEDGER`).
 - **FFI and unwind** — guest to native through `dlsym` + libffi with the source ABI (C or C-unwind);
   native to guest through libffi closures plus TLS attach; aggregates marshalled by value (frozen
   layout, libffi struct grouping, sret). Exceptions keep their source ABI: plain C aborts, C-unwind
@@ -108,35 +111,35 @@ in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call site n
 
 ## 3. Verified boundaries
 
-Measured on the current tree; `tests/README.md` documents the suites.
+Measured on this tree against the Linux x86_64 release build; `tests/README.md` documents the suites.
 
-- `cargo check --locked --all-targets --all-features`, Clippy `-D warnings`, `cargo fmt --check`:
-  clean.
-- `cargo test --locked --all-features`: 404 pass.
-- `make test` (fast tier): 13 pass / 2 fail.
-- `runtime.semantics` (drives TSan): 3 pass / 1 fail; TSan cases 10/10 with zero warnings.
-- `runtime.telemetry`: 14/14.
-- Corpus smoke tier: 17 pass / 7 fail.
-- Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one hash.
+- `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
+- `cargo test --locked --all-features`: 498 pass, 1 ignored.
+- `make test` (the fast tier, 73 cases): 68 pass / 5 fail; a run in which `jit_unwind_probe` hangs
+  reaches 67 pass / 6 fail (E36).
+- `make smoke` (fast + smoke, 119 cases): 104 pass / 15 fail.
+- `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
+  which is `repo-quality`'s 13 source checks.
+- Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
+- Timing gates: `load` 155ms against its 1000ms ceiling; `fib32` RED (E40).
 
-The two `fast` failures are the only registered REDs: `contracts.cargoless-workspace` (a
-`full_package_id` compatibility assertion against non-English test data) and `contracts.cargoless-sources`
-(two diagnosis texts). Both are known and loud.
+The fast tier's failures are `jit_builtin_probe` (E36) and the four `cargo-diff` rows that report FAIL
+rather than SKIP when their materialized project directory is absent (`ecosystem`, `ffi_zlib`,
+`ripgrep_regex`, `warning_return`; G2); `jit_unwind_probe` joins them only when it hangs (E36).
 
-The corpus smoke tier has 7 pre-existing failures on this host, unchanged by the parallel frontend:
-four rayon-family 90s timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`,
-`wasmtime_wat`) and one genuine trap (`png_round`: `foreign llvm.x86.pclmulqdq.512`, the open intrinsic
-queue). `tokei` is worse: it prints its full table and then never exits.
+The smoke tier adds ten: the seven real-project REDs of E47 — four rayon-family timeouts (`rayon`,
+`flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`, `wasmtime_wat`) and one genuine trap
+(`png_round`: `foreign llvm.x86.pclmulqdq.512`, the intrinsic queue) — plus `main-panic-jit` (E45) and
+the two `vmstats-threads-*` cases (E46). `tokei` is a gate-tier case and is not in this tier.
 
-`performance.limits` is RED: the best `fib(32)` is about 97ms against the 80ms gate. Output is correct
+`fib(32)` is RED: the best of three runs is about 8.7s against its 80ms gate (E40). Output is correct
 and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not be claimed.
-
-A full `gate` has not been re-run since the documentation cleanup; the numbers above were verified
-suite by suite.
+The gate tier as a whole has not been re-run; the numbers above cover `make test`, `make smoke`, the
+runtime suites and the base image.
 
 Build notes: debug and release both build, and only the release binary is executed — under the pinned
-LLVM 22 the release profile must keep `debug=2` together with `strip="debuginfo"`, or the release
-cleanup chain miscompiles.
+LLVM 22 the release profile must keep `debug=2` with `strip="debuginfo"` and `codegen-units=256`, or
+the release cleanup chain miscompiles.
 
 Oracle discipline: an oracle must be observable output or an invariant; "both sides failed" or "exit
 codes match" is never success. Deferred cases are refused loudly as a separate `p5` bucket instead of
@@ -151,11 +154,13 @@ paused; the local equivalent is authoritative.
 
 What is refused or not yet claimed — not what is planned.
 
-- **Platform**: Linux/ELF/x86_64 only.
+- **Platform**: Linux/ELF/x86_64 is the only claimed and tested baseline; the macOS/aarch64 axis is
+  implemented but no test, `Makefile` target or CI job names it (E26).
 - **Arbitrary Rust**: not supported. The corpus holds real projects and a small workload set; those
   are not a continuous gate and do not generalize.
-- **JIT**: no OSR, no deopt, no production tiering. Close stops and joins compile workers and releases
-  `Shared`, but published JIT code and its `.eh_frame` live to process end.
+- **JIT**: no OSR, no deopt, and no within-run tier upgrade — a function's tier is the previous run's
+  heat order (E42). Close stops and joins compile workers and releases `Shared`, but published JIT code
+  and its `.eh_frame` live to process end.
 - **Signals**: synchronous faults in a guest handler, realtime signals and
   `SA_SIGINFO`/`SA_ONSTACK`/`SA_NODEFER`/`SA_RESETHAND` are refused. Process-directed external signals
   are promised only at the owner Engine's next safe point.
@@ -165,8 +170,8 @@ What is refused or not yet claimed — not what is planned.
   the `vfork`/`clone`/`setjmp` families are loud refusals.
 - **IR / ABI**: `volatile` uses alignment=1 opaque `MaybeUninit` carriers and promises no atomicity
   beyond 16 bytes. Slices and `str` keep static formulas, other nested DSTs are refused, and not every
-  128-bit ABI shape is scalarized. `track_caller` `ReifyFnPointer` works; other adjustments are not
-  extrapolated from it.
+  128-bit ABI shape is scalarized. The pointer coercions (`Unsize`, `MutToConstPointer`,
+  `UnsafeFnPointer`, `ArrayToPointer`, `ReifyFnPointer`, `ClosureFnPointer`) are all resolved.
 - **Static archives**: non-PIC, thin archives, cross-archive dependency/ordering/duplicate exports and
   export-symbols are refused. There is no multi-archive link plan and this is not a general linker.
 - **Logging / profile**: no 1-byte raw syscall site, no profile command, no separate trace interpreter
@@ -196,7 +201,8 @@ product covering all of Rust.
    `0.10 ms/instance` and behaves as a near-constant std tax (the executed set is only 7–29% of the
    lowered set, and 75% of the phase is rustc query/decoding machinery); the std base image takes a
    pure-cold script from 385ms to 104ms, a deps image takes an ecosystem cold run from 924ms to 66ms,
-   and an L2 hit takes the warm load phase 11–15×.
+   and an L2 hit takes the warm load phase 11–15×. The gate itself is still RED: `fib(32)` is about
+   8.7s against its 80ms ceiling (E40).
 2. **Logging and telemetry.** Fork generations are closed. Next: the remaining direct hot path, the
    trace interpreter loop, then stateless inline-asm raw syscall sites — the first internal syscall
    slice must not be claimed complete before those raw sites land. Only variadic `libc::syscall` forms
