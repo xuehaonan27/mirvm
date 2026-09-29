@@ -856,6 +856,15 @@ fn lower_inner(
     if let Some(p) = &purity {
         p.dump();
     }
+    // Entry alias for --vm-stats' reachability analysis from the program entry. It has to be in
+    // `module.exports` before the split below, because a home's exports are filtered out of that map
+    // by id range: an alias added afterwards reaches the delta only, and the entry may live in a home
+    // (its crate is LOCAL_CRATE wherever the split falls).
+    if let Some((entry_def, _)) = tcx.entry_fn(())
+        && let Some(&id) = linker.ids.get(&Instance::mono(tcx, entry_def))
+    {
+        module.exports.insert("@entry".into(), id);
+    }
 
     // ===== Split mode: rebase ids and assemble one module per home =====
     let mut split_images: Vec<(usize, SplitImage)> = Vec::new();
