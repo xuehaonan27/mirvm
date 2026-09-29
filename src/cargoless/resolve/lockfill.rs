@@ -242,9 +242,11 @@ pub(super) fn fill_lock_dependency_lines(
         })
         .collect();
     for (name, version, source) in registry_packages {
-        if name == root.name {
-            continue;
-        }
+        // Every row here has a registry source, and the root's own row has none, so the root is not
+        // among them: comparing by name would skip a registry package that merely shares the root's
+        // name — a frontmatter fixture whose stem is `serde` depending on crates.io `serde` — and
+        // write that row with no dependency lines, which the next run reads back as a missing edge
+        // assignment for every dependency the index gives it.
         let identity = registry_identity(&name, &source);
         let vs = registry_entry(src, &identity)?;
         let iv = vs
