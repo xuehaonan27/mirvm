@@ -210,7 +210,11 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    buckets) are the linker-honesty observable of §4, and the loaded-address unwind proof is the
    `a_linked_entry_unwinds_through_a_loaded_frame` probe: the same cleanup-pad chain the LSDA probe
    already runs, but through frames the *link* placed and FDEs synthesized from the stored CFA
-   programs.
+   programs. A frame whose CFA program this engine cannot express is never published: a definition
+   with none stays interpreted (the semantic reference) and a stored entry missing one is refused
+   whole, because a frame with no FDE is a frame the unwinder walks past, which is a wrong unwind
+   rather than a missing one. The bytes an FDE points at — its LSDA — are leaked into the process, the
+   same ownership the registered section has.
    Every absolute an entry carries is a site of the fragment, the `ForeignSig` of an *indirect* native
    call included: it was the one value still baked raw (the compiling process's heap address), so an
    entry written by one process segfaulted the next one that called through it. Two fences now hold
