@@ -43,6 +43,8 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     let mut guard = FrameGuard {
         ctx,
         depth_active: false,
+        depth_before: unsafe { (*ctx).depth },
+        shadow_before: unsafe { (*ctx).shadow.len() },
         base: None,
         shadow_active: false,
         unwind_edge: Cell::new(None),

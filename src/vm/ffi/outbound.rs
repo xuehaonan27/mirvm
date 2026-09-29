@@ -309,10 +309,25 @@ pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut std::ffi::c_
     Some((attr, size))
 }
 
+/// Releases the guest callback leases a native call left behind, on every exit path of
+/// [`call_addr`]: the mark is the registry length before the call, so truncating back to it drops
+/// exactly the frames the call entered and did not return through.
+struct CallbackMark(usize);
+
+impl Drop for CallbackMark {
+    fn drop(&mut self) {
+        crate::vm::thunks::release_callbacks_since(self.0);
+    }
+}
+
 /// Call directly at a real code address: the shared tail of CallForeign, and the native
 /// fn-pointer channel used when a CallIndirect reverse lookup misses (real code the guest
 /// obtained from dlsym at runtime).
 pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u64>) -> u64 {
+    // Every guest callback this native call enters registers its lease in the thread's callback
+    // registry; after the call returns, none of those frames can still be live, so anything still
+    // registered belongs to a frame a foreign `longjmp` unwound over and has to be released here.
+    let _callbacks = CallbackMark(crate::vm::thunks::callback_mark());
     // Args and signature must be the same length; zip silently truncating once hid the
     // types of a variadic call's real trailing arguments.
     if args.len() != sig.args.len() {

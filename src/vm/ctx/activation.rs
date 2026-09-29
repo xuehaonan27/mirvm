@@ -19,6 +19,12 @@ pub struct ActivationGuard {
     pub(super) contexts: *mut ThreadContexts,
     previous: *mut Ctx,
     previous_activation: u64,
+    /// How long the activation stack was before this one was pushed. Exit truncates to it, which is
+    /// what makes the boundary recoverable: a foreign `longjmp` that crossed a frame above this one
+    /// (Lua's error raise out of a callback, a wasm trap) unwinds the host stack without running
+    /// destructors, so the frames it skipped left their activations behind. This guard's own frame is
+    /// returning, so the state before its push is the only one that can still be right.
+    previous_len: usize,
     /// Domain of the activation this one nests inside, restored on exit so a
     /// native callback returning to an outer guest chain resumes that chain's
     /// domain rather than the callee's.
@@ -46,14 +52,24 @@ impl Drop for ActivationGuard {
                 || (*self.contexts).current_activation != self.activation
                 || (*self.contexts).active_engines.last().copied() != Some(self.engine_id)
             {
-                eprintln!("mirvm[m4-engine]: Engine activation exited out of order");
-                std::process::abort();
+                // Not a broken invariant but the signature of a skipped one: this frame returns while
+                // an activation pushed above it is still recorded, which is what a foreign `longjmp`
+                // over that frame leaves. The drop below is the repair; the report is `Debug` because
+                // the C-level semantics that produced it are the ones the guest asked for.
+                crate::diag_debug!(
+                    Engine,
+                    "activation {} returns over activations pushed above it; restoring the stack",
+                    self.activation
+                );
             }
-            super::super::signal::restore_owner(self.previous_signal_owner);
-            (*self.contexts).active_engines.pop();
+            // Truncate to the length recorded at entry: that removes this guard's own entry and any
+            // entry a frame above it left behind, and the saved fields then make the thread's state
+            // exactly what it was before this activation.
+            (*self.contexts).active_engines.truncate(self.previous_len);
             (*self.contexts).current = self.previous;
             (*self.contexts).current_activation = self.previous_activation;
             (*self.contexts).domain = self.previous_domain;
+            super::super::signal::restore_owner(self.previous_signal_owner);
             drain_deferred = shared.control().is_closing()
                 && !(*self.contexts).active_engines.contains(&self.engine_id);
             // An EngineFault unwinds the handler activation before its outer
@@ -112,6 +128,7 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         let previous = (*contexts).current;
         let previous_activation = (*contexts).current_activation;
         let previous_domain = (*contexts).domain;
+        let previous_len = (*contexts).active_engines.len();
         let activation = (*contexts).next_activation;
         if activation == 0 {
             eprintln!("mirvm[m4-engine]: Engine activation counter exhausted");
@@ -139,6 +156,7 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
             previous,
             previous_activation,
             previous_domain,
+            previous_len,
             previous_signal_owner,
             ctx,
             engine_id: shared.id,
