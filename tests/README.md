@@ -32,6 +32,10 @@ fake Cargo under `data/fixtures/fakes/`, covering false green, a misbehaving pro
 failing, stderr-only differences, status propagation, batch aggregation, SKIP-versus-PASS and the
 expected-red decisions.
 
+Triage knobs, for a failure that needs looking at; nothing in a normal run sets them:
+`MIRVM_GATE_KEEP_CACHE=1` skips the purge a `corpus` or `pair` case does between its legs, and
+`MIRVM_GATE_KEEP_TMP=1` keeps the case's scratch directory and prints where it is.
+
 ## Layout
 
 ```text
