@@ -247,7 +247,9 @@ check_engine_top_typed_catch() {
     local name=engine_top_typed_catch expected='result=1073 caught=73' ic jc jit_filter_code
     ic=$(run_embed "$name" engine-top interp)
     jc=$(run_embed "$name" engine-top jit)
-    sed '/^mirvm-jit-debug:/d' "$TMP/$name.jit.err" >"$TMP/$name.jit.unexpected.err"
+    # The JIT leg runs with MIRVM_JIT_DEBUG, so its own trace lines are dropped before the two legs
+    # are compared; they are diagnostics at Debug severity and only the JIT emits them.
+    sed '/^mirvm\[jit\]: debug:/d' "$TMP/$name.jit.err" >"$TMP/$name.jit.unexpected.err"
     jit_filter_code=$?
     if [ "$ic" -ne 0 ] || [ "$jc" -ne 0 ]; then
         bad "$name exit code interp=$ic jit=$jc, expected 0"

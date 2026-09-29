@@ -313,6 +313,8 @@ pub(crate) fn capture(input: Captured<'_>) -> Option<Symbol> {
             Some(kind) => kind,
             None => {
                 if crate::options::jit_debug_dump() {
+                    // A dump payload, not a diagnostic: `MIRVM_JIT_DEBUG_DUMP` owns the exact shape
+                    // and the general verbosity threshold must not silently drop it.
                     eprintln!(
                         "mirvm-jit-debug: {name} carries reloc {:?}, which this engine does not apply",
                         reloc.kind

@@ -217,7 +217,7 @@ pub(super) fn worker(
         if prelinked != 0 {
             helpers::cache_prelinked(prelinked);
             if dbg {
-                eprintln!("mirvm-jit-debug: prelinked {prelinked} entries from the heat order");
+                crate::diag_debug!(Jit, "prelinked {prelinked} entries from the heat order");
             }
         }
     }
@@ -231,8 +231,9 @@ pub(super) fn worker(
             break;
         }
         if dbg {
-            eprintln!(
-                "mirvm-jit-debug: received compilation request for f{func} ({})",
+            crate::diag_debug!(
+                Jit,
+                "received compilation request for f{func} ({})",
                 shared.module.funcs[func as usize].name
             );
         }
@@ -246,15 +247,16 @@ pub(super) fn worker(
             if ok {
                 let addr = shared.jit.slots[func as usize].load(Ordering::Acquire);
                 let fast = shared.jit.slots_fast[func as usize].load(Ordering::Acquire);
-                eprintln!(
-                    "mirvm-jit-debug: f{func} release={ok} @{addr:#x} fast@{fast:#x}({})",
+                crate::diag_debug!(
+                    Jit,
+                    "f{func} release={ok} @{addr:#x} fast@{fast:#x}({})",
                     shared.module.funcs[func as usize].name
                 );
             } else {
-                eprintln!("mirvm-jit-debug: f{func} release={ok}");
+                crate::diag_debug!(Jit, "f{func} release={ok}");
             }
             if let Some(sites) = shared.jit.recorded_sites(domain, func) {
-                eprintln!("mirvm-jit-debug: f{func} {sites} recorded sites");
+                crate::diag_debug!(Jit, "f{func} {sites} recorded sites");
             }
         }
     }
@@ -268,7 +270,7 @@ pub(super) fn worker(
             if let Err(error) = session.publish()
                 && dbg
             {
-                eprintln!("mirvm-jit-debug: cannot publish JIT entries: {error}");
+                crate::diag_debug!(Jit, "cannot publish JIT entries: {error}");
             }
         }
     }
