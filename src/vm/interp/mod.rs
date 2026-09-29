@@ -86,6 +86,13 @@ pub(crate) use place::*;
 struct FrameGuard {
     ctx: *mut Ctx,
     depth_active: bool,
+    /// The depth and shadow length from before this frame was pushed. Exit restores both instead of
+    /// decrementing and popping once, so the frame is a checkpoint: a foreign `longjmp` that unwound
+    /// over this frame's callees leaves their shadow frames behind, and the next frame to return is
+    /// the one that has to take them off. `depth` follows the same recorded value, which keeps the
+    /// two from drifting apart.
+    depth_before: u32,
+    shadow_before: usize,
     base: Option<usize>,
     shadow_active: bool,
     /// Dynamic LSDA: the cleanup edge of the currently unwindable terminator (set before a
@@ -97,13 +104,13 @@ impl Drop for FrameGuard {
     fn drop(&mut self) {
         unsafe {
             if self.shadow_active {
-                (*self.ctx).shadow.pop(); // pop the shadow frame; it shares the depth's lifetime
+                (*self.ctx).shadow.truncate(self.shadow_before);
             }
             if let Some(base) = self.base {
                 region_restore(self.ctx, base);
             }
             if self.depth_active {
-                (*self.ctx).depth -= 1;
+                (*self.ctx).depth = self.depth_before;
             }
         }
     }

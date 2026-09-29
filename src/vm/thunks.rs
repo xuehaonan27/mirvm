@@ -24,6 +24,69 @@ use super::ctx::Shared;
 use super::ffi::inbound::{marshal_args, repack_ret};
 use super::ir::{FfiKind, ForeignSig, FuncId};
 
+// The execution leases of the guest callback frames this thread is inside, innermost last.
+//
+// A callback frame is entered from native code through a libffi closure, and native code may leave
+// it with a `longjmp` (Lua's error raise, a wasm trap) that unwinds the host stack without running
+// Rust destructors. The lease that frame holds would then stay counted, and the Engine close waits
+// for it forever. Keeping the leases here gives a frame that *does* return something to release
+// them with: `ffi::outbound::call_addr` marks the length before the native call and truncates back
+// after it, which is exactly the set of callbacks that call left behind.
+thread_local! {
+    static CALLBACK_LEASES: std::cell::RefCell<Vec<(u64, crate::vm::ctx::ExecutionLease)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+static NEXT_CALLBACK_LEASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// How many callback frames this thread is inside right now.
+pub(crate) fn callback_mark() -> usize {
+    CALLBACK_LEASES
+        .try_with(|cell| cell.borrow().len())
+        .unwrap_or(0)
+}
+
+/// One callback frame's lease, held in the registry for as long as that frame is on the stack.
+///
+/// The guard is what makes the difference between the two ways a frame can leave: a Rust unwind runs
+/// its `Drop` and releases the lease, while a foreign `longjmp` skips it and leaves the entry for
+/// [`release_callbacks_since`], which is the whole point of the registry.
+struct CallbackLeaseHold(u64);
+
+impl Drop for CallbackLeaseHold {
+    fn drop(&mut self) {
+        let _ = CALLBACK_LEASES.try_with(|cell| {
+            cell.borrow_mut().retain(|(held, _)| *held != self.0);
+        });
+    }
+}
+
+/// Take over one callback frame's lease until the returned guard drops.
+fn hold_callback_lease(lease: crate::vm::ctx::ExecutionLease) -> CallbackLeaseHold {
+    let id = NEXT_CALLBACK_LEASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = CALLBACK_LEASES.try_with(|cell| cell.borrow_mut().push((id, lease)));
+    CallbackLeaseHold(id)
+}
+
+/// Release every lease registered above `mark`: the native call that marked it has returned, so no
+/// callback frame it entered can still be live, and anything still registered was unwound over.
+pub(crate) fn release_callbacks_since(mark: usize) {
+    let released = CALLBACK_LEASES
+        .try_with(|cell| {
+            let mut held = cell.borrow_mut();
+            let released = held.len().saturating_sub(mark);
+            held.truncate(mark);
+            released
+        })
+        .unwrap_or(0);
+    if released != 0 {
+        crate::diag_debug!(
+            Engine,
+            "{released} guest callback frame(s) were unwound over by a foreign longjmp; releasing their leases"
+        );
+    }
+}
+
 /// (fn entry address, escaped-bit signature) → thunk real code address. Mutex = "explicit
 /// synchronization" lattice of the three-state split; creation is a cold path (once per
 /// (fn, signature)), lock held for the whole duration, simplicity/correctness first.
@@ -73,11 +136,14 @@ unsafe fn trampoline_body(
     data: &ThunkData,
     lease: super::ctx::ExecutionLease,
 ) {
-    let shared = lease.shared();
+    // This frame's lease lives in the registry from here on, because native code may unwind over
+    // this frame instead of returning through it.
+    let shared = Arc::clone(&lease.shared);
+    let held = hold_callback_lease(lease);
     // A same-Engine native callback reuses its thread's Ctx, but it is still
     // a distinct Engine entry. Always assign a fresh activation nonce so the
     // callback cannot claim an outer run_main panic catcher.
-    let activation = super::ctx::activate(shared);
+    let activation = super::ctx::activate(&shared);
     let ctx = activation.ctx();
     let av = unsafe { marshal_args(&data.args, args) };
     match &data.ret {
@@ -104,6 +170,7 @@ unsafe fn trampoline_body(
             }
         }
     }
+    drop(held);
 }
 
 /// Ordinary `extern "C"` boundary: guest panic or foreign exception must not cross out; Rust

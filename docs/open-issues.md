@@ -64,34 +64,23 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   `llvm.x86.pclmulqdq.512`, the intrinsic queue C6, whose repair is the intrinsic queue). The smoke
   tier runs them and counts them, so they are RED in every `make smoke` and `make gate`; the four
   timeouts are wall-clock.
-- **E49** `OPEN`: `mlua_lua` and `wasmtime_wat` abort (exit 134) with `mirvm[m4-engine]: Engine
-  activation exited out of order` — `ActivationGuard::drop`'s invariant, which requires `current`,
-  `current_activation` and `active_engines.last()` to all be this guard's own
-  (`src/vm/ctx/activation.rs`). Both drivers print every line their oracle expects (the last ones are
-  `done` and `trap null = uninitialized element`), so the guest work completes and the stack is found
-  skewed at engine teardown; both run a guest VM whose error path leaves a frame without the matching
-  Rust unwind (Lua's `longjmp` error raise, a wasm trap). The corpus mode's new crash report is where
-  this was read. Measured state at the mismatch, with a dump added to that branch: the guard being
-  dropped is the outermost one (`activation=1`, `prev=null`) while the thread's `current_activation` is
-  1583, `active_engines` holds three entries for one engine, and `depth` is 6 with a live shadow stack
-  — so a normal exit reaches the outermost guard with bookkeeping left over from the guest's error
-  path. The candidate mechanism is that a guest `longjmp` skips Rust-frame cleanup (activation pops
-  and shadow-frame pops both), and that the outer drop is where it surfaces; what closing needs is
-  whether the skips are the activation guards or the shadow frames, and then either a checkpoint the
-  `setjmp` side records and the `longjmp` side restores, or a guest-level control transfer that does
-  not cross host Rust frames at all.
-- **E48** `OPEN`: `vm::embed_tests::capture::host_syscall_variants_preserve_libc_result_and_errno` is
-  intermittently RED, and reddens `quality` with it, so a suite run's failure set is not reproducible.
-  The observed report is `plain/jit/success: function did not compile`: `jit.slots[0]` is still 0 after
-  `run_export` returned the right value, so that engine ran the function interpreted although the test
-  set `threshold = 1` and `sync = true`. It appeared at host load ~40, immediately after a full
-  `make smoke`: once inside `make test` and twice in the full-suite runs that followed. Three lib-suite
-  runs since, on this tree and on the pre-change tree, are green, as are the isolated runs, the
-  `MIRVM_NO_JIT_CACHE=1` runs and an isolated `MIRVM_HOME`. Closing needs the mechanism — which
-  engine-side step can leave an engine with no publication path — and the state to read it from is
-  there now: the failure report carries `enabled/threshold/sync/counted/queue/worker/stopping`, and a
-  request the service cannot take, or a worker that never started, is reported at `Debug`
-  (`MIRVM_LOG=debug`) instead of vanishing.
+- **E49** `OPEN`: `wasmtime_wat` still does not finish. Its guest work completes (stdout reaches its
+  last oracle line, `trap null = uninitialized element`) and then the Engine close waits out the case
+  budget for leases the driver's own parked threads hold, where native would exit the process and take
+  them with it (`mlua_lua` is green now, and both drivers used to abort with `mirvm[m4-engine]: Engine
+  activation exited out of order`). The abort is fixed: a native `longjmp` (Lua's error raise, a wasm
+  trap) unwinds the host stack over mirvm's frames without running their destructors, and two
+  boundaries recover from it — `ActivationGuard` restores the activation stack to the length recorded
+  at its entry instead of aborting, and a libffi-closure callback frame's execution lease lives in a
+  thread registry that `ffi::call_addr` truncates back when the native call returns. The registry
+  entry is held by a guard, so a Rust unwind releases it and only a foreign `longjmp` can leave it
+  behind; two engine-lifecycle tests were the witness that the unwind case matters.
+  What remains is the close: either idle guest threads keep their own leases and the close waits for
+  threads native would not wait for, or a callback skipped on a thread with no guest-to-native call
+  frame (a wasmtime worker) has no truncation point. Closing needs that ruling — a bounded wait with a
+  loud report, a detach, or process-exit semantics — plus a corpus witness that exits with guest
+  threads parked.
+
 
 ## Approved, awaiting construction
 
