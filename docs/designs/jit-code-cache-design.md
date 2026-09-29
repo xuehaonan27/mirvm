@@ -156,7 +156,10 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
 ## 4. Verification
 
 - **Determinism gate**: compiling one fragment twice (fresh sessions, threads 1 and 8) yields
-  byte-identical artifacts — the base-image determinism gate, applied to codegen.
+  byte-identical artifacts — the base-image determinism gate, applied to codegen. The `jit-cache`
+  case's last step is it: one workload compiled cold in two homes, one with `MIRVM_THREADS=1` and one
+  with `MIRVM_THREADS=8`, must leave stores that hold the same keys with the same bytes (measured on
+  a 634-entry probe: none differing).
 - **Cold/warm differential**: one workload with `MIRVM_JIT_THRESHOLD=1` run compile-cold and
   cache-warm must produce byte-identical guest output through the existing three-way gate; this is
   the "stale semantics from a hit" catcher.
@@ -213,8 +216,8 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    entry written by one process segfaulted the next one that called through it. Two fences now hold
    the property: `an_indirect_native_signature_is_recorded_and_replayed` asserts the captured code
    carries no such address and that the replay recovers this process's signature from the body, and the
-   case's last step compiles one workload cold in two homes and requires the stores to hold identical
-   entries key for key (measured: 634 entries, none differing).
+   case's last step is the §4 determinism gate: one workload compiled cold in two homes, one with one
+   frontend thread and one with eight, whose stores must hold the same keys with the same bytes.
 
 4. **Startup pre-linking by heat order**, then **adaptive tiers** on the D16 measurement ledger.
    Pre-linking is implemented: one run records the order the compile worker was asked for functions in
