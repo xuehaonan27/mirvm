@@ -170,7 +170,19 @@ pub fn start(shared: &std::sync::Arc<Shared>) {
     let worker = std::thread::Builder::new()
         .name("mirvm-jit".into())
         .spawn(move || worker(worker_shared, rx, worker_domain, worker_heat));
-    *shared.jit.worker.lock().unwrap() = worker.ok();
+    match worker {
+        Ok(handle) => *shared.jit.worker.lock().unwrap() = Some(handle),
+        Err(error) => {
+            // The queue is already in place, so every later request lands in a channel nothing
+            // reads. Staying interpreted is the semantics, but that state must be visible when
+            // someone asks why this run compiled nothing.
+            crate::diag_debug!(
+                Jit,
+                "the compile worker did not start ({error}); every function stays interpreted"
+            );
+            *shared.jit.worker.lock().unwrap() = None;
+        }
+    }
 }
 
 /// Stop this Engine's compiler service. Already-published machine code stays valid;

@@ -79,7 +79,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   `make smoke`: once inside `make test` and twice in the full-suite runs that followed. Three lib-suite
   runs since, on this tree and on the pre-change tree, are green, as are the isolated runs, the
   `MIRVM_NO_JIT_CACHE=1` runs and an isolated `MIRVM_HOME`. Closing needs the mechanism — which
-  engine-side step can leave an engine with no publication path — not another green retry.
+  engine-side step can leave an engine with no publication path — and the state to read it from is
+  there now: the failure report carries `enabled/threshold/sync/counted/queue/worker/stopping`, and a
+  request the service cannot take, or a worker that never started, is reported at `Debug`
+  (`MIRVM_LOG=debug`) instead of vanishing.
 
 ## Approved, awaiting construction
 
