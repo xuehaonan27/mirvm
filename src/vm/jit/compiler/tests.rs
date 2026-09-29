@@ -488,9 +488,11 @@ fn a_compiled_body_runs_from_its_artifact() {
 /// so an entry written by one program is readable by the next.
 #[test]
 fn an_entry_depends_on_the_body_and_not_on_the_program() {
-    /// The probe calls its callee through the PLT slot and reads a frozen link address: one fragment
-    /// reference of each kind this test needs, in the canonical order the walk gives them.
-    fn probe(frozen: u64, callee: u32) -> ir::FuncBody {
+    /// The probe reads a frozen link address, a guest thread-local and calls its callee through the
+    /// PLT slot: one fragment reference of each kind this test needs, in the canonical order the walk
+    /// gives them. The frozen address, the callee id and the TLS id are all the program's, so none of
+    /// them may reach the entry.
+    fn probe(frozen: u64, callee: u32, tls: u32) -> ir::FuncBody {
         let slot = || ir::Slot {
             off: 0,
             width: ir::Width::W64,
@@ -503,10 +505,16 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
             caller_loc_off: None,
             blocks: vec![
                 ir::Block {
-                    stmts: vec![ir::Stmt::Assign {
-                        dst: ir::ScalarPlace::Slot(slot()),
-                        rv: ir::Rvalue::Use(ir::Operand::AddrImm(ir::LinkAddr(frozen))),
-                    }],
+                    stmts: vec![
+                        ir::Stmt::Assign {
+                            dst: ir::ScalarPlace::Slot(slot()),
+                            rv: ir::Rvalue::Use(ir::Operand::AddrImm(ir::LinkAddr(frozen))),
+                        },
+                        ir::Stmt::Assign {
+                            dst: ir::ScalarPlace::Slot(slot()),
+                            rv: ir::Rvalue::TlsRef(tls),
+                        },
+                    ],
                     term: ir::Terminator::Call {
                         callee,
                         args: Vec::new(),
@@ -543,14 +551,22 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
     }
 
     let callee = || body("artifact_callee", Terminator::Return);
-    // The same fragment at function 0 with its callee at 1, and at function 1 with its callee at 0;
-    // the frozen address differs too, because a program places its data where it likes.
-    let first = entry_of(vec![probe(0x6a00_0000_1000, 1), callee()], 0);
-    let second = entry_of(vec![callee(), probe(0x6a00_0000_9000, 0)], 1);
+    // The same fragment at function 0 with its callee at 1 and TLS slot 3, and at function 1 with its
+    // callee at 0 and TLS slot 8; the frozen address differs too, because a program places its data
+    // where it likes and numbers its thread-locals as it meets them.
+    let first = entry_of(vec![probe(0x6a00_0000_1000, 1, 3), callee()], 0);
+    let second = entry_of(vec![callee(), probe(0x6a00_0000_9000, 0, 8)], 1);
 
     assert!(
         first.symbol(JitSymbolRole::FastBody).is_some(),
         "the compared entries hold the body, or the comparison proves nothing"
+    );
+    assert!(
+        first.symbols.iter().any(|symbol| symbol
+            .relocs
+            .iter()
+            .any(|reloc| matches!(reloc.target, artifact::Target::Tls(_)))),
+        "the entry names no TLS site, so nothing replays the id the loading session has"
     );
     assert_eq!(
         first.fragment, second.fragment,

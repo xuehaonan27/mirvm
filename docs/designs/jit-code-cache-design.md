@@ -75,6 +75,7 @@ What today's translator bakes as immediates, and what each becomes:
 | `*const ir::Stmt / Rvalue / Builtin / ForeignSig`, `sym.as_ptr()`, trap-reason pointers — pointers into this process's decoded body | `translate/{stmt,rvalue,term}.rs` | `BodyRef` relocation (§2.3) |
 | `resolve_link_addr(..)` results — frozen-region runtime addresses | `translate/place.rs` | `FrozenAddr` relocation bound through the LoadMap |
 | callee/self `FuncId` immediates passed to helpers | `translate/term.rs` | `FuncIdImm` relocation bound per program |
+| guest `TlsId` immediates passed to the `mirvm_tls_ref` helper | `translate/rvalue.rs` | `TlsIdImm` relocation bound per program |
 | the slot-table base behind call indirection | call sequences | `SlotBase` relocation |
 | `mirvm_*` helper addresses resolved by the `JITModule` at finalize | `compiler/imports.rs` | `Helper(ordinal)` relocation against the closed whitelist |
 | `.eh_frame` pc ranges and CIE personality, registered at publish addresses | `compiler/symbols.rs` | synthesized at load from stored unwind material |
@@ -87,6 +88,7 @@ One translator-side API replaces every raw `iconst`-of-address; each call record
 Helper(ordinal)        -> the imports.rs whitelist, resolved in-process at load
 SlotBase(domain)       -> this Engine's slots/slots_fast base
 FuncIdImm(binding #i)  -> the fragment binding table -> this program's absolute FuncId
+TlsIdImm(binding #i)   -> the fragment binding table -> this program's absolute guest TlsId
 FrozenAddr(binding #i) -> the fragment binding table -> LoadMap-translated real address
 BodyRef(block, item)   -> the address of that statement/terminator interior (sigs, symbol and
                           reason strings included) inside this process's resident decoded body
@@ -217,9 +219,14 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    same ownership the registered section has.
    Every absolute an entry carries is a site of the fragment, the `ForeignSig` of an *indirect* native
    call included: it was the one value still baked raw (the compiling process's heap address), so an
-   entry written by one process segfaulted the next one that called through it. Two fences now hold
-   the property: `an_indirect_native_signature_is_recorded_and_replayed` asserts the captured code
-   carries no such address and that the replay recovers this process's signature from the body, and the
+   entry written by one process segfaulted the next one that called through it. The guest `TlsId` was
+   the other: a per-program number rather than an address, so an entry written for one program named
+   another program's thread-local — the wrong slot while the reader's table was long enough to hold the
+   id, and a bounds panic in `semantics::tls` once it was shorter. Three fences now hold the property:
+   `an_indirect_native_signature_is_recorded_and_replayed` asserts the captured code carries no such
+   address and that the replay recovers this process's signature from the body,
+   `an_entry_depends_on_the_body_and_not_on_the_program` compiles the same body into two programs that
+   number their thread-locals differently and requires their entries to stay byte-identical, and the
    case's last step is the §4 determinism gate: one workload compiled cold in two homes, one with one
    frontend thread and one with eight, whose stores must hold the same keys with the same bytes.
 

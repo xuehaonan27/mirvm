@@ -1,9 +1,9 @@
 //! The absolutes a compiled guest body names, as a closed vocabulary.
 //!
 //! Machine code may only bake an address this process can name again: a helper of the import
-//! whitelist, a function id the program owns, a frozen-region address, an asm-stub entry, a PLT slot,
-//! or an interior of the resident decoded body. Every one of them is recorded where it is baked, and
-//! the record is what a stored entry replays once the code has been dropped.
+//! whitelist, a function id the program owns, a guest TLS id, a frozen-region address, an asm-stub
+//! entry, a PLT slot, or an interior of the resident decoded body. Every one of them is recorded where
+//! it is baked, and the record is what a stored entry replays once the code has been dropped.
 //!
 //! The *offset* comes from the backend rather than from a parallel bookkeeping pass: a site is emitted
 //! as a named `global_value`, so cranelift records a relocation exactly where the immediate lands, the
@@ -28,6 +28,9 @@ pub(crate) enum Site {
     Frozen(ir::LinkAddr),
     /// A function's absolute id in this program: the body itself, a callee, or a foreign function.
     Func(ir::FuncId),
+    /// A guest thread-local's id in this program's numbering. The id is the program's, not the
+    /// fragment's: a body that binds the same fragment in another program names another slot.
+    Tls(ir::TlsId),
     /// An asm-stub entry address.
     Stub(ir::AsmStubId),
     /// The PLT slot a call goes through: `slots_fast[func]` of `domain`.
