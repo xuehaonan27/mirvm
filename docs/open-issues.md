@@ -32,12 +32,14 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Open defects
 
-- **E36** `OPEN`: `jit_builtin_probe` hangs. `native-diff` is RED at 53 passed / 1 failed with
-  `mirvm=124` against `native=0`, deterministically: the case spends its whole 120s budget and is
-  killed. It carries no `xfail=` marker, so it fails the mode instead of counting as a known red. It
-  reproduces on `c82a065` with the platform refactor reverted, so it is not that refactor's regression;
-  naming a handful of modes rather than the whole tier is why per-commit verification missed it. Needs
-  a stack or a bisect from the JIT builtin path — a `timeout` kill leaves no diagnostic.
+- **E36** `OPEN`: the JIT `native-diff` cases hang. `jit_builtin_probe` is deterministic — it spends its
+  whole 120s budget and is killed with `mirvm=124` against `native=0` — and `jit_unwind_probe` did the
+  same in one of two full fast-tier runs (its panic message repeated six times before the kill) while
+  passing in three runs of its own. Neither carries an `xfail=` marker, so a hang fails the mode
+  instead of counting as a known red. `jit_builtin_probe` reproduces on `c82a065` with the platform
+  refactor reverted, so it is not that refactor's regression; naming a handful of modes rather than the
+  whole tier is why per-commit verification missed it. Needs a stack or a bisect from the JIT
+  builtin/unwind path — a `timeout` kill leaves no diagnostic.
 - **E38** `OPEN`: the cargoless resolver cannot read back a lock naming serde 1.0.229. A fresh-mode run
   writes a lock whose `serde` depends on the newly split-out `serde_core`, and the next (lock-mode) run
   fails deterministically with "dependency serde_core of serde …@1.0.229 has no edge assignment record
@@ -60,6 +62,24 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   merged section per Engine re-registered at a point the guest cannot be unwinding at. The repository
   gate runs its tests on one thread for the same reason. Analysis in
   [jit-code-cache-design.md](designs/jit-code-cache-design.md) §6.
+- **E45** `OPEN`: `main-panic-jit` expects an uncaught guest panic's stderr to carry a symbolized
+  `lang_start_internal` frame (`release=true.*_3std2rt19lang_start_internal0C`), and the report prints
+  only the location line and the `RUST_BACKTRACE` note — identically with the JIT on
+  (`MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1`), with `MIRVM_JIT=off`, and with `MIRVM_NO_JIT_CACHE=1`,
+  so the interpreter/JIT difference the case was written for no longer exists. Either the expectation
+  is stale (the interpreter leg's `stderr_absent=release=false` then holds vacuously) or the symbolized
+  frame was lost; decide which, then fix the expectation or restore the frame.
+- **E46** `OPEN`: `--vm-stats`'s per-entry trap section prints no rows for any program, so
+  `vmstats-threads-spawn` and `vmstats-threads-panic` (which expect `@entry: trap-free`) are RED. The
+  program-entry alias `@entry` now has a reader and no writer: `src/image/base.rs` still removes it,
+  and nothing inserts it — the insertion in `src/lower/mod.rs` was deleted when the lower split into
+  per-home layers, and the alias must come back *before* the per-home export split, because a home's
+  exports are filtered out of `module.exports` by id range.
+- **E47** `OPEN`: seven real-project corpus cases are RED on the Linux verify host — four rayon-family
+  timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`, `wasmtime_wat`) and one
+  genuine Trap (`png_round`, `llvm.x86.pclmulqdq.512`, the intrinsic queue C6). The smoke tier runs
+  them and counts them, so they are RED in every `make smoke` and `make gate`; the four timeouts are
+  wall-clock, the two aborts happen with no diagnostic kept.
 
 ## Approved, awaiting construction
 
@@ -98,7 +118,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 - **E14** `WORKAROUND`: allocation goes through the mimalloc crate instead of a hand-rolled TLAB, so
   chunk, size-class and remote-free-queue details are absent (`src/vm/heap.rs`).
 - **E15** `WORKAROUND`: `--vm-stats` cannot see indirect fn-pointer out-edges, so its debt reading is
-  permanently "at least this much". Closes with an out-edge discovery mechanism beyond incremental hits.
+  permanently "at least this much", and its per-entry section currently prints no rows at all (E46).
+  Closes with an out-edge discovery mechanism beyond incremental hits.
 - **E16** `UNSCHEDULED`: io_uring pass-through is unproven and has no corpus comparison. No io_uring (or
   tokio-uring) code or design text exists in the tree to compare against.
 - **E17** `UNSCHEDULED`: sessions carrying warnings or errors are still refused admission and

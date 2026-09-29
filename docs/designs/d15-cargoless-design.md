@@ -183,7 +183,8 @@ front; a detour may not impersonate closure.
 - **An unknown semver operator** falls back to `Ranges::from_req`, losing the pre; the loss is
   accounted loudly in code.
 - **Git source replacement** and similar residual boundaries are rejected loudly.
-- **dev-dependencies and test targets** are never solved, and mirvm never runs tests; cross-target
+- **dev-dependencies and test targets**: the default build graph locks the root's dev-dependencies but
+  never builds them; test targets belong to `mirvm test`'s own front end, not here. Cross-target
   coverage and full Cargo config coverage are not claimed here.
 
 ## 4. Verification
