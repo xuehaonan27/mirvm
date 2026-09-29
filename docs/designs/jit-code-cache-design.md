@@ -183,7 +183,11 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    programs that number its functions and place its frozen data differently; a unit test compiles one
    body twice that way and compares the bytes, which is the precondition the store keys on.
    `MIRVM_JIT_RELOAD` runs a whole session that way, so every existing JIT differential also runs
-   against linked code, and `fib32-reload` is its standing gate. The kinds applied are the x86_64 ones:
+   against linked code, and `fib32-reload` is its standing gate. What a reload publishes is the linked
+   region, so it registers the CFA programs the artifact carries *at the addresses the link placed them
+   at* (`Compiler::linked_frames`), the same way the store path does: without that, an unwind out of a
+   reloaded frame found no FDE and ended as `_URC_END_OF_STACK`, which a panic raised inside a reloaded
+   body reproduces immediately. The kinds applied are the x86_64 ones:
    the call encoding, veneers and write/execute discipline of the macOS pair are that pair's item
    (§6), and a kind this engine does not apply is a miss, never a guess.
 3. **The store family** — packs, keys, generation, purge; cross-process warm runs; the §4 gates.
@@ -248,6 +252,11 @@ share that keystone and are otherwise parallel.
   (a counter beside the slot), a cheap sampled counter in the fast path, and the call-counter machinery
   the interpreter already has. Whichever lands needs its cost measured against the D16 ledger before the
   tier thresholds mean anything.
+- A panic that unwinds through an entry linked from `cache/jit` **in a new process** crashes, even
+  though the same entry links and unwinds correctly in the process that compiled it: see
+  [open-issues E41](../open-issues.md) for the minimal reproducer, the measurements that exclude the
+  pre-link wave and a registration/unwind rendezvous, and what is left to find (the entry's
+  relocations, or the code the link places).
 - Whether `.eh_frame` batches should merge across load waves or stay one section per wave. Measuring
   says the question is not only about bytes: the compile worker registers each batch with
   `__register_frame` while guest threads may already be unwinding, and libgcc mutates that list under a
