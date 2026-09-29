@@ -161,6 +161,10 @@ impl<'a> Compiler<'a> {
             fast = guarded;
             packed = reloaded;
             ranges = linked_ranges(self.shared, func, &linked);
+            // The published code is the linked region, so its CFA programs are registered at the
+            // addresses the link placed them at: the module's own FDEs describe code nothing calls,
+            // and an unwind out of a frame without one cannot find its caller.
+            self.register_eh_frames(Self::linked_frames(&linked, entry));
             std::mem::forget(linked);
         }
         // A capture that stopped early leaves the symbols it had already taken: they describe a
@@ -281,16 +285,7 @@ impl<'a> Compiler<'a> {
         };
         // The stored CFA programs become FDEs at the addresses the link placed the symbols at, exactly
         // as a fresh compile registers its own.
-        let frames = entry
-            .symbols
-            .iter()
-            .filter_map(|symbol| {
-                let linked = linked.entry(symbol.role)?;
-                let unwind = symbol.unwind.clone()?;
-                Some((linked, unwind, symbol.lsda.clone()))
-            })
-            .collect();
-        self.register_eh_frames(frames);
+        self.register_eh_frames(Self::linked_frames(&linked, &entry));
         let ranges = linked_ranges(shared, func, &linked);
         let (Some(guarded), Some(packed)) = (
             linked.entry(JitSymbolRole::Guarded),
@@ -303,7 +298,10 @@ impl<'a> Compiler<'a> {
         std::mem::forget(linked);
         helpers::cache_hit();
         if crate::options::jit_debug() {
-            eprintln!("mirvm-jit-debug: f{func} published from a stored entry");
+            eprintln!(
+                "mirvm-jit-debug: f{func} ({}) published from a stored entry",
+                self.shared.module.funcs[func as usize].name
+            );
         }
         self.shared
             .jit
@@ -327,6 +325,26 @@ impl<'a> Compiler<'a> {
             Tier::Optimized => helpers::tier_optimized(),
         }
         true
+    }
+
+    /// The CFA programs of a linked entry, at the addresses the link placed its symbols at.
+    ///
+    /// What a session publishes for a linked entry is the linked region, so these are the frames the
+    /// unwinder has to find; the module's own FDEs describe code nothing calls. A symbol without a
+    /// stored CFA program has no FDE, which is the one case an unwind through it cannot cross.
+    fn linked_frames(
+        linked: &artifact::Linked,
+        entry: &artifact::Entry,
+    ) -> Vec<(u64, UnwindInfo, Option<Vec<u8>>)> {
+        entry
+            .symbols
+            .iter()
+            .filter_map(|symbol| {
+                let address = linked.entry(symbol.role)?;
+                let unwind = symbol.unwind.clone()?;
+                Some((address, unwind, symbol.lsda.clone()))
+            })
+            .collect()
     }
 
     /// The store index, loaded once per compiler: what this session can reuse is what was there when it
@@ -723,8 +741,9 @@ impl<'a> Compiler<'a> {
                 lsda,
             });
             match symbol {
-                // A body that can be unwound into keeps the module's own code while a linked entry has
-                // no unwind registration; its artifact is still complete, so it is storable.
+                // The artifact is complete whether or not the wrapper symbols could be captured: a
+                // body whose wrappers were dropped stores what it has, and a session that links it
+                // registers the CFA programs it carries (see `linked_frames`).
                 Some(symbol) => {
                     #[cfg(test)]
                     {
