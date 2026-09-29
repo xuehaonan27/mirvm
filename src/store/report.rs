@@ -328,9 +328,9 @@ impl Status {
 
 /// Size every family, group it by lifetime, and report what no family claims.
 ///
-/// `live` is the fragment mark (`image::collect`), or `None` when the caller did not mark: the
-/// fragment family then reports its own size without a liveness split.
-pub fn status(root: &Path, live: Option<&crate::image::collect::Live>) -> Status {
+/// `live` is the fragment mark (`image::collect` fills it), or `None` when the caller did not mark:
+/// the fragment family then reports its own size without a liveness split.
+pub fn status(root: &Path, live: Option<&crate::store::Live>) -> Status {
     let mut total = 0u64;
     let mut total_stale = 0u64;
     let mut claimed: Vec<String> = Vec::new();

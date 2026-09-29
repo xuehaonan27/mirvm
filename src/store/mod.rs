@@ -33,6 +33,7 @@ pub(crate) mod frozen;
 pub(crate) mod jit;
 pub(crate) mod report;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -167,6 +168,20 @@ macro_rules! flag_of {
     };
 }
 
+/// The extension every per-crate unit manifest carries. Spelled here, beside the family that owns the
+/// directory, because the store compiles without the image layer that writes those manifests (the TSan
+/// purity fence builds both), and `image::units` re-exports this name rather than owning it.
+pub(crate) const UNIT_EXT: &str = "unit";
+
+/// What the current-generation manifests name: the fragments in `cache/frags` and the frozen chunks
+/// in `cache/frozen`. One walk fills both, because one manifest names both, and `image::collect` is
+/// what fills it: the store only needs the marks to size a family's live and dead halves.
+#[derive(Default)]
+pub(crate) struct Live {
+    pub(crate) fragments: HashSet<[u8; 32]>,
+    pub(crate) chunks: HashSet<[u8; 32]>,
+}
+
 /// Declares the family register, one family per line:
 ///
 /// `Class CONST "dir" shape[(ext)] [flag(Flag)];`
@@ -221,7 +236,7 @@ families! {
     // manifest digest so a grown unit adds a manifest instead of overwriting the one a running program
     // pinned. Generational like the closure manifest its format matches: a manifest another build
     // wrote is prunable.
-    Cache UNITS           "units"           generation(crate::image::units::EXT) flag(Units);
+    Cache UNITS           "units"           generation(UNIT_EXT)      flag(Units);
     // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // owners: lower::global_asm, pack — materialized `global_asm!`/naked-fn objects; keyed by the
