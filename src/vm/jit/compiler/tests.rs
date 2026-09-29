@@ -658,3 +658,60 @@ fn an_indirect_native_signature_is_recorded_and_replayed() {
         "the replayed signature address is not this process's"
     );
 }
+
+/// An entry whose frames this engine cannot describe is refused whole, not linked partially.
+///
+/// A stored entry names one CFA program per symbol and the loader turns them into FDEs at the
+/// addresses the link placed the symbols at. An entry missing one — written by a build whose target
+/// wanted another unwind kind, or damaged — would publish frames the unwinder walks past, which is a
+/// wrong unwind rather than a missing one. So the link is refused and the session compiles instead.
+#[test]
+fn a_linked_entry_without_a_cfa_program_is_refused() {
+    let shared = Shared::new(ir::Module {
+        funcs: vec![body("frame_probe", Terminator::Return)].into(),
+        ..ir::Module::default()
+    });
+    let mut compiler = test_compiler(&shared, CodeDomain::Plain);
+    compiler.reload = true;
+    compiler.compile(0);
+    let captured = compiler.last_entry.clone().expect("the body was captured");
+    std::mem::forget(compiler);
+
+    // The entry as a store holds it: through the encoder and back.
+    let entry = artifact::Entry::decode(&captured.encode().expect("the entry encodes"))
+        .expect("the entry decodes");
+    assert!(
+        entry.symbols.iter().all(|symbol| symbol.unwind.is_some()),
+        "a compiled entry must carry a CFA program per symbol, or this test proves nothing"
+    );
+    // The body polls signals at every block entry and that helper reads the calling thread's Engine
+    // activation; the frame registration is what this test proves, so the poll resolves to a no-op.
+    extern "C" fn probe_poll() {}
+    let ordinals = artifact::Ordinals::of(&shared.module.funcs[0]).expect("the body has ordinals");
+    let link = |entry: &artifact::Entry| {
+        artifact::link(entry, &[JitSymbolRole::FastBody], |target| match target {
+            artifact::Target::Named(name) if name.as_ref() == "mirvm_poll_signals" => {
+                Some(probe_poll as *const u8 as u64)
+            }
+            artifact::Target::Named(name) => imports::whitelist()
+                .get(name.as_ref())
+                .map(|addr| *addr as u64),
+            target => artifact::target_value(&shared, 0, &ordinals, target),
+        })
+        .expect("the probe body links")
+    };
+
+    let linked = link(&entry);
+    assert!(
+        Compiler::linked_frames(&linked, &entry).is_some(),
+        "a complete entry was refused"
+    );
+
+    let mut stripped = entry.clone();
+    stripped.symbols[0].unwind = None;
+    let linked = link(&stripped);
+    assert!(
+        Compiler::linked_frames(&linked, &stripped).is_none(),
+        "an entry without a CFA program still reported frames to register"
+    );
+}

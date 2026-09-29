@@ -98,7 +98,8 @@ impl<'a> Compiler<'a> {
         }
         let ui = cctx
             .compiled_code()
-            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())?;
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
+            .filter(crate::vm::jit::unwind::is_registrable)?;
         let lsda = build_lsda(&collect_call_sites(&cctx));
         self.pending_unwind.push((id, ui, Some(lsda)));
         self.module.clear_context(&mut cctx);

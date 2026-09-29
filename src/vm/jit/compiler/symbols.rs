@@ -22,7 +22,7 @@ impl<'a> Compiler<'a> {
     /// Register a batch of CFA programs at the addresses the code ended up at: the addresses the
     /// module finalized for a fresh compile, or the addresses the link placed them at for a stored
     /// entry.
-    pub(super) fn register_eh_frames(&self, frames: Vec<(u64, UnwindInfo, Option<Vec<u8>>)>) {
+    pub(super) fn register_eh_frames(&self, frames: Vec<crate::vm::jit::unwind::Frame>) {
         super::super::unwind::register_frames(self.module.isa(), frames);
     }
 
