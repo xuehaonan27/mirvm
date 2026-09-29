@@ -96,11 +96,11 @@ select_rows() { # <filter kind> <value> [extra args ignored]
         case "$kind" in
             all) SELECTED+=("$name") ;;
             tier)
-                case "$tier" in
-                    manual) [ "$value" = manual ] && SELECTED+=("$name") ;;
-                    fast) [ "$value" = fast ] && SELECTED+=("$name") ;;
-                    smoke) case "$value" in fast | smoke) SELECTED+=("$name") ;; esac ;;
-                    gate) case "$value" in fast | smoke | gate) SELECTED+=("$name") ;; esac ;;
+                case "$value" in
+                    manual) [ "$tier" = manual ] && SELECTED+=("$name") ;;
+                    fast) [ "$tier" = fast ] && SELECTED+=("$name") ;;
+                    smoke) case "$tier" in fast | smoke) SELECTED+=("$name") ;; esac ;;
+                    gate) case "$tier" in fast | smoke | gate) SELECTED+=("$name") ;; esac ;;
                 esac ;;
             case) [ "$name" = "$value" ] && SELECTED+=("$name") ;;
             mode) [ "$mode" = "$value" ] && SELECTED+=("$name") ;;
