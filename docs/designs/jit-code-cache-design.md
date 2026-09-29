@@ -208,6 +208,14 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    `a_linked_entry_unwinds_through_a_loaded_frame` probe: the same cleanup-pad chain the LSDA probe
    already runs, but through frames the *link* placed and FDEs synthesized from the stored CFA
    programs.
+   Every absolute an entry carries is a site of the fragment, the `ForeignSig` of an *indirect* native
+   call included: it was the one value still baked raw (the compiling process's heap address), so an
+   entry written by one process segfaulted the next one that called through it. Two fences now hold
+   the property: `an_indirect_native_signature_is_recorded_and_replayed` asserts the captured code
+   carries no such address and that the replay recovers this process's signature from the body, and the
+   case's last step compiles one workload cold in two homes and requires the stores to hold identical
+   entries key for key (measured: 634 entries, none differing).
+
 4. **Startup pre-linking by heat order**, then **adaptive tiers** on the D16 measurement ledger.
    Pre-linking is implemented: one run records the order the compile worker was asked for functions in
    (`cache/package-heat`, filed under the same key as the IR entry whose ids it names), and the next run
@@ -252,11 +260,6 @@ share that keystone and are otherwise parallel.
   (a counter beside the slot), a cheap sampled counter in the fast path, and the call-counter machinery
   the interpreter already has. Whichever lands needs its cost measured against the D16 ledger before the
   tier thresholds mean anything.
-- A panic that unwinds through an entry linked from `cache/jit` **in a new process** crashes, even
-  though the same entry links and unwinds correctly in the process that compiled it: see
-  [open-issues E41](../open-issues.md) for the minimal reproducer, the measurements that exclude the
-  pre-link wave and a registration/unwind rendezvous, and what is left to find (the entry's
-  relocations, or the code the link places).
 - Whether `.eh_frame` batches should merge across load waves or stay one section per wave. Measuring
   says the question is not only about bytes: the compile worker registers each batch with
   `__register_frame` while guest threads may already be unwinding, and libgcc mutates that list under a

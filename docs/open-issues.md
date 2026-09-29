@@ -141,22 +141,6 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   is the right number to keep — 80ms is what compiled recursion costs — so this closes with a
   measurement of where the interpreted calls come from, not by raising it.
 
-- **E41** `OPEN`: a `cache/jit` entry linked in a new process crashes a panic that unwinds through it.
-  Repro: a program whose `bomb()` panics inside `catch_unwind`, run once cold (which stores the
-  entries) and once warm (which links them) under `MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1`; the warm
-  run segfaults 4/4 before the panic hook prints, and passes with `MIRVM_NO_JIT_CACHE=1`, with the
-  store wiped, and — with the same panic — under `MIRVM_JIT_RELOAD=1`, which links the same entries in
-  the process that compiled them. A three-second sleep before the panic and deleting the heat order
-  both keep it, so it is neither the pre-link wave nor a registration racing the unwinder: a
-  rendezvous that makes registration wait for the unwinder's windows (`begin_unwind`/`end_unwind`
-  around `raise` and the raw catch) left it at 4/4 and only slowed the unwind-heavy probe from ~10 s
-  to 111 s, and the run crashes with no compilation request ever served. The reload path had the
-  neighbouring defect — it published the linked region while registering only the module's FDEs, so
-  an unwind out of a reloaded frame ended as `_URC_END_OF_STACK` — and is fixed; the store path does
-  register its FDEs, so what is left to find is in the entry's relocations or in the code it links.
-  `jit-stats` (30 000 panics through compiled frames) is the standing reproducer and is RED on the
-  Linux verify host whenever the JIT store is warm.
-
 ## D. Distribution and product
 
 - **D2** `UNSCHEDULED`: release form and naming — miri-style first, JDK-style self-contained tarball
