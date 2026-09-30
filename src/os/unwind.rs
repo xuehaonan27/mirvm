@@ -46,6 +46,7 @@ pub(crate) use super::macos::unwind::{deregister_frame, register_frame};
 /// own half's business. The unwinder retains the bytes for the process lifetime, which is why they
 /// are leaked rather than owned.
 pub fn register_frame_section(mut bytes: Vec<u8>) {
+    let _gate = register_gate_exclusive();
     bytes.extend_from_slice(&[0, 0, 0, 0]);
     let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
     // The registration entry point mutates the unwinder's own record list, which is not reentrant:
@@ -82,6 +83,67 @@ pub unsafe fn backtrace(trace: extern "C" fn(Context, Context) -> i32, arg: Cont
     unsafe { unwind_backtrace(trace, arg) };
 }
 
+/// The registration/walk gate: a thread that is inside an unwinder walk holds it shared, and a
+/// `.eh_frame` registration holds it exclusively.
+///
+/// libgcc mutates its object list under a lock it does not take on the lookup path, so registering a
+/// batch while another thread walks that list can end as `_URC_END_OF_STACK` instead of a caught
+/// exception. The walk itself is the whole window: `raise` and `resume_or_rethrow` return once the
+/// unwinder has found its context, so a guard around either call covers exactly the lookups, and a
+/// landing pad that runs afterwards (a cleanup that asks for a compilation, for instance) no longer
+/// holds it -- which is what keeps this gate free of any ordering against the JIT compile service.
+static WALK_GATE: std::sync::atomic::AtomicPtr<std::sync::RwLock<()>> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// The gate, allocating it on first use. The pointer is only ever replaced by a forked child
+/// resetting the lock it may have inherited in a held state (see [`reset_gate_after_fork`]).
+fn gate() -> &'static std::sync::RwLock<()> {
+    use std::sync::atomic::Ordering;
+    loop {
+        let current = WALK_GATE.load(Ordering::Acquire);
+        if !current.is_null() {
+            return unsafe { &*current };
+        }
+        let fresh = Box::into_raw(Box::new(std::sync::RwLock::new(())));
+        if WALK_GATE
+            .compare_exchange(
+                std::ptr::null_mut(),
+                fresh,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return unsafe { &*fresh };
+        }
+        drop(unsafe { Box::from_raw(fresh) });
+    }
+}
+
+/// Held for the extent of one unwinder walk.
+fn walk_gate_shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    gate().read().unwrap_or_else(|error| error.into_inner())
+}
+
+/// Held while a `.eh_frame` section is registered.
+fn register_gate_exclusive() -> std::sync::RwLockWriteGuard<'static, ()> {
+    gate().write().unwrap_or_else(|error| error.into_inner())
+}
+
+/// A forked child inherits the lock but not the thread that held it, so it must not keep it: a new
+/// lock is installed and the inherited one is left to the child's own memory, exactly as the
+/// service-thread counter is reset next door.
+pub(crate) fn reset_gate_after_fork() {
+    use std::sync::atomic::Ordering;
+    let fresh = Box::into_raw(Box::new(std::sync::RwLock::new(())));
+    let old = WALK_GATE.swap(fresh, Ordering::AcqRel);
+    if !old.is_null() {
+        // SAFETY: the child is single-threaded and no reader or writer can be holding the old lock,
+        // because the only thread that could have is not in the child.
+        drop(unsafe { Box::from_raw(old) });
+    }
+}
+
 /// The instruction pointer of a frame the callback was handed.
 ///
 /// # Safety
@@ -99,10 +161,12 @@ pub unsafe fn frame_cfa(context: Context) -> usize {
 }
 
 pub unsafe fn raise(exception: *mut RawException) -> i32 {
+    let _walk = walk_gate_shared();
     unsafe { _Unwind_RaiseException(exception) }
 }
 
 pub unsafe fn resume_or_rethrow(exception: *mut RawException) -> ! {
+    let _walk = walk_gate_shared();
     let reason = unsafe { _Unwind_Resume_or_Rethrow(exception) };
     eprintln!("mirvm: _Unwind_Resume_or_Rethrow unexpectedly returned {reason}");
     std::process::abort()
