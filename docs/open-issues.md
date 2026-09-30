@@ -59,6 +59,18 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   merged section per Engine re-registered at a point the guest cannot be unwinding at. The repository
   gate runs its tests on one thread for the same reason. Analysis in
   [jit-code-cache-design.md](designs/jit-code-cache-design.md) §6.
+  A probe was built to measure the window before changing the registration path: 8 guest threads
+  unwinding 512 caught panics while `MIRVM_JIT_THRESHOLD=1` had 64 first calls compile and register
+  batches, three runs plus a `MIRVM_JIT=off` control, all clean. That is the expected outcome for a
+  window of a few instructions inside `__register_frame`, not evidence that the window is closed — the
+  race has to be removed by construction, and widening it would need an interposer inside libgcc.
+  The gate that removes it is a process-wide read/write pair: an unwind holds the read side for the
+  dynamic extent of its `_Unwind_RaiseException`/`_Unwind_Resume_or_Rethrow` call (the whole walk
+  happens inside it) and registration takes the write side. Two hazards need the ruling first: the
+  write side must not block a compile the unwinding thread is synchronously waiting for in
+  `MIRVM_JIT_SYNC` mode (dispatch waits for publication inside a cleanup pad), and the read side has to
+  be released on the paths where the unwinder installs a context instead of returning, so the counter
+  behind it needs its own release point in mirvm's landing-pad bookkeeping.
 - **E47** `OPEN`: five real-project corpus cases are RED on the Linux verify host — four rayon-family
   timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`) and one genuine Trap (`png_round`,
   `llvm.x86.pclmulqdq.512`, the intrinsic queue C6, whose repair is the intrinsic queue). The smoke
