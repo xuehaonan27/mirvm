@@ -309,6 +309,9 @@ pub(crate) fn after_fork_child() {
     // Engine's fork baseline happens lazily in the fork guard, which detects
     // the new pid (`guest_thread_count_for`).
     crate::os::thread::reset_service_threads_after_fork();
+    // The unwinder's registration gate is a process-global lock: the child inherited it but not the
+    // thread that held it, so a fresh one goes in before the child can walk or register.
+    crate::os::unwind::reset_gate_after_fork();
     // The inherited generation belongs to the parent; the child's first session
     // must take the next number so the two files cannot be read as one stream.
     reset_generation_after_fork();
