@@ -92,6 +92,9 @@ pub unsafe fn backtrace(trace: extern "C" fn(Context, Context) -> i32, arg: Cont
 /// unwinder has found its context, so a guard around either call covers exactly the lookups, and a
 /// landing pad that runs afterwards (a cleanup that asks for a compilation, for instance) no longer
 /// holds it -- which is what keeps this gate free of any ordering against the JIT compile service.
+/// The single-FDE entry ([`register_frame`]) is not gated: the loaders that call it register a whole
+/// image before the guest can run, so there is no walk to race yet. A caller that registers after
+/// guest execution has begun belongs behind this gate.
 static WALK_GATE: std::sync::atomic::AtomicPtr<std::sync::RwLock<()>> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
