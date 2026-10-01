@@ -30,6 +30,8 @@ no_such_instruction! {
     fn psad_bw128 [] (dst: *mut u8, a: *const u8, b: *const u8) ;
     fn psad_bw256 [] (dst: *mut u8, a: *const u8, b: *const u8) ;
     fn pclmulqdq [] (dst: *mut u8, a: *const u8, b: *const u8, imm: u64) ;
+    fn pclmulqdq256 [] (dst: *mut u8, a: *const u8, b: *const u8, imm: u64) ;
+    fn pclmulqdq512 [] (dst: *mut u8, a: *const u8, b: *const u8, imm: u64) ;
     fn aesenc [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
     fn aesenclast [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
     fn aesdec [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;

@@ -276,10 +276,17 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Corpus-driven product debt
 
-- **C6** `UNSCHEDULED`: intrinsic queue residual — `pclmulqdq.256/.512`, `vaes`, and the remaining
-  gather forms. Add on real workload demand through the existing four-contact-point method; untriggered
-  forms keep a loud Trap. `png_round` is the live trap on record. The avx512 vpmadd52 family has
-  landed.
+- **C6** `UNSCHEDULED`: intrinsic queue residual — `vaes` and the remaining gather forms. The
+  `pclmulqdq.256/.512` forms landed through the four-contact-point method: `arch::intrinsics::
+  pclmulqdq256/pclmulqdq512` (`vpclmulqdq`, per 128-bit lane), the IR variants, the interpreter arms,
+  the guest name table (`llvm.x86.pclmulqdq.256/.512`) and the aarch64 mirror signatures. That is what
+  turned `png_round` from the live Trap into a PASS, and that driver is the `.512` form's witness. What
+  the two forms are still owed is the method's fifth contact point: an `arch` unit test cross-checking
+  them against stdarch vectors and the hardware, the way
+  `vpmadd52_matches_stdarch_vectors_and_hw_cross_check` does for the family that already landed. `vaes`
+  (enc/enc-last/dec/dec-last at `.256/.512`) has the same shape; gather is a different one (base +
+  index vector + mask + scale, with mask and fault semantics to settle) and stays on real demand.
+  Untriggered forms keep a loud Trap.
 - **C8** `UNSCHEDULED`: Rust-side ctor / `.init_array` (linkme family) has never entered the corpus.
   Project Rust-side ctor/linkme on demand; nothing is pre-funded. C archive constructors (DT_INIT and
   `.init_array`) are allowed by partition, while bare `.init`/`.fini` stay refused.

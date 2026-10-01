@@ -87,6 +87,8 @@ pub(crate) fn exec_builtin(
         | Builtin::X86PsadBw128
         | Builtin::X86PsadBw256
         | Builtin::X86Pclmulqdq
+        | Builtin::X86Pclmulqdq256
+        | Builtin::X86Pclmulqdq512
         | Builtin::X86AesEnc
         | Builtin::X86AesEncLast
         | Builtin::X86AesDec

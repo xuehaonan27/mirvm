@@ -14,8 +14,9 @@ use std::arch::x86_64::{
     _mm_aesenclast_si128, _mm_aesimc_si128, _mm_clmulepi64_si128, _mm_crc32_u8, _mm_crc32_u16,
     _mm_crc32_u32, _mm_crc32_u64, _mm_loadu_si128, _mm_madd_epi16, _mm_maddubs_epi16, _mm_sad_epu8,
     _mm_sha256msg1_epu32, _mm_sha256msg2_epu32, _mm_sha256rnds2_epu32, _mm_shuffle_epi8,
-    _mm_storeu_si128, _mm256_loadu_si256, _mm256_madd_epi16, _mm256_maddubs_epi16,
-    _mm256_permutevar8x32_epi32, _mm256_sad_epu8, _mm256_shuffle_epi8, _mm256_storeu_si256,
+    _mm_storeu_si128, _mm256_clmulepi64_epi128, _mm256_loadu_si256, _mm256_madd_epi16,
+    _mm256_maddubs_epi16, _mm256_permutevar8x32_epi32, _mm256_sad_epu8, _mm256_shuffle_epi8,
+    _mm256_storeu_si256, _mm512_clmulepi64_epi128, _mm512_loadu_si512, _mm512_storeu_si512,
 };
 
 /// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
@@ -110,6 +111,36 @@ pub(crate) unsafe fn pclmulqdq(dst: *mut u8, a: *const u8, b: *const u8, imm: u6
         _ => _mm_clmulepi64_si128::<0x11>(a, b),
     };
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
+}
+
+/// `llvm.x86.pclmulqdq.256`: the same carryless multiply in each 128-bit lane of a 256-bit vector
+/// (`vpclmulqdq` with AVX512VL). The immediate selects the qwords in every lane alike.
+#[target_feature(enable = "vpclmulqdq,avx512f,avx512vl")]
+pub(crate) unsafe fn pclmulqdq256(dst: *mut u8, a: *const u8, b: *const u8, imm: u64) {
+    let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
+    let b = unsafe { _mm256_loadu_si256(b.cast::<__m256i>()) };
+    let result = match imm & 0x11 {
+        0x00 => _mm256_clmulepi64_epi128::<0x00>(a, b),
+        0x01 => _mm256_clmulepi64_epi128::<0x01>(a, b),
+        0x10 => _mm256_clmulepi64_epi128::<0x10>(a, b),
+        _ => _mm256_clmulepi64_epi128::<0x11>(a, b),
+    };
+    unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
+}
+
+/// `llvm.x86.pclmulqdq.512`: the same per 128-bit lane on 512-bit registers (`vpclmulqdq` with
+/// AVX512F). This is the form the `png_round` corpus driver reaches.
+#[target_feature(enable = "vpclmulqdq,avx512f")]
+pub(crate) unsafe fn pclmulqdq512(dst: *mut u8, a: *const u8, b: *const u8, imm: u64) {
+    let a = unsafe { _mm512_loadu_si512(a.cast()) };
+    let b = unsafe { _mm512_loadu_si512(b.cast()) };
+    let result = match imm & 0x11 {
+        0x00 => _mm512_clmulepi64_epi128::<0x00>(a, b),
+        0x01 => _mm512_clmulepi64_epi128::<0x01>(a, b),
+        0x10 => _mm512_clmulepi64_epi128::<0x10>(a, b),
+        _ => _mm512_clmulepi64_epi128::<0x11>(a, b),
+    };
+    unsafe { _mm512_storeu_si512(dst.cast(), result) };
 }
 
 #[target_feature(enable = "aes")]

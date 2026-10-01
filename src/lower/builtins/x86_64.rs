@@ -28,6 +28,8 @@ pub(super) fn register(out: &mut FxHashMap<Symbol, ir::Builtin>) {
         "llvm.x86.sse2.psad.bw" => X86PsadBw128,
         "llvm.x86.avx2.psad.bw" => X86PsadBw256,
         "llvm.x86.pclmulqdq" => X86Pclmulqdq,
+        "llvm.x86.pclmulqdq.256" => X86Pclmulqdq256,
+        "llvm.x86.pclmulqdq.512" => X86Pclmulqdq512,
         "llvm.x86.aesni.aesenc" => X86AesEnc,
         "llvm.x86.aesni.aesenclast" => X86AesEncLast,
         "llvm.x86.aesni.aesdec" => X86AesDec,

@@ -112,6 +112,10 @@ pub enum Builtin {
     /// `a` and bit 4 which qword of `b` feeds the 64x64 carryless multiply that produces 128 bits; the
     /// hardware ignores the remaining imm8 bits.
     X86Pclmulqdq,
+    /// `llvm.x86.pclmulqdq.256` / `.512`: the 128-bit carryless multiply once per 128-bit lane of a
+    /// 256- or 512-bit vector, with the same imm8 operand selection in every lane.
+    X86Pclmulqdq256,
+    X86Pclmulqdq512,
     /// The AES-NI single-round family, 128-bit: `llvm.x86.aesni.aesenc(a, round_key)` and the enc-last,
     /// dec and dec-last forms.
     X86AesEnc,

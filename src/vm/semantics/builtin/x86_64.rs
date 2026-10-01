@@ -88,6 +88,36 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             };
             0
         }
+        Builtin::X86Pclmulqdq256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("pclmulqdq.256 return form is not an indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe {
+                crate::arch::intrinsics::pclmulqdq256(
+                    dst,
+                    a(0) as *const u8,
+                    a(1) as *const u8,
+                    a(2),
+                )
+            };
+            0
+        }
+        Builtin::X86Pclmulqdq512 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("pclmulqdq.512 return form is not an indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe {
+                crate::arch::intrinsics::pclmulqdq512(
+                    dst,
+                    a(0) as *const u8,
+                    a(1) as *const u8,
+                    a(2),
+                )
+            };
+            0
+        }
         Builtin::X86AesEnc
         | Builtin::X86AesEncLast
         | Builtin::X86AesDec
