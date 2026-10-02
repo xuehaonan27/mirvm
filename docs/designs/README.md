@@ -220,7 +220,7 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 | interpreter performance ceiling | the method-level JIT is the answer to the ceiling, and the hard gate is the interpreter/JIT/native three-way differential; the JIT's own gaps (no OSR, no deopt, no production tiering) are listed in [current-status.md](../current-status.md) |
 | FFI callbacks from C into Rust | ordinary callbacks go through a thunk plus TLS attach; signals use a fixed atomic registration stub and safe-point dispatch, never libffi or guest code in the signal frame |
 | platform semantics | unwind, signal and ABI behaviour is verified per platform and is never extrapolated from the Linux baseline; each platform is a directory plus a ladder arm (P6) |
-| lifecycle and embedding | close/wait, execution leases, deferred pthread callbacks, `CtxSlot` reclamation and per-instance constructors/destructors exist; retaining process-lifetime code addresses is the explicit boundary for an arbitrary native pointer. Only a safe typed export API or a per-API revocation contract could shrink it — container validation cannot prove an arbitrary FFI ABI |
+| lifecycle and embedding | close/wait, execution leases and deferred pthread callbacks are the model of [engine-lifecycle.md](engine-lifecycle.md); `CtxSlot` reclamation and per-instance constructors/destructors exist; retaining process-lifetime code addresses is the explicit boundary for an arbitrary native pointer. Only a safe typed export API or a per-API revocation contract could shrink it — container validation cannot prove an arbitrary FFI ABI |
 
 ## 8. Prior art
 
@@ -245,6 +245,7 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 | [ram-spec.md](ram-spec.md) | Contract | the Rust abstract machine: correctness contract, degrees of definition, storage/computation/concurrency semantics, as-if freedom, UB stance, declared deviations |
 | [ffi-boundary.md](ffi-boundary.md) | Contract | the abstract machine's edge: the foreign-call classification, interposition points, the sandbox doctrine, native access to guest memory |
 | [concurrency-arch.md](concurrency-arch.md) | Decided RFC | guest threads → OS threads, the state split, why execution never holds a `tcx`, isolation and the checked-mode reserve |
+| [engine-lifecycle.md](engine-lifecycle.md) | Decided RFC | an Engine's holds, its phase machine, process exit versus embedding close, and how engine-owned per-thread state survives a non-local exit |
 | [frame-abi-bytecode.md](frame-abi-bytecode.md) | Implemented | frame kinds, guest local storage, the calling convention and the four interp↔compiled transitions, the bytecode format, JIT backend and distribution |
 | [vmctx-passing.md](vmctx-passing.md) | Decided RFC | how compiled frames, escaped function pointers, callbacks and signals reach per-thread VM execution state |
 | [c-unwind-contract.md](c-unwind-contract.md) | Implemented | Rust panic and C++ exceptions across foreign ABIs, and which flows each boundary may carry |

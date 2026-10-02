@@ -6,6 +6,12 @@ static SIGNAL_EXTERNAL_WAIT_ENTERED: AtomicU64 = AtomicU64::new(0);
 
 static SIGNAL_EXTERNAL_WAIT_RELEASED: AtomicU64 = AtomicU64::new(0);
 
+/// How long the child's helper thread waits for the external `SA_SIGINFO` handler to be entered
+/// before failing fast. The parent's `CHILD_HANG_TIMEOUT` is the real bound; this one only avoids
+/// waiting that long when the handler never runs, so it is sized to survive a loaded machine running
+/// the whole gate in parallel rather than to catch slowness.
+const HANDLER_ENTRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 unsafe extern "C" fn external_siginfo_wait_for_replacement(
     _signum: i32,
     _info: crate::os::signal::SignalInfo,
@@ -153,7 +159,7 @@ fn external_siginfo_handler_can_wait_for_another_threads_host_signal() {
             let installer = engine(first_external_native_signal_module(), jit);
             let install_execution = installer.clone();
             let replacement = std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let deadline = std::time::Instant::now() + HANDLER_ENTRY_DEADLINE;
                 while SIGNAL_EXTERNAL_WAIT_ENTERED.load(Ordering::SeqCst) == 0 {
                     if std::time::Instant::now() >= deadline {
                         SIGNAL_EXTERNAL_WAIT_RELEASED.store(1, Ordering::SeqCst);
@@ -263,7 +269,7 @@ fn external_siginfo_handler_can_wait_for_another_threads_engine_close() {
             let raiser = engine(physically_masked_signal_module(), jit);
             let closing_owner = owner.clone();
             let close = std::thread::spawn(move || {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let deadline = std::time::Instant::now() + HANDLER_ENTRY_DEADLINE;
                 while SIGNAL_EXTERNAL_WAIT_ENTERED.load(Ordering::SeqCst) == 0 {
                     if std::time::Instant::now() >= deadline {
                         SIGNAL_EXTERNAL_WAIT_RELEASED.store(1, Ordering::SeqCst);

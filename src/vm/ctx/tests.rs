@@ -169,6 +169,20 @@ fn nested_main_runs_keep_panic_classification_separate() {
 }
 
 #[test]
+fn a_nested_main_run_skipped_by_a_foreign_exit_leaves_its_outer_run_intact() {
+    let shared = Arc::new(Shared::new(Module::default()));
+    let activation = super::activate(&shared);
+    let ctx = activation.ctx();
+    let outer = super::begin_main_run(ctx);
+    // `forget` is what a foreign non-local exit does to a frame: the guard's `Drop` never runs, so
+    // the nested run's state is still recorded when the outer run returns. The outer run must still
+    // classify itself and leave nothing behind.
+    std::mem::forget(super::begin_main_run(ctx));
+    assert!(!outer.finish());
+    assert!(unsafe { (*ctx).main_runs.is_empty() });
+}
+
+#[test]
 fn main_catcher_requires_exact_role_and_same_activation() {
     use crate::vm::ir::BuiltinCallRole;
 

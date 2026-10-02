@@ -163,18 +163,14 @@ impl EngineControl {
         self.lifecycle.load(std::sync::atomic::Ordering::Acquire) & !COUNT_MASK
     }
 
-    pub(crate) fn begin_execution(
-        &self,
-        allow_closing_reentry: bool,
-        allow_finalizing: bool,
-    ) -> bool {
+    /// The admission rule behind every hold. Private on purpose: which entries may still start is a
+    /// property of the *kind* of entry, so each kind reaches this through its own name
+    /// (`begin_active_execution`, `begin_deferred_hold`) rather than through a flag a caller picks.
+    fn begin_execution(&self, allow_closing_reentry: bool) -> bool {
         loop {
             let state = self.lifecycle.load(std::sync::atomic::Ordering::Acquire);
             let phase = state & !COUNT_MASK;
-            if phase != PHASE_RUNNING
-                && !(allow_closing_reentry && phase == PHASE_CLOSING)
-                && !(allow_finalizing && phase == PHASE_FINALIZING)
-            {
+            if phase != PHASE_RUNNING && !(allow_closing_reentry && phase == PHASE_CLOSING) {
                 return false;
             }
             if state & COUNT_MASK == COUNT_MASK {
@@ -208,7 +204,7 @@ impl EngineControl {
             eprintln!("mirvm[m4-engine]: Engine active execution count overflowed");
             std::process::abort();
         }
-        if self.begin_execution(allow_closing_reentry, false) {
+        if self.begin_execution(allow_closing_reentry) {
             return true;
         }
         let last = self
@@ -221,6 +217,16 @@ impl EngineControl {
         false
     }
 
+    /// Admit a deferred hold: native code has accepted a guest callback it will invoke or revoke
+    /// later. It shares the lifecycle count with executions so that a registration which read
+    /// Running cannot land after close scanned, which is why it needs no active-execution claim of
+    /// its own.
+    pub(crate) fn begin_deferred_hold(&self, allow_closing: bool) -> bool {
+        self.begin_execution(allow_closing)
+    }
+
+    /// Take the one Closing count and a matching active execution. The engine must be fully idle for
+    /// this to succeed, so the caller holds the whole teardown while TSD cleanup sees it as active.
     pub(super) fn begin_finalizer_execution(&self) -> bool {
         if self
             .active_executions
@@ -252,6 +258,10 @@ impl EngineControl {
         false
     }
 
+    /// Take the same one Closing count without claiming an active execution, so a registered
+    /// callback can still enter while dispositions are torn down. It is a lifecycle-only permit:
+    /// TSD cleanup must keep seeing the Engine as idle, and the two callers are told apart by the
+    /// `active_executions` counter rather than by the count they share.
     pub(super) fn begin_finalizer_permit(&self) -> bool {
         self.lifecycle
             .compare_exchange(
@@ -589,6 +599,37 @@ impl Engine {
             .ok_or(WaitClosedError::ActiveOnCurrentThread)
     }
 
+    /// End the process after a completed guest run.
+    ///
+    /// A guest `main` returning ends the process, so this runs the Engine's exit-time work -- its
+    /// images' finalizers and the native exit handlers their initializers registered -- and leaves
+    /// the process to end. Nothing waits and nothing is reclaimed: a guest thread the guest created
+    /// and did not join dies with the process, exactly as it does under native `exit`, and an
+    /// address space about to be destroyed needs no reclamation
+    /// (`docs/designs/engine-lifecycle.md` §4.1).
+    ///
+    /// `self` is released rather than dropped into `close_shared`, which would request a close and
+    /// start a finalizer that can neither finish -- a parked guest thread still holds an execution
+    /// lease -- nor be waited for. That is also why no reclamation call appears here: reclamation
+    /// is the embedding path's, and it is the only path that needs quiescence.
+    pub fn exit_process(self) {
+        let shared = Arc::clone(self.shared());
+        // A lease is also what lets the finalizers' own callbacks re-enter: they run guest code,
+        // and every such entry takes a thunk lease of its own. An Engine already Closing has its
+        // exit work owned by the finalizer that requested close, so there is nothing to do here.
+        if let Ok(lease) = ExecutionLease::acquire(Arc::clone(&shared), false) {
+            let activation = activate(lease.shared());
+            super::super::unwind::guard_native_teardown(|| {
+                super::super::native_instance::run_finalizers(&shared.instance);
+                super::super::atexit::run_native_handlers(shared.id);
+            });
+            drop(activation);
+            drop(lease);
+        }
+        shared.module.funcs.flush_heat_order();
+        std::mem::forget(self);
+    }
+
     /// Run an embedding-side `C-unwind` callback invocation and classify closure of this
     /// callback's owning Engine. Panics and exceptions not owned by this Engine are resumed.
     pub fn catch_callback_unwind<R>(
@@ -745,6 +786,11 @@ pub(super) fn start_finalizer(shared: Arc<Shared>) {
     if let Err(error) = std::thread::Builder::new()
         .name("mirvm-close".into())
         .spawn(move || {
+            // This worker is created while the guest may still be executing (an embedder can close
+            // an Engine with guest threads running), so it is a thread the guest cannot see and the
+            // fork guard must subtract it. Unlike the compile worker it is created after the
+            // baseline was pinned, so being inside the baseline cannot exclude it.
+            let _service = crate::os::thread::ServiceThreadGuard::register();
             while !shared.control.begin_finalizer_execution() {
                 if shared.control.phase() != PHASE_CLOSING {
                     return;

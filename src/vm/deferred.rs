@@ -30,7 +30,7 @@ impl DeferredHold {
         control: &Arc<EngineControl>,
         allow_closing: bool,
     ) -> Result<Self, EngineClosed> {
-        if control.begin_execution(allow_closing, false) {
+        if control.begin_deferred_hold(allow_closing) {
             Ok(Self {
                 control: Arc::clone(control),
             })

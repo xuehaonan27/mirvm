@@ -115,12 +115,15 @@ Measured on this tree against the Linux x86_64 release build, with the cases tha
 `the proxy helper` ([environment.md](environment.md)); `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 499 pass, 1 ignored.
-- `make test` (the fast tier, 73 cases): 69 pass / 4 fail; one run measured 68 pass / 5 fail because
-  `quality` was RED on E48's flaky test.
-- `make smoke` (fast + smoke, 119 cases): 109 pass / 10 fail; one run measured 107 pass / 12 fail
-  because `libgit2` and `purity-fence` hit build state a killed run had left behind, and both are green
-  on a clean re-run.
+- `cargo test --locked --all-features`: 500 pass, 0 fail, 1 ignored. The suite gives each case a
+  thread, so on a loaded shared host a timing-sensitive case can fail without a defect: one run here
+  failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` and
+  `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread`, and both pass repeatedly in
+  isolation (E48).
+- `make test` (the fast tier, 74 cases): 70 pass / 4 fail.
+- `make smoke` (fast + smoke, 120 cases): 113 pass / 7 fail; which rayon-family and `cargo-diff` rows
+  fail moves between runs, because one is wall-clock (E47) and the other depends on whether a project
+  directory was materialized (G2), so an earlier run measured 112 pass / 8 fail.
 - `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
   which is `repo-quality`'s 13 source checks.
 - Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
@@ -130,10 +133,12 @@ The fast tier's failures are the four `cargo-diff` rows that report FAIL rather 
 materialized project directory is absent (`ecosystem`, `ffi_zlib`, `ripgrep_regex`, `warning_return`;
 G2).
 
-The smoke tier adds six: E47's four rayon-family timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`)
-and its `png_round` trap (`foreign llvm.x86.pclmulqdq.512`, the intrinsic queue C6), plus
-`wasmtime_wat`, whose engine close waits for its own parked guest threads (E49). `tokei` is a
-gate-tier case and is not in this tier.
+The smoke tier adds three: E47's rayon-family wall-clock timeouts (`flate2`, `brotli`, `tiny_skia`).
+`rayon` finishes inside its own budget. `png_round` and `wasmtime_wat` are green: the first needed
+`llvm.x86.pclmulqdq.512` (C6), and the second is a guest that returns from `main` with its workers
+parked in guest code, which the process-exit path leaves running rather than waiting for
+([engine-lifecycle.md](designs/engine-lifecycle.md) §4.1). `tokei` is a gate-tier case and is not in
+this tier.
 
 `fib(32)` is RED: the best of three runs is about 8.7s against its 80ms gate (E40). Output is correct
 and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not be claimed.

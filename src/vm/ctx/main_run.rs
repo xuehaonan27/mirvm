@@ -28,13 +28,19 @@ pub(crate) struct MainRunGuard {
 impl MainRunGuard {
     pub(crate) fn finish(mut self) -> bool {
         let states = unsafe { &mut (*self.ctx).main_runs };
-        if states.len() != self.index + 1 {
+        if states.len() <= self.index {
             eprintln!("mirvm[m4-engine]: nested main execution state was finished out of order");
             std::process::abort();
         }
-        let state = states.pop().unwrap();
+        // The state this run pushed stays at `index`: a nested run appends above it, and a nested
+        // finish truncates only down to its own index. Anything above `index` therefore belongs to a
+        // frame that no longer exists once this one returns, so an ordinary return truncates instead
+        // of demanding the exact length -- a nested run whose frame a foreign non-local exit crossed
+        // must not make this one abort (`docs/designs/engine-lifecycle.md` §5).
+        let panicked = states[self.index].panicked;
+        states.truncate(self.index);
         self.finished = true;
-        state.panicked
+        panicked
     }
 }
 
@@ -43,12 +49,9 @@ impl Drop for MainRunGuard {
         if self.finished {
             return;
         }
-        let states = unsafe { &mut (*self.ctx).main_runs };
-        if states.len() != self.index + 1 {
-            eprintln!("mirvm[m4-engine]: nested main execution state unwound out of order");
-            std::process::abort();
-        }
-        states.pop();
+        // The same checkpoint on the unwind path. Truncating past the current length is a no-op, so
+        // an outer run that already truncated cannot make this one fail.
+        unsafe { (*self.ctx).main_runs.truncate(self.index) };
     }
 }
 

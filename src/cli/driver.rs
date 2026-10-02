@@ -609,16 +609,11 @@ fn run_vm_engine_loaded(
             Ok(result) => result,
             Err(error) => {
                 diagnostics::control(format_args!("{}", error.message));
+                engine.exit_process();
                 return error.exit_code;
             }
         };
-        if let Err(error) = engine.wait_closed() {
-            diagnostics::control(format_args!(
-                "mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}"
-            ));
-            return 70;
-        }
-        return match result {
+        let code = match result {
             Ok(crate::vm::RunOutcome::Returned(code)) => code,
             // `lang_start` has already run the guest panic hook. Match native
             // stderr here and only translate the structured outcome to its OS
@@ -629,6 +624,8 @@ fn run_vm_engine_loaded(
                 e.exit_code
             }
         };
+        engine.exit_process();
+        return code;
     };
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
@@ -646,16 +643,11 @@ fn run_vm_engine_loaded(
         Ok(result) => result,
         Err(error) => {
             diagnostics::control(format_args!("{}", error.message));
+            engine.exit_process();
             return error.exit_code;
         }
     };
-    if let Err(error) = engine.wait_closed() {
-        diagnostics::control(format_args!(
-            "mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}"
-        ));
-        return 70;
-    }
-    match result {
+    let code = match result {
         Ok(crate::vm::RunOutcome::Returned(r)) => {
             println!("{}", r.lo);
             0
@@ -668,7 +660,11 @@ fn run_vm_engine_loaded(
             diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
             e.exit_code
         }
-    }
+    };
+    // One dev export is called in a process that ends when it returns, so this is still the
+    // process-exit path: the export's own output is out, and the Engine's exit-time work follows it.
+    engine.exit_process();
+    code
 }
 
 /// Guest main execution runs on a dedicated large-stack thread (1 GiB of virtual reservation by

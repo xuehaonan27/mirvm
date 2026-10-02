@@ -232,6 +232,7 @@ simd_probe  native-diff  fast  120  input=programs/simd_probe.rs
 strings  native-diff  fast  120  input=programs/strings.rs
 struct_fnptr_escape  native-diff  fast  120  input=programs/struct_fnptr_escape.rs
 threads_channel  native-diff  fast  120  input=programs/threads_channel.rs
+threads_exit_parked  native-diff  fast  120  input=programs/threads_exit_parked.rs
 threads_panic  native-diff  fast  120  input=programs/threads_panic.rs
 threads_spawn  native-diff  fast  120  input=programs/threads_spawn.rs
 threads_sync  native-diff  fast  120  input=programs/threads_sync.rs

@@ -18,6 +18,7 @@ Status words:
 
 Design references: [ram-spec.md](designs/ram-spec.md),
 [concurrency-arch.md](designs/concurrency-arch.md),
+[engine-lifecycle.md](designs/engine-lifecycle.md),
 [frame-abi-bytecode.md](designs/frame-abi-bytecode.md),
 [vmctx-passing.md](designs/vmctx-passing.md), [ffi-boundary.md](designs/ffi-boundary.md),
 [c-unwind-contract.md](designs/c-unwind-contract.md),
@@ -51,27 +52,23 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   count. Its counters at 3000 iterations (`MIRVM_JIT_STATS=1`) read `c2i=3146740 alloc=42930
   call_terminate=974353 tls_ref=3503 call_indirect=13524 call_builtin=16070`, so the time is not in the
   compiled bodies.
-- **E47** `OPEN`: five real-project corpus cases are RED on the Linux verify host — four rayon-family
-  timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`) and one genuine Trap (`png_round`,
-  `llvm.x86.pclmulqdq.512`, the intrinsic queue C6, whose repair is the intrinsic queue). The smoke
-  tier runs them and counts them, so they are RED in every `make smoke` and `make gate`; the four
-  timeouts are wall-clock.
-- **E49** `OPEN`: `wasmtime_wat` still does not finish. Its guest work completes (stdout reaches its
-  last oracle line, `trap null = uninitialized element`) and then the Engine close waits out the case
-  budget for leases the driver's own parked threads hold, where native would exit the process and take
-  them with it (`mlua_lua` is green now, and both drivers used to abort with `mirvm[m4-engine]: Engine
-  activation exited out of order`). The abort is fixed: a native `longjmp` (Lua's error raise, a wasm
-  trap) unwinds the host stack over mirvm's frames without running their destructors, and two
-  boundaries recover from it — `ActivationGuard` restores the activation stack to the length recorded
-  at its entry instead of aborting, and a libffi-closure callback frame's execution lease lives in a
-  thread registry that `ffi::call_addr` truncates back when the native call returns. The registry
-  entry is held by a guard, so a Rust unwind releases it and only a foreign `longjmp` can leave it
-  behind; two engine-lifecycle tests were the witness that the unwind case matters.
-  What remains is the close: either idle guest threads keep their own leases and the close waits for
-  threads native would not wait for, or a callback skipped on a thread with no guest-to-native call
-  frame (a wasmtime worker) has no truncation point. Closing needs that ruling — a bounded wait with a
-  loud report, a detach, or process-exit semantics — plus a corpus witness that exits with guest
-  threads parked.
+- **E47** `OPEN`: three rayon-family corpus cases are RED on the Linux verify host — `flate2`, `brotli`
+  and `tiny_skia` time out at the case budget, while `rayon` finishes inside its own. The cost is
+  wall-clock and scales with the work the case does, not a trap or a wrong answer. The smoke tier runs
+  them and counts them, so they are RED in every `make smoke` and `make gate`.
+- **E48** `OPEN`: the library suite is not reproducible on a loaded host, and whichever case fails
+  reddens `quality` with it. Four witnesses so far, each passing repeatedly in isolation and none
+  reproducible on demand. `capture::host_syscall_variants_preserve_libc_result_and_errno` reports
+  `plain/jit/success: function did not compile` — `jit.slots[0]` is still 0 after `run_export` returned
+  the right value, so an engine with `threshold = 1` and `sync = true` ran interpreted, and the report
+  carries `enabled/threshold/sync/counted/queue/worker/stopping` to read it from.
+  `signal_delivery::sigwaitinfo::external_siginfo_handler_can_wait_for_another_threads_engine_close`
+  failed a two-second deadline for entering an external `SA_SIGINFO` handler while the Engine close
+  waited on it (the deadline is now 30s, with the parent's 60s `CHILD_HANG_TIMEOUT` still the real
+  bound). `tsd::final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` and
+  `signal_delivery::wait_closed::wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread`
+  are the other two. The suite gives each case a thread, so oversubscription is the candidate for the
+  three timing-sensitive ones; the first still needs an engine-side mechanism.
 
 
 ## Approved, awaiting construction
