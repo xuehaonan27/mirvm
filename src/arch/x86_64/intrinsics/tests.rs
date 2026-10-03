@@ -2,10 +2,11 @@
 //! (Moved whole from vm/x86.rs test cluster, zero logic diff.)
 
 use super::{
-    aesdec, aesdeclast, aesenc, aesenclast, aesimc, aeskeygenassist, crc32_u8, crc32_u16,
-    crc32_u32, crc32_u64, gather_d_pd_256, gather_q_pd_256, lddqu, pclmulqdq, permd256,
-    pmaddubsw128, pmaddubsw256, pmaddwd128, pmaddwd256, psad_bw128, psad_bw256, pshufb128,
-    pshufb256, sha256msg1, sha256msg2, sha256rnds2, vpmadd52,
+    aesdec, aesdec256, aesdec512, aesdeclast, aesdeclast256, aesdeclast512, aesenc, aesenc256,
+    aesenc512, aesenclast, aesenclast256, aesenclast512, aesimc, aeskeygenassist, crc32_u8,
+    crc32_u16, crc32_u32, crc32_u64, gather_d_pd_256, gather_q_pd_256, lddqu, pclmulqdq,
+    pclmulqdq256, pclmulqdq512, permd256, pmaddubsw128, pmaddubsw256, pmaddwd128, pmaddwd256,
+    psad_bw128, psad_bw256, pshufb128, pshufb256, sha256msg1, sha256msg2, sha256rnds2, vpmadd52,
 };
 
 #[test]
@@ -1065,6 +1066,195 @@ fn pshift_d_models_match_sse2_hardware() {
                 assert_eq!(sw_l, hw_l, "psll.d {v:?} count={c:?}");
                 assert_eq!(sw_r, hw_r, "psrl.d {v:?} count={c:?}");
             }
+        }
+    }
+}
+
+/// The wider carryless multiplies are the 128-bit one per lane and nothing else: the lane split of
+/// the 128-bit leaf is the oracle, the width is pinned by a sentinel outside it, and hardware is the
+/// third check where it exists. The leaf needs `vpclmulqdq` plus the AVX-512 feature its width uses,
+/// so a host without them cannot run this at all and returns.
+#[test]
+fn pclmulqdq_wider_forms_match_their_128_bit_lanes_and_hw() {
+    // The 128-bit leaf is the lane oracle, so this test needs the CPU to have it; a host without any
+    // of the three features has nothing to check and returns.
+    if !std::is_x86_feature_detected!("pclmulqdq") {
+        return;
+    }
+    let wider = std::is_x86_feature_detected!("vpclmulqdq")
+        && std::is_x86_feature_detected!("avx512f")
+        && std::is_x86_feature_detected!("avx512vl");
+    let a: [u8; 64] = std::array::from_fn(|i| (i as u8).wrapping_mul(53).wrapping_add(7));
+    let b: [u8; 64] = std::array::from_fn(|i| (i as u8).wrapping_mul(97).wrapping_add(129));
+    // imm bits 1-3 and 5-7 are ignored by the hardware, so one value with them set pins the mask.
+    for imm in [0x00u64, 0x01, 0x10, 0x11, 0xfe, 0xff] {
+        let mut lanes = [0x5au8; 64];
+        for lane in 0..4 {
+            unsafe {
+                pclmulqdq(
+                    lanes.as_mut_ptr().add(lane * 16),
+                    a.as_ptr().add(lane * 16),
+                    b.as_ptr().add(lane * 16),
+                    imm,
+                )
+            };
+        }
+
+        if wider {
+            let mut got = [0x5au8; 64];
+            unsafe { pclmulqdq256(got.as_mut_ptr(), a.as_ptr(), b.as_ptr(), imm) };
+            assert_eq!(&got[..32], &lanes[..32], "pclmulqdq.256 imm={imm:#x} lanes");
+            assert_eq!(
+                &got[32..],
+                &[0x5au8; 32],
+                "pclmulqdq.256 imm={imm:#x} width"
+            );
+            use std::arch::x86_64::{
+                _mm256_clmulepi64_epi128, _mm256_loadu_si256, _mm256_storeu_si256,
+            };
+            let (va, vb) = unsafe {
+                (
+                    _mm256_loadu_si256(a.as_ptr().cast()),
+                    _mm256_loadu_si256(b.as_ptr().cast()),
+                )
+            };
+            let hw = match imm & 0x11 {
+                0x00 => unsafe { _mm256_clmulepi64_epi128::<0x00>(va, vb) },
+                0x01 => unsafe { _mm256_clmulepi64_epi128::<0x01>(va, vb) },
+                0x10 => unsafe { _mm256_clmulepi64_epi128::<0x10>(va, vb) },
+                _ => unsafe { _mm256_clmulepi64_epi128::<0x11>(va, vb) },
+            };
+            let mut hw_out = [0u8; 32];
+            unsafe { _mm256_storeu_si256(hw_out.as_mut_ptr().cast(), hw) };
+            assert_eq!(&got[..32], &hw_out[..], "pclmulqdq.256 imm={imm:#x} hw");
+
+            let mut got = [0x5au8; 64];
+            unsafe { pclmulqdq512(got.as_mut_ptr(), a.as_ptr(), b.as_ptr(), imm) };
+            assert_eq!(got, lanes, "pclmulqdq.512 imm={imm:#x} lanes");
+            use std::arch::x86_64::{
+                _mm512_clmulepi64_epi128, _mm512_loadu_si512, _mm512_storeu_si512,
+            };
+            let (va, vb) = unsafe {
+                (
+                    _mm512_loadu_si512(a.as_ptr().cast()),
+                    _mm512_loadu_si512(b.as_ptr().cast()),
+                )
+            };
+            let hw = match imm & 0x11 {
+                0x00 => unsafe { _mm512_clmulepi64_epi128::<0x00>(va, vb) },
+                0x01 => unsafe { _mm512_clmulepi64_epi128::<0x01>(va, vb) },
+                0x10 => unsafe { _mm512_clmulepi64_epi128::<0x10>(va, vb) },
+                _ => unsafe { _mm512_clmulepi64_epi128::<0x11>(va, vb) },
+            };
+            let mut hw_out = [0u8; 64];
+            unsafe { _mm512_storeu_si512(hw_out.as_mut_ptr().cast(), hw) };
+            assert_eq!(got, hw_out, "pclmulqdq.512 imm={imm:#x} hw");
+        }
+    }
+}
+
+/// The same shape for the VAES single-round family: each 256- or 512-bit form is the 128-bit leaf
+/// applied per lane, so the lane split of the 128-bit leaf is the oracle, a sentinel pins the width,
+/// and hardware is the third check where the features exist.
+#[test]
+fn aes_wider_forms_match_their_128_bit_lanes_and_hw() {
+    if !std::is_x86_feature_detected!("aes") {
+        return;
+    }
+    let vaes = std::is_x86_feature_detected!("vaes");
+    let a: [u8; 64] = std::array::from_fn(|i| (i as u8).wrapping_mul(31).wrapping_add(3));
+    let k: [u8; 64] = std::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(200));
+    // One entry per round form: (128-bit leaf, 256-bit leaf, 512-bit leaf).
+    type Op = unsafe fn(*mut u8, *const u8, *const u8);
+    let ops: [(Op, Op, Op); 4] = [
+        (aesenc, aesenc256, aesenc512),
+        (aesenclast, aesenclast256, aesenclast512),
+        (aesdec, aesdec256, aesdec512),
+        (aesdeclast, aesdeclast256, aesdeclast512),
+    ];
+    for (leaf, leaf256, leaf512) in ops {
+        let mut lanes = [0x5au8; 64];
+        for lane in 0..4 {
+            unsafe {
+                leaf(
+                    lanes.as_mut_ptr().add(lane * 16),
+                    a.as_ptr().add(lane * 16),
+                    k.as_ptr().add(lane * 16),
+                )
+            };
+        }
+        // The fixture must not repeat a lane, or a "read lane 0 four times" bug would pass.
+        assert_ne!(lanes[..16], lanes[16..32], "fixture lanes must differ");
+
+        if vaes {
+            let mut got = [0x5au8; 64];
+            unsafe { leaf256(got.as_mut_ptr(), a.as_ptr(), k.as_ptr()) };
+            assert_eq!(&got[..32], &lanes[..32], "vaes.256 lanes");
+            assert_eq!(&got[32..], &[0x5au8; 32], "vaes.256 width");
+        }
+        if vaes && std::is_x86_feature_detected!("avx512f") {
+            let mut got = [0x5au8; 64];
+            unsafe { leaf512(got.as_mut_ptr(), a.as_ptr(), k.as_ptr()) };
+            assert_eq!(got, lanes, "vaes.512 lanes");
+        }
+    }
+
+    // Hardware cross-check: the hardware 256/512 results must equal the per-lane hardware 128-bit
+    // ones too, not only mirvm's.
+    if vaes && std::is_x86_feature_detected!("avx512f") {
+        use std::arch::x86_64::*;
+        unsafe {
+            let (a256, k256) = (
+                _mm256_loadu_si256(a.as_ptr().cast()),
+                _mm256_loadu_si256(k.as_ptr().cast()),
+            );
+            let (a512, k512) = (
+                _mm512_loadu_si512(a.as_ptr().cast()),
+                _mm512_loadu_si512(k.as_ptr().cast()),
+            );
+            let mut hw256 = [0u8; 32];
+            let mut hw512 = [0u8; 64];
+            let mut got = [0u8; 64];
+
+            _mm256_storeu_si256(hw256.as_mut_ptr().cast(), _mm256_aesenc_epi128(a256, k256));
+            _mm512_storeu_si512(hw512.as_mut_ptr().cast(), _mm512_aesenc_epi128(a512, k512));
+            aesenc256(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(&got[..32], &hw256[..], "vaesenc.256 hw");
+            aesenc512(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(got, hw512, "vaesenc.512 hw");
+
+            _mm256_storeu_si256(
+                hw256.as_mut_ptr().cast(),
+                _mm256_aesenclast_epi128(a256, k256),
+            );
+            _mm512_storeu_si512(
+                hw512.as_mut_ptr().cast(),
+                _mm512_aesenclast_epi128(a512, k512),
+            );
+            aesenclast256(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(&got[..32], &hw256[..], "vaesenclast.256 hw");
+            aesenclast512(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(got, hw512, "vaesenclast.512 hw");
+
+            _mm256_storeu_si256(hw256.as_mut_ptr().cast(), _mm256_aesdec_epi128(a256, k256));
+            _mm512_storeu_si512(hw512.as_mut_ptr().cast(), _mm512_aesdec_epi128(a512, k512));
+            aesdec256(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(&got[..32], &hw256[..], "vaesdec.256 hw");
+            aesdec512(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(got, hw512, "vaesdec.512 hw");
+
+            _mm256_storeu_si256(
+                hw256.as_mut_ptr().cast(),
+                _mm256_aesdeclast_epi128(a256, k256),
+            );
+            _mm512_storeu_si512(
+                hw512.as_mut_ptr().cast(),
+                _mm512_aesdeclast_epi128(a512, k512),
+            );
+            aesdeclast256(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(&got[..32], &hw256[..], "vaesdeclast.256 hw");
+            aesdeclast512(got.as_mut_ptr(), a.as_ptr(), k.as_ptr());
+            assert_eq!(got, hw512, "vaesdeclast.512 hw");
         }
     }
 }

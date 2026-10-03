@@ -291,15 +291,17 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Corpus-driven product debt
 
-- **C6** `UNSCHEDULED`: intrinsic queue residual — `vaes` and the remaining gather forms. The
-  `pclmulqdq.256/.512` forms landed through the four-contact-point method: `arch::intrinsics::
-  pclmulqdq256/pclmulqdq512` (`vpclmulqdq`, per 128-bit lane), the IR variants, the interpreter arms,
-  the guest name table (`llvm.x86.pclmulqdq.256/.512`) and the aarch64 mirror signatures. That is what
-  turned `png_round` from the live Trap into a PASS, and that driver is the `.512` form's witness. What
-  the two forms are still owed is the method's fifth contact point: an `arch` unit test cross-checking
-  them against stdarch vectors and the hardware, the way
-  `vpmadd52_matches_stdarch_vectors_and_hw_cross_check` does for the family that already landed. `vaes`
-  (enc/enc-last/dec/dec-last at `.256/.512`) has the same shape; gather is a different one (base +
+- **C6** `UNSCHEDULED`: intrinsic queue residual — the remaining gather forms. The `pclmulqdq.256/.512`
+  and VAES single-round families are complete through the four contact points: the guest name tables
+  (`llvm.x86.pclmulqdq.256/.512`, and `llvm.x86.aesni.aesenc/.aesenclast/.aesdec/.aesdeclast` at
+  `.256`/`.512`), the IR variants, the `arch` leaves with their aarch64 mirror signatures, and the
+  interpreter arms. Each also has the method's fifth contact point, the `arch` unit test:
+  `pclmulqdq_wider_forms_match_their_128_bit_lanes_and_hw` and
+  `aes_wider_forms_match_their_128_bit_lanes_and_hw` compare the wider form against the 128-bit leaf
+  applied per lane, pin the width with a sentinel outside it, and cross-check both against the
+  hardware intrinsics. `png_round` is the wider carryless multiply's witness from real code; no corpus
+  crate reaches VAES, so `x86_crypto_probe` prints every form's bytes for the native differential.
+  That is what turned `png_round` from the live Trap into a PASS. Gather is a different shape (base +
   index vector + mask + scale, with mask and fault semantics to settle) and stays on real demand.
   Untriggered forms keep a loud Trap.
 - **C8** `UNSCHEDULED`: Rust-side ctor / `.init_array` (linkme family) has never entered the corpus.

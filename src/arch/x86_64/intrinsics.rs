@@ -14,9 +14,11 @@ use std::arch::x86_64::{
     _mm_aesenclast_si128, _mm_aesimc_si128, _mm_clmulepi64_si128, _mm_crc32_u8, _mm_crc32_u16,
     _mm_crc32_u32, _mm_crc32_u64, _mm_loadu_si128, _mm_madd_epi16, _mm_maddubs_epi16, _mm_sad_epu8,
     _mm_sha256msg1_epu32, _mm_sha256msg2_epu32, _mm_sha256rnds2_epu32, _mm_shuffle_epi8,
-    _mm_storeu_si128, _mm256_clmulepi64_epi128, _mm256_loadu_si256, _mm256_madd_epi16,
+    _mm_storeu_si128, _mm256_aesdec_epi128, _mm256_aesdeclast_epi128, _mm256_aesenc_epi128,
+    _mm256_aesenclast_epi128, _mm256_clmulepi64_epi128, _mm256_loadu_si256, _mm256_madd_epi16,
     _mm256_maddubs_epi16, _mm256_permutevar8x32_epi32, _mm256_sad_epu8, _mm256_shuffle_epi8,
-    _mm256_storeu_si256, _mm512_clmulepi64_epi128, _mm512_loadu_si512, _mm512_storeu_si512,
+    _mm256_storeu_si256, _mm512_aesdec_epi128, _mm512_aesdeclast_epi128, _mm512_aesenc_epi128,
+    _mm512_aesenclast_epi128, _mm512_clmulepi64_epi128, _mm512_loadu_si512, _mm512_storeu_si512,
 };
 
 /// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
@@ -180,6 +182,75 @@ pub(crate) unsafe fn aesimc(dst: *mut u8, a: *const u8) {
     let a = unsafe { _mm_loadu_si128(a.cast::<__m128i>()) };
     let result = _mm_aesimc_si128(a);
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
+}
+
+/// `llvm.x86.aesni.aesenc.256` and the rest of the VAES single-round family at 256 bits: the same
+/// AES round in each 128-bit lane of a 256-bit vector. The lanes are independent, so the result is
+/// the two 128-bit lane results concatenated in lane order, and the VEX form needs only `vaes`.
+#[target_feature(enable = "vaes")]
+pub(crate) unsafe fn aesenc256(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
+    let round_key = unsafe { _mm256_loadu_si256(round_key.cast::<__m256i>()) };
+    let result = _mm256_aesenc_epi128(a, round_key);
+    unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
+}
+
+#[target_feature(enable = "vaes")]
+pub(crate) unsafe fn aesenclast256(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
+    let round_key = unsafe { _mm256_loadu_si256(round_key.cast::<__m256i>()) };
+    let result = _mm256_aesenclast_epi128(a, round_key);
+    unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
+}
+
+#[target_feature(enable = "vaes")]
+pub(crate) unsafe fn aesdec256(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
+    let round_key = unsafe { _mm256_loadu_si256(round_key.cast::<__m256i>()) };
+    let result = _mm256_aesdec_epi128(a, round_key);
+    unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
+}
+
+#[target_feature(enable = "vaes")]
+pub(crate) unsafe fn aesdeclast256(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
+    let round_key = unsafe { _mm256_loadu_si256(round_key.cast::<__m256i>()) };
+    let result = _mm256_aesdeclast_epi128(a, round_key);
+    unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
+}
+
+/// The same family at 512 bits (`llvm.x86.aesni.aesenc.512` and friends): four independent 128-bit
+/// lanes, and the EVEX form is gated on `avx512f` as well as `vaes`.
+#[target_feature(enable = "vaes,avx512f")]
+pub(crate) unsafe fn aesenc512(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm512_loadu_si512(a.cast()) };
+    let round_key = unsafe { _mm512_loadu_si512(round_key.cast()) };
+    let result = _mm512_aesenc_epi128(a, round_key);
+    unsafe { _mm512_storeu_si512(dst.cast(), result) };
+}
+
+#[target_feature(enable = "vaes,avx512f")]
+pub(crate) unsafe fn aesenclast512(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm512_loadu_si512(a.cast()) };
+    let round_key = unsafe { _mm512_loadu_si512(round_key.cast()) };
+    let result = _mm512_aesenclast_epi128(a, round_key);
+    unsafe { _mm512_storeu_si512(dst.cast(), result) };
+}
+
+#[target_feature(enable = "vaes,avx512f")]
+pub(crate) unsafe fn aesdec512(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm512_loadu_si512(a.cast()) };
+    let round_key = unsafe { _mm512_loadu_si512(round_key.cast()) };
+    let result = _mm512_aesdec_epi128(a, round_key);
+    unsafe { _mm512_storeu_si512(dst.cast(), result) };
+}
+
+#[target_feature(enable = "vaes,avx512f")]
+pub(crate) unsafe fn aesdeclast512(dst: *mut u8, a: *const u8, round_key: *const u8) {
+    let a = unsafe { _mm512_loadu_si512(a.cast()) };
+    let round_key = unsafe { _mm512_loadu_si512(round_key.cast()) };
+    let result = _mm512_aesdeclast_epi128(a, round_key);
+    unsafe { _mm512_storeu_si512(dst.cast(), result) };
 }
 
 /// Rijndael S-box (used as SubWord in the `aeskeygenassist` software model).

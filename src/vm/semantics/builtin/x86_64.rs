@@ -121,7 +121,15 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
         Builtin::X86AesEnc
         | Builtin::X86AesEncLast
         | Builtin::X86AesDec
-        | Builtin::X86AesDecLast => {
+        | Builtin::X86AesDecLast
+        | Builtin::X86AesEnc256
+        | Builtin::X86AesEncLast256
+        | Builtin::X86AesDec256
+        | Builtin::X86AesDecLast256
+        | Builtin::X86AesEnc512
+        | Builtin::X86AesEncLast512
+        | Builtin::X86AesDec512
+        | Builtin::X86AesDecLast512 => {
             let Some(dst) = ret_dst else {
                 engine_abort("aesni return form is not an indirect vector");
             };
@@ -132,7 +140,15 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
                     Builtin::X86AesEnc => crate::arch::intrinsics::aesenc(dst, x, k),
                     Builtin::X86AesEncLast => crate::arch::intrinsics::aesenclast(dst, x, k),
                     Builtin::X86AesDec => crate::arch::intrinsics::aesdec(dst, x, k),
-                    _ => crate::arch::intrinsics::aesdeclast(dst, x, k),
+                    Builtin::X86AesDecLast => crate::arch::intrinsics::aesdeclast(dst, x, k),
+                    Builtin::X86AesEnc256 => crate::arch::intrinsics::aesenc256(dst, x, k),
+                    Builtin::X86AesEncLast256 => crate::arch::intrinsics::aesenclast256(dst, x, k),
+                    Builtin::X86AesDec256 => crate::arch::intrinsics::aesdec256(dst, x, k),
+                    Builtin::X86AesDecLast256 => crate::arch::intrinsics::aesdeclast256(dst, x, k),
+                    Builtin::X86AesEnc512 => crate::arch::intrinsics::aesenc512(dst, x, k),
+                    Builtin::X86AesEncLast512 => crate::arch::intrinsics::aesenclast512(dst, x, k),
+                    Builtin::X86AesDec512 => crate::arch::intrinsics::aesdec512(dst, x, k),
+                    _ => crate::arch::intrinsics::aesdeclast512(dst, x, k),
                 }
             }
             0

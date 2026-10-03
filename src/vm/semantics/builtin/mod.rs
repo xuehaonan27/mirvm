@@ -93,6 +93,14 @@ pub(crate) fn exec_builtin(
         | Builtin::X86AesEncLast
         | Builtin::X86AesDec
         | Builtin::X86AesDecLast
+        | Builtin::X86AesEnc256
+        | Builtin::X86AesEncLast256
+        | Builtin::X86AesDec256
+        | Builtin::X86AesDecLast256
+        | Builtin::X86AesEnc512
+        | Builtin::X86AesEncLast512
+        | Builtin::X86AesDec512
+        | Builtin::X86AesDecLast512
         | Builtin::X86AesImc
         | Builtin::X86AesKeygenAssist
         | Builtin::X86Permd256

@@ -122,6 +122,17 @@ pub enum Builtin {
     X86AesEncLast,
     X86AesDec,
     X86AesDecLast,
+    /// The same family at 256 and 512 bits (`llvm.x86.aesni.aesenc.256` / `.512` and the enc-last, dec
+    /// and dec-last forms, i.e. VAES): one AES round in each 128-bit lane, independently. The guest
+    /// name is still `aesni`; only the width changes.
+    X86AesEnc256,
+    X86AesEncLast256,
+    X86AesDec256,
+    X86AesDecLast256,
+    X86AesEnc512,
+    X86AesEncLast512,
+    X86AesDec512,
+    X86AesDecLast512,
     /// `llvm.x86.aesni.aesimc(a)`: InvMixColumns, the round-key transformation used when decrypting.
     X86AesImc,
     /// `llvm.x86.aesni.aeskeygenassist(a, imm8)`: SubWord and RotWord, xored with RCON taken from

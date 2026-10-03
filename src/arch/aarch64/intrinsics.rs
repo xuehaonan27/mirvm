@@ -38,6 +38,14 @@ no_such_instruction! {
     fn aesdeclast [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
     fn aesimc [] (dst: *mut u8, a: *const u8) ;
     fn aeskeygenassist [] (dst: *mut u8, a: *const u8, imm: u64) ;
+    fn aesenc256 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
+    fn aesenclast256 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
+    fn aesdec256 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
+    fn aesdeclast256 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
+    fn aesenc512 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
+    fn aesenclast512 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
+    fn aesdec512 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
+    fn aesdeclast512 [] (dst: *mut u8, a: *const u8, round_key: *const u8) ;
     fn crc32_u8 [] (crc: u32, v: u8) -> u32;
     fn crc32_u16 [] (crc: u32, v: u16) -> u32;
     fn crc32_u32 [] (crc: u32, v: u32) -> u32;

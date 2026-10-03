@@ -115,13 +115,13 @@ Measured on this tree against the Linux x86_64 release build, with the cases tha
 `the proxy helper` ([environment.md](environment.md)); `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 500 pass, 0 fail, 1 ignored. The suite gives each case a
+- `cargo test --locked --all-features`: 502 pass, 0 fail, 1 ignored. The suite gives each case a
   thread, so on a loaded shared host a timing-sensitive case can fail without a defect: one run here
   failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` and
   `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread`, and both pass repeatedly in
   isolation (E48).
-- `make test` (the fast tier, 74 cases): 70 pass / 4 fail.
-- `make smoke` (fast + smoke, 120 cases): 113 pass / 7 fail; which rayon-family and `cargo-diff` rows
+- `make test` (the fast tier, 75 cases): 71 pass / 4 fail.
+- `make smoke` (fast + smoke, 121 cases): 114 pass / 7 fail; which rayon-family and `cargo-diff` rows
   fail moves between runs, because one is wall-clock (E47) and the other depends on whether a project
   directory was materialized (G2), so an earlier run measured 112 pass / 8 fail.
 - `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
