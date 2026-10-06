@@ -244,6 +244,8 @@ volatile_wide  native-diff  fast  120  input=programs/volatile_wide.rs
 weak_extern  native-diff  fast  120  input=programs/weak_extern.rs
 wide_int_probe  native-diff  fast  120  input=programs/wide_int_probe.rs
 x86_crypto_probe  native-diff  fast  120  input=programs/x86_crypto_probe.rs
+x86_gather_probe  native-diff  fast  120  input=programs/x86_gather_probe.rs
+x86_scatter_probe  native-diff  fast  120  input=programs/x86_scatter_probe.rs
 zst_drop  native-diff  fast  120  input=programs/zst_drop.rs
 
 # Cargo-mode scripts: materialized into a project and compared against native `cargo run`

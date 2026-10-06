@@ -4,9 +4,10 @@
 use super::{
     aesdec, aesdec256, aesdec512, aesdeclast, aesdeclast256, aesdeclast512, aesenc, aesenc256,
     aesenc512, aesenclast, aesenclast256, aesenclast512, aesimc, aeskeygenassist, crc32_u8,
-    crc32_u16, crc32_u32, crc32_u64, gather_d_pd_256, gather_q_pd_256, lddqu, pclmulqdq,
+    crc32_u16, crc32_u32, crc32_u64, gather_k_mask, gather_sign_mask, lddqu, pclmulqdq,
     pclmulqdq256, pclmulqdq512, permd256, pmaddubsw128, pmaddubsw256, pmaddwd128, pmaddwd256,
-    psad_bw128, psad_bw256, pshufb128, pshufb256, sha256msg1, sha256msg2, sha256rnds2, vpmadd52,
+    psad_bw128, psad_bw256, pshufb128, pshufb256, scatter_k_mask, sha256msg1, sha256msg2,
+    sha256rnds2, vpmadd52,
 };
 
 #[test]
@@ -251,7 +252,7 @@ fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
     let mask = [-1.0f64, -1.0, -1.0, 0.0];
     let mut got = [0.0f64; 4];
     unsafe {
-        gather_q_pd_256(
+        gather_sign_mask::<4, 4, true, true>(
             got.as_mut_ptr().cast::<u8>(),
             src.as_ptr().cast::<u8>(),
             arr.as_ptr() as u64,
@@ -268,7 +269,7 @@ fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
     let src2 = [42.0f64; 4];
     let mut got2 = [0.0f64; 4];
     unsafe {
-        gather_q_pd_256(
+        gather_sign_mask::<4, 4, true, true>(
             got2.as_mut_ptr().cast::<u8>(),
             src2.as_ptr().cast::<u8>(),
             1, // base=1: combined with wild index yields unreadable address
@@ -294,7 +295,7 @@ fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
         ] {
             let mut sw = [0.0f64; 4];
             unsafe {
-                gather_q_pd_256(
+                gather_sign_mask::<4, 4, true, true>(
                     sw.as_mut_ptr().cast::<u8>(),
                     src_v.as_ptr().cast::<u8>(),
                     arr.as_ptr() as u64,
@@ -325,7 +326,7 @@ fn gather_d_pd_256_sign_extends_i32_indexes_and_respects_mask() {
     // base deliberately raised 8 bytes: idx=-1 ⇒ addr = base-8 = arr[0]
     let base = unsafe { arr.as_ptr().add(1) } as u64;
     unsafe {
-        gather_d_pd_256(
+        gather_sign_mask::<4, 4, false, true>(
             got.as_mut_ptr().cast::<u8>(),
             src.as_ptr().cast::<u8>(),
             base,
@@ -342,7 +343,7 @@ fn gather_d_pd_256_sign_extends_i32_indexes_and_respects_mask() {
         };
         let mut sw = [0.0f64; 4];
         unsafe {
-            gather_d_pd_256(
+            gather_sign_mask::<4, 4, false, true>(
                 sw.as_mut_ptr().cast::<u8>(),
                 src.as_ptr().cast::<u8>(),
                 arr.as_ptr() as u64,
@@ -358,6 +359,261 @@ fn gather_d_pd_256_sign_extends_i32_indexes_and_respects_mask() {
             _mm256_storeu_pd(hw_out.as_mut_ptr(), hw);
             assert_eq!(sw, hw_out, "hw cross-check d.pd.256");
         }
+    }
+}
+
+/// All 40 gather names reduce to the same two pieces: a lane's value is the load or that lane's own
+/// `src`, and a lane outside the mask is never dereferenced. The 16 VEX forms read the mask as vector
+/// sign bits and the 24 EVEX forms as a k register, so handing both conventions the same inclusion
+/// set has to produce identical bytes for every shape, and the EVEX hardware has to agree with both.
+#[test]
+fn gather_shapes_agree_between_mask_conventions_and_hardware() {
+    let arr: [f64; 256] = std::array::from_fn(|i| i as f64);
+    let base = arr.as_ptr() as u64;
+    // Offsets small enough that `base + offset * 8` stays inside `arr`, so a wrong lane shows up as a
+    // wrong value rather than as a signal.
+    let ids: [i64; 16] = std::array::from_fn(|i| i as i64);
+
+    /// Runs one shape through both mask conventions with the same inclusion set, checks every lane
+    /// against the load-or-src identity, and returns what the k-register form produced.
+    macro_rules! both_conventions {
+        ($reg:expr, $idx:expr, $idx64:expr, $elt64:expr, $k:expr) => {{
+            let reg: usize = $reg;
+            let idx: usize = $idx;
+            let gathered = if idx < reg { idx } else { reg };
+            let elt = if $elt64 { 8usize } else { 4 };
+            let mut offsets = [0u8; 128];
+            let mut src = [0u8; 128];
+            let mut signs = [0u8; 128];
+            for lane in 0..idx {
+                unsafe {
+                    if $idx64 {
+                        (offsets.as_mut_ptr() as *mut i64)
+                            .add(lane)
+                            .write_unaligned(ids[lane]);
+                    } else {
+                        (offsets.as_mut_ptr() as *mut i32)
+                            .add(lane)
+                            .write_unaligned(ids[lane] as i32);
+                    }
+                }
+            }
+            for lane in 0..reg {
+                unsafe {
+                    // A distinct `src` lane per position, so a masked-off lane that copied the wrong
+                    // position is visible.
+                    if $elt64 {
+                        (src.as_mut_ptr() as *mut u64)
+                            .add(lane)
+                            .write_unaligned(0xfeed_0000_0000_0000 | lane as u64);
+                    } else {
+                        (src.as_mut_ptr() as *mut u32)
+                            .add(lane)
+                            .write_unaligned(0xfeed_0000 | lane as u32);
+                    }
+                }
+                if ($k >> lane) & 1 != 0 {
+                    // The element's sign bit, which is how the VEX form sees an included lane.
+                    signs[lane * elt + elt - 1] = 0x80;
+                }
+            }
+            let mut via_sign = [0u8; 128];
+            let mut via_k = [0u8; 128];
+            unsafe {
+                gather_sign_mask::<$reg, $idx, $idx64, $elt64>(
+                    via_sign.as_mut_ptr(),
+                    src.as_ptr(),
+                    base,
+                    offsets.as_ptr(),
+                    signs.as_ptr(),
+                    8,
+                );
+                gather_k_mask::<$reg, $idx, $idx64, $elt64>(
+                    via_k.as_mut_ptr(),
+                    src.as_ptr(),
+                    base,
+                    offsets.as_ptr(),
+                    $k,
+                    8,
+                );
+            }
+            assert_eq!(
+                via_sign[..reg * elt],
+                via_k[..reg * elt],
+                "mask conventions disagree at reg={reg} idx={idx} idx64={} elt64={}",
+                $idx64,
+                $elt64
+            );
+            for lane in 0..reg {
+                let mut bytes = [0u8; 8];
+                bytes[..elt].copy_from_slice(&via_k[lane * elt..(lane + 1) * elt]);
+                let got = u64::from_le_bytes(bytes);
+                let bits = arr[ids[lane] as usize].to_bits();
+                let expected = if lane >= gathered {
+                    // Past the gathered count the register is zeroed, whatever the mask and `src` say
+                    // (hardware behaviour of the half-width forms).
+                    0
+                } else if ($k >> lane) & 1 != 0 {
+                    if $elt64 { bits } else { bits & 0xffff_ffff }
+                } else if $elt64 {
+                    0xfeed_0000_0000_0000 | lane as u64
+                } else {
+                    0xfeed_0000 | lane as u64
+                };
+                assert_eq!(
+                    got, expected,
+                    "lane {lane} of reg={reg} idx={idx} idx64={} elt64={} k={:#x}",
+                    $idx64, $elt64, $k
+                );
+            }
+            via_k
+        }};
+    }
+
+    // One call per distinct (REG, IDX, IDX64, ELT64) shape the 40 names use. The two half-width shapes
+    // get a mask with every bit set, which is what proves the tail past the gathered count is ignored
+    // rather than merged: 4 register lanes with 2 indices, and 4 indices feeding 2 register lanes.
+    both_conventions!(2, 2, false, true, 0b11);
+    both_conventions!(2, 2, true, true, 0b10);
+    both_conventions!(2, 4, false, true, 0b1111);
+    both_conventions!(4, 4, false, false, 0b0101);
+    both_conventions!(4, 4, false, true, 0b1100);
+    both_conventions!(4, 4, true, false, 0b1010);
+    both_conventions!(4, 4, true, true, 0b0110);
+    both_conventions!(4, 2, true, false, 0b1111);
+    both_conventions!(8, 8, false, false, 0b1000_0001);
+    both_conventions!(8, 8, false, true, 0b0100_0010);
+    both_conventions!(8, 8, true, false, 0b0011_0000);
+    both_conventions!(8, 8, true, true, 0b0001_1000);
+    both_conventions!(16, 16, false, false, 0b1010_0101_1010_0101);
+
+    // The EVEX hardware itself, at the 8-lane 64-bit shape and the 16-lane 32-bit one; the VEX side is
+    // cross-checked against `vpgather*qpd` by the two tests above.
+    if std::is_x86_feature_detected!("avx512f") {
+        use std::arch::x86_64::{
+            _mm256_loadu_si256, _mm512_loadu_pd, _mm512_loadu_ps, _mm512_loadu_si512,
+            _mm512_mask_i32gather_pd, _mm512_mask_i32gather_ps, _mm512_storeu_pd, _mm512_storeu_ps,
+        };
+        let src = [7.5f64; 8];
+        let k = 0b1011_0101u8;
+        let mut software = [0.0f64; 8];
+        unsafe {
+            gather_k_mask::<8, 8, false, true>(
+                software.as_mut_ptr().cast(),
+                src.as_ptr().cast(),
+                base,
+                ids.as_ptr().cast(),
+                u64::from(k),
+                8,
+            );
+            let hardware = _mm512_mask_i32gather_pd::<8>(
+                _mm512_loadu_pd(src.as_ptr()),
+                k,
+                _mm256_loadu_si256(ids.as_ptr().cast()),
+                arr.as_ptr(),
+            );
+            let mut out = [0.0f64; 8];
+            _mm512_storeu_pd(out.as_mut_ptr(), hardware);
+            assert_eq!(software, out, "vgatherdpd hardware cross-check");
+        }
+
+        let floats: [f32; 256] = std::array::from_fn(|i| i as f32);
+        let src = [1.25f32; 16];
+        let k = 0b1010_0101_1010_0101u16;
+        let mut software = [0.0f32; 16];
+        unsafe {
+            gather_k_mask::<16, 16, false, false>(
+                software.as_mut_ptr().cast(),
+                src.as_ptr().cast(),
+                floats.as_ptr() as u64,
+                ids.as_ptr().cast(),
+                u64::from(k),
+                4,
+            );
+            let hardware = _mm512_mask_i32gather_ps::<4>(
+                _mm512_loadu_ps(src.as_ptr()),
+                k,
+                _mm512_loadu_si512(ids.as_ptr().cast()),
+                floats.as_ptr(),
+            );
+            let mut out = [0.0f32; 16];
+            _mm512_storeu_ps(out.as_mut_ptr(), hardware);
+            assert_eq!(software, out, "vgatherdps hardware cross-check");
+        }
+    }
+}
+
+/// Scatter is the gather family's mirror: an excluded lane stores nothing, and a lane past the
+/// gathered count has no address at all, so a form whose index vector is shorter than its value
+/// register ignores the extra lanes however the mask is set (measured against hardware, which is also
+/// the cross-check below).
+#[test]
+fn scatter_stores_only_masked_lanes_within_the_index_count() {
+    if !std::is_x86_feature_detected!("avx512f") {
+        return;
+    }
+    const SENTINEL: i32 = -1;
+    // div4.si: two i64 offsets, four i32 value lanes; scale 4 puts offsets 2 and 4 at words 2 and 4.
+    let offsets: [i64; 2] = [2, 4];
+    let values: [i32; 4] = [11, 22, 33, 44];
+    let mut buffer = [SENTINEL; 16];
+    unsafe {
+        scatter_k_mask::<4, 2, true, false>(
+            buffer.as_mut_ptr() as u64,
+            0b1111,
+            offsets.as_ptr().cast(),
+            values.as_ptr().cast(),
+            4,
+        );
+    }
+    let expected = [
+        SENTINEL, SENTINEL, 11, SENTINEL, 22, SENTINEL, SENTINEL, SENTINEL, SENTINEL, SENTINEL,
+        SENTINEL, SENTINEL, SENTINEL, SENTINEL, SENTINEL, SENTINEL,
+    ];
+    assert_eq!(
+        buffer, expected,
+        "the two extra value lanes must have no address, whatever the mask says"
+    );
+
+    // The mask is what selects: clearing the two lanes that do have addresses stores nothing.
+    let mut untouched = [SENTINEL; 16];
+    unsafe {
+        scatter_k_mask::<4, 2, true, false>(
+            untouched.as_mut_ptr() as u64,
+            0b1100,
+            offsets.as_ptr().cast(),
+            values.as_ptr().cast(),
+            4,
+        );
+    }
+    assert_eq!(untouched, [SENTINEL; 16], "a cleared lane stores nothing");
+
+    // Hardware cross-check at the 8-lane shape, where every lane has an address.
+    if std::is_x86_feature_detected!("avx512f") {
+        use std::arch::x86_64::{
+            _mm256_loadu_si256, _mm512_loadu_si512, _mm512_mask_i64scatter_epi32,
+        };
+        let idx: [i64; 8] = std::array::from_fn(|i| i as i64);
+        let vals: [i32; 8] = std::array::from_fn(|i| 100 + i as i32);
+        let k = 0b1010_1010u8;
+        let mut software = [SENTINEL; 16];
+        let mut hardware = [SENTINEL; 16];
+        unsafe {
+            scatter_k_mask::<8, 8, true, false>(
+                software.as_mut_ptr() as u64,
+                u64::from(k),
+                idx.as_ptr().cast(),
+                vals.as_ptr().cast(),
+                4,
+            );
+            _mm512_mask_i64scatter_epi32::<4>(
+                hardware.as_mut_ptr(),
+                k,
+                _mm512_loadu_si512(idx.as_ptr().cast()),
+                _mm256_loadu_si256(vals.as_ptr().cast()),
+            );
+        }
+        assert_eq!(software, hardware, "vpscatterqd hardware cross-check");
     }
 }
 

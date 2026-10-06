@@ -56,8 +56,9 @@ no_such_instruction! {
     fn pmaddwd128 [] (dst: *mut u8, a: *const u8, b: *const u8) ;
     fn lddqu [<const W: usize>] (dst: *mut u8, src: *const u8) ;
     fn pmaddwd256 [] (dst: *mut u8, a: *const u8, b: *const u8) ;
-    fn gather_q_pd_256 [] (dst: *mut u8, src: *const u8, base: u64, vindex: *const u8, mask: *const u8, scale: u64,) ;
-    fn gather_d_pd_256 [] (dst: *mut u8, src: *const u8, base: u64, vindex: *const u8, mask: *const u8, scale: u64,) ;
+    fn gather_sign_mask [<const REG: usize, const IDX: usize, const IDX64: bool, const ELT64: bool>] (dst: *mut u8, src: *const u8, base: u64, offsets: *const u8, mask: *const u8, scale: u64,) ;
+    fn gather_k_mask [<const REG: usize, const IDX: usize, const IDX64: bool, const ELT64: bool>] (dst: *mut u8, src: *const u8, base: u64, offsets: *const u8, mask: u64, scale: u64,) ;
+    fn scatter_k_mask [<const REG: usize, const IDX: usize, const IDX64: bool, const ELT64: bool>] (base: u64, mask: u64, offsets: *const u8, values: *const u8, scale: u64) ;
     fn vpmadd52 [<const LANES: usize, const HI: bool>] (dst: *mut u8, a: *const u8, b: *const u8, c: *const u8,) ;
     fn maxmin_ps [<const LANES: usize, const MAX: bool>] (dst: *mut u8, a: *const u8, b: *const u8,) ;
     fn maxmin_pd [<const LANES: usize, const MAX: bool>] (dst: *mut u8, a: *const u8, b: *const u8,) ;

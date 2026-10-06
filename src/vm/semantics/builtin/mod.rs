@@ -104,8 +104,46 @@ pub(crate) fn exec_builtin(
         | Builtin::X86AesImc
         | Builtin::X86AesKeygenAssist
         | Builtin::X86Permd256
-        | Builtin::X86GatherQPd256
+        | Builtin::X86GatherDD128
+        | Builtin::X86GatherDD256
+        | Builtin::X86GatherDPd128
         | Builtin::X86GatherDPd256
+        | Builtin::X86GatherDPs128
+        | Builtin::X86GatherDPs256
+        | Builtin::X86GatherDQ128
+        | Builtin::X86GatherDQ256
+        | Builtin::X86GatherQD128
+        | Builtin::X86GatherQD256
+        | Builtin::X86GatherQPd128
+        | Builtin::X86GatherQPd256
+        | Builtin::X86GatherQPs128
+        | Builtin::X86GatherQPs256
+        | Builtin::X86GatherQQ128
+        | Builtin::X86GatherQQ256
+        | Builtin::X86GatherDpd512
+        | Builtin::X86GatherDps512
+        | Builtin::X86GatherQpd512
+        | Builtin::X86GatherQps512
+        | Builtin::X86GatherDpq512
+        | Builtin::X86GatherDpi512
+        | Builtin::X86GatherQpq512
+        | Builtin::X86GatherQpi512
+        | Builtin::X86GatherSiv4Si
+        | Builtin::X86GatherSiv2Di
+        | Builtin::X86GatherSiv2Df
+        | Builtin::X86GatherSiv4Sf
+        | Builtin::X86GatherDiv4Si
+        | Builtin::X86GatherDiv2Di
+        | Builtin::X86GatherDiv2Df
+        | Builtin::X86GatherDiv4Sf
+        | Builtin::X86GatherSiv8Si
+        | Builtin::X86GatherSiv4Di
+        | Builtin::X86GatherSiv4Df
+        | Builtin::X86GatherSiv8Sf
+        | Builtin::X86GatherDiv8Si
+        | Builtin::X86GatherDiv4Di
+        | Builtin::X86GatherDiv4Df
+        | Builtin::X86GatherDiv8Sf
         | Builtin::X86Pmadd52Lo128
         | Builtin::X86Pmadd52Hi128
         | Builtin::X86Pmadd52Lo256
@@ -151,6 +189,33 @@ pub(crate) fn exec_builtin(
         | Builtin::X86Crc32U16
         | Builtin::X86Crc32U32
         | Builtin::X86Crc32U64 => x86_64::exec_scalar(builtin, av),
+
+        // A store family: its result is memory, so there is no vector register to write and
+        // no scalar to return.
+        Builtin::X86ScatterDpd512
+        | Builtin::X86ScatterDps512
+        | Builtin::X86ScatterQpd512
+        | Builtin::X86ScatterQps512
+        | Builtin::X86ScatterDpq512
+        | Builtin::X86ScatterDpi512
+        | Builtin::X86ScatterQpq512
+        | Builtin::X86ScatterQpi512
+        | Builtin::X86ScatterSiv4Si
+        | Builtin::X86ScatterSiv2Di
+        | Builtin::X86ScatterSiv2Df
+        | Builtin::X86ScatterSiv4Sf
+        | Builtin::X86ScatterDiv4Si
+        | Builtin::X86ScatterDiv2Di
+        | Builtin::X86ScatterDiv2Df
+        | Builtin::X86ScatterDiv4Sf
+        | Builtin::X86ScatterSiv8Si
+        | Builtin::X86ScatterSiv4Di
+        | Builtin::X86ScatterSiv4Df
+        | Builtin::X86ScatterSiv8Sf
+        | Builtin::X86ScatterDiv8Si
+        | Builtin::X86ScatterDiv4Di
+        | Builtin::X86ScatterDiv4Df
+        | Builtin::X86ScatterDiv8Sf => x86_64::exec_store(builtin, av),
 
         // Neither of these is one CPU's: every architecture has a hint form that changes nothing
         // and a breakpoint instruction, so the body names whichever this build's CPU is.

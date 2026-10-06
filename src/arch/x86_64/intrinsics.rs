@@ -377,51 +377,164 @@ pub(crate) unsafe fn pmaddwd256(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
 }
 
-/// Software model of `vgatherqpd` (`llvm.x86.avx2.gather.q.pd.256`): a mask lane reads from memory only if its sign bit is set,
-/// reading `base + vindex*scale` (f64); otherwise it copies the src lane. **Lanes whose mask is off
-/// never touch memory** (fault suppression — wild-index lanes masked off are also not read by hardware).
-/// Addresses use 64-bit wrapping arithmetic (same as hardware). scale legal values are 1/2/4/8 (constrained by LLVM emission).
-pub(crate) unsafe fn gather_q_pd_256(
-    dst: *mut u8,
+/// The address of one gather lane: `base + sign_extend(offset[lane]) * scale`, in wrapping 64-bit
+/// arithmetic, exactly as the hardware computes it. The index's signed width is the family's
+/// (`IDX64` selects i64 over i32), and `scale` arrives as a runtime operand carrying the intrinsic's
+/// const generic (the legal values are 1/2/4/8, which LLVM enforces at emission).
+///
+/// Computing an address touches no memory, so an address for a lane the mask excludes is harmless on
+/// its own; the load is what has to stay conditional.
+#[inline]
+unsafe fn gather_addr<const IDX64: bool>(
+    base: u64,
+    offsets: *const u8,
+    lane: usize,
+    scale: u64,
+) -> u64 {
+    let offset = if IDX64 {
+        (unsafe { (offsets as *const i64).add(lane).read_unaligned() }) as u64
+    } else {
+        (unsafe { (offsets as *const i32).add(lane).read_unaligned() }) as i64 as u64
+    };
+    base.wrapping_add(offset.wrapping_mul(scale))
+}
+
+/// One gather lane's value: the loaded element when the mask includes the lane, the pre-existing
+/// `src` lane otherwise. Only the included arm touches memory, which is the mask's whole purpose: an
+/// excluded lane cannot fault, so a wild index behind a clear mask stays legal, as on hardware.
+#[inline]
+unsafe fn gather_lane<const IDX64: bool, const ELT64: bool>(
     src: *const u8,
     base: u64,
-    vindex: *const u8,
-    mask: *const u8,
+    offsets: *const u8,
+    lane: usize,
+    included: bool,
     scale: u64,
-) {
-    for i in 0..4 {
-        let mask_lane = unsafe { (mask as *const u64).add(i).read_unaligned() };
-        let lane = if mask_lane as i64 >= 0 {
-            unsafe { (src as *const u64).add(i).read_unaligned() }
+) -> u64 {
+    if included {
+        let address = unsafe { gather_addr::<IDX64>(base, offsets, lane, scale) };
+        if ELT64 {
+            unsafe { (address as *const u64).read_unaligned() }
         } else {
-            let idx = unsafe { (vindex as *const i64).add(i).read_unaligned() };
-            let addr = base.wrapping_add((idx as u64).wrapping_mul(scale));
-            unsafe { (addr as *const u64).read_unaligned() }
-        };
-        unsafe { (dst as *mut u64).add(i).write_unaligned(lane) };
+            u64::from(unsafe { (address as *const u32).read_unaligned() })
+        }
+    } else if ELT64 {
+        unsafe { (src as *const u64).add(lane).read_unaligned() }
+    } else {
+        u64::from(unsafe { (src as *const u32).add(lane).read_unaligned() })
     }
 }
 
-/// Software model of `vgatherdpd` (256-bit form) (`llvm.x86.avx2.gather.d.pd.256`):
-/// Same shape as the q variant, but indices are 4×i32, sign-extended to 64 bits before address arithmetic.
-pub(crate) unsafe fn gather_d_pd_256(
+#[inline]
+unsafe fn gather_store<const ELT64: bool>(dst: *mut u8, lane: usize, value: u64) {
+    if ELT64 {
+        unsafe { (dst as *mut u64).add(lane).write_unaligned(value) };
+    } else {
+        unsafe { (dst as *mut u32).add(lane).write_unaligned(value as u32) };
+    }
+}
+
+/// AVX2 (VEX) gather, the `llvm.x86.avx2.gather.*` family: the mask is a vector whose element *sign
+/// bit* selects memory, so the mask element width is the result element width and a set sign bit
+/// means "load". The result lane takes the loaded element or the `src` lane, and an excluded lane
+/// never touches memory.
+///
+/// The two lane counts are separate because a form can hold fewer indices than the result register
+/// has lanes: `q.d`/`q.ps` at 128 bits carry two i64 offsets in a 128-bit index register but name a
+/// 128-bit result, and hardware gathers two elements and zeroes the rest, ignoring both the mask bits
+/// and the `src` lanes above the gathered count (measured, not inferred). `REG` is the result
+/// register's lane count, `IDX` the index vector's, and the gathered count is their minimum.
+pub(crate) unsafe fn gather_sign_mask<
+    const REG: usize,
+    const IDX: usize,
+    const IDX64: bool,
+    const ELT64: bool,
+>(
     dst: *mut u8,
     src: *const u8,
     base: u64,
-    vindex: *const u8,
+    offsets: *const u8,
     mask: *const u8,
     scale: u64,
 ) {
-    for i in 0..4 {
-        let mask_lane = unsafe { (mask as *const u64).add(i).read_unaligned() };
-        let lane = if mask_lane as i64 >= 0 {
-            unsafe { (src as *const u64).add(i).read_unaligned() }
+    let gathered = if IDX < REG { IDX } else { REG };
+    for lane in 0..REG {
+        if lane >= gathered {
+            unsafe { gather_store::<ELT64>(dst, lane, 0) };
+            continue;
+        }
+        // The sign bit is the whole mask, so the mask element is read at the result element's width.
+        let sign = if ELT64 {
+            unsafe { (mask as *const i64).add(lane).read_unaligned() }
         } else {
-            let idx = unsafe { (vindex as *const i32).add(i).read_unaligned() };
-            let addr = base.wrapping_add((idx as i64 as u64).wrapping_mul(scale));
-            unsafe { (addr as *const u64).read_unaligned() }
+            i64::from(unsafe { (mask as *const i32).add(lane).read_unaligned() })
         };
-        unsafe { (dst as *mut u64).add(i).write_unaligned(lane) };
+        let value =
+            unsafe { gather_lane::<IDX64, ELT64>(src, base, offsets, lane, sign < 0, scale) };
+        unsafe { gather_store::<ELT64>(dst, lane, value) };
+    }
+}
+
+/// AVX-512 (EVEX) gather, the `llvm.x86.avx512.gather*.512`, `gather3siv*` and `gather3div*` family:
+/// the mask is a k register whose low bits select memory, only those bits are meaningful, and a
+/// narrower k simply leaves the upper bits clear. Everything else is the VEX convention, including
+/// the zeroed tail when the index vector is shorter than the result register (`div4.si` and `div4.sf`
+/// at 128 bits: two i64 offsets, two gathered elements, the upper 64 bits zeroed).
+pub(crate) unsafe fn gather_k_mask<
+    const REG: usize,
+    const IDX: usize,
+    const IDX64: bool,
+    const ELT64: bool,
+>(
+    dst: *mut u8,
+    src: *const u8,
+    base: u64,
+    offsets: *const u8,
+    mask: u64,
+    scale: u64,
+) {
+    let gathered = if IDX < REG { IDX } else { REG };
+    for lane in 0..REG {
+        let value = if lane >= gathered {
+            0
+        } else {
+            unsafe {
+                gather_lane::<IDX64, ELT64>(src, base, offsets, lane, mask >> lane & 1 != 0, scale)
+            }
+        };
+        unsafe { gather_store::<ELT64>(dst, lane, value) };
+    }
+}
+
+/// AVX-512 scatter, the `llvm.x86.avx512.scatter*` family: the gather family's mirror. A lane the
+/// mask selects stores its value lane to `base + sign_extend(offset[lane]) * scale`; a lane the mask
+/// excludes stores nothing, so it cannot fault either. There is no merge and no zeroed tail: a lane
+/// past the gathered count has no address to store to.
+pub(crate) unsafe fn scatter_k_mask<
+    const REG: usize,
+    const IDX: usize,
+    const IDX64: bool,
+    const ELT64: bool,
+>(
+    base: u64,
+    mask: u64,
+    offsets: *const u8,
+    values: *const u8,
+    scale: u64,
+) {
+    let gathered = if IDX < REG { IDX } else { REG };
+    for lane in 0..gathered {
+        if mask >> lane & 1 == 0 {
+            continue;
+        }
+        let address = unsafe { gather_addr::<IDX64>(base, offsets, lane, scale) };
+        if ELT64 {
+            let value = unsafe { (values as *const u64).add(lane).read_unaligned() };
+            unsafe { (address as *mut u64).write_unaligned(value) };
+        } else {
+            let value = unsafe { (values as *const u32).add(lane).read_unaligned() };
+            unsafe { (address as *mut u32).write_unaligned(value) };
+        }
     }
 }
 

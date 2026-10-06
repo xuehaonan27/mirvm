@@ -82,8 +82,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
      `cargo test --locked --all-features` and passed 3/3 in isolation (0.21–0.86s).
   4. `signal_delivery::wait_closed::wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread`
      failed in that same full run and passed 3/3 in isolation (0.15–0.19s).
+  5. `native::tests::cache_key_separates_c_compiler_identities`, seen once at load average 36–57 while
+     the lib suite took 37s instead of its usual 9s. Same signature as the rest: not reproducible
+     outside a loaded host.
 
-  One tree produced 494/0, 492/2 and 500/0 across runs. What is missing is the mechanism: which of these
+  One tree's library suite measured 498/0, 497/1 and 496/2 across runs. What is missing is the mechanism: which of these
   is a real scheduler-dependent engine step, which is only a budget too tight for a loaded host, and
   whether the suite should size its own thread count and deadlines from the machine instead of from
   constants.
@@ -291,19 +294,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Corpus-driven product debt
 
-- **C6** `UNSCHEDULED`: intrinsic queue residual — the remaining gather forms. The `pclmulqdq.256/.512`
-  and VAES single-round families are complete through the four contact points: the guest name tables
-  (`llvm.x86.pclmulqdq.256/.512`, and `llvm.x86.aesni.aesenc/.aesenclast/.aesdec/.aesdeclast` at
-  `.256`/`.512`), the IR variants, the `arch` leaves with their aarch64 mirror signatures, and the
-  interpreter arms. Each also has the method's fifth contact point, the `arch` unit test:
-  `pclmulqdq_wider_forms_match_their_128_bit_lanes_and_hw` and
-  `aes_wider_forms_match_their_128_bit_lanes_and_hw` compare the wider form against the 128-bit leaf
-  applied per lane, pin the width with a sentinel outside it, and cross-check both against the
-  hardware intrinsics. `png_round` is the wider carryless multiply's witness from real code; no corpus
-  crate reaches VAES, so `x86_crypto_probe` prints every form's bytes for the native differential.
-  That is what turned `png_round` from the live Trap into a PASS. Gather is a different shape (base +
-  index vector + mask + scale, with mask and fault semantics to settle) and stays on real demand.
-  Untriggered forms keep a loud Trap.
 - **C8** `UNSCHEDULED`: Rust-side ctor / `.init_array` (linkme family) has never entered the corpus.
   Project Rust-side ctor/linkme on demand; nothing is pre-funded. C archive constructors (DT_INIT and
   `.init_array`) are allowed by partition, while bare `.init`/`.fini` stay refused.

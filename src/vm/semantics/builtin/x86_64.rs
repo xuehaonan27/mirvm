@@ -196,33 +196,279 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             }
             0
         }
-        Builtin::X86GatherQPd256 | Builtin::X86GatherDPd256 => {
+        Builtin::X86GatherDD128
+        | Builtin::X86GatherDD256
+        | Builtin::X86GatherDPd128
+        | Builtin::X86GatherDPd256
+        | Builtin::X86GatherDPs128
+        | Builtin::X86GatherDPs256
+        | Builtin::X86GatherDQ128
+        | Builtin::X86GatherDQ256
+        | Builtin::X86GatherQD128
+        | Builtin::X86GatherQD256
+        | Builtin::X86GatherQPd128
+        | Builtin::X86GatherQPd256
+        | Builtin::X86GatherQPs128
+        | Builtin::X86GatherQPs256
+        | Builtin::X86GatherQQ128
+        | Builtin::X86GatherQQ256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("gather.pd.256 return form is not an indirect vector");
+                engine_abort("gather return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
-            // (src vec, base scalar pointer, vindex vec, mask vec, scale imm)
+            // (src vec, base scalar pointer, offsets vec, mask, scale)
+            let (src, base, offsets, mask, scale) = (
+                a(0) as *const u8,
+                a(1),
+                a(2) as *const u8,
+                a(3) as *const u8,
+                a(4),
+            );
             unsafe {
-                if matches!(builtin, Builtin::X86GatherQPd256) {
-                    crate::arch::intrinsics::gather_q_pd_256(
-                        dst,
-                        a(0) as *const u8,
-                        a(1),
-                        a(2) as *const u8,
-                        a(3) as *const u8,
-                        a(4),
-                    );
-                } else {
-                    crate::arch::intrinsics::gather_d_pd_256(
-                        dst,
-                        a(0) as *const u8,
-                        a(1),
-                        a(2) as *const u8,
-                        a(3) as *const u8,
-                        a(4),
-                    );
+                match builtin {
+                    Builtin::X86GatherDD128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDD256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<8, 8, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDPd128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<2, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDPd256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDPs128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDPs256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<8, 8, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDQ128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<2, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDQ256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQD128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 2, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQD256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQPd128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<2, 2, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQPd256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQPs128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 2, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQPs256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQQ128 => {
+                        crate::arch::intrinsics::gather_sign_mask::<2, 2, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQQ256 => {
+                        crate::arch::intrinsics::gather_sign_mask::<4, 4, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    // The outer arm admitted exactly this family, so a variant outside it cannot arrive here.
+                    _ => engine_abort("gather variant outside its family arm"),
                 }
-            }
+            };
+            0
+        }
+        Builtin::X86GatherDpd512
+        | Builtin::X86GatherDps512
+        | Builtin::X86GatherQpd512
+        | Builtin::X86GatherQps512
+        | Builtin::X86GatherDpq512
+        | Builtin::X86GatherDpi512
+        | Builtin::X86GatherQpq512
+        | Builtin::X86GatherQpi512
+        | Builtin::X86GatherSiv4Si
+        | Builtin::X86GatherSiv2Di
+        | Builtin::X86GatherSiv2Df
+        | Builtin::X86GatherSiv4Sf
+        | Builtin::X86GatherDiv4Si
+        | Builtin::X86GatherDiv2Di
+        | Builtin::X86GatherDiv2Df
+        | Builtin::X86GatherDiv4Sf
+        | Builtin::X86GatherSiv8Si
+        | Builtin::X86GatherSiv4Di
+        | Builtin::X86GatherSiv4Df
+        | Builtin::X86GatherSiv8Sf
+        | Builtin::X86GatherDiv8Si
+        | Builtin::X86GatherDiv4Di
+        | Builtin::X86GatherDiv4Df
+        | Builtin::X86GatherDiv8Sf => {
+            let Some(dst) = ret_dst else {
+                engine_abort("gather return form is not an indirect vector");
+            };
+            let dst = dst as *mut u8;
+            // (src vec, base scalar pointer, offsets vec, mask, scale)
+            let (src, base, offsets, mask, scale) =
+                (a(0) as *const u8, a(1), a(2) as *const u8, a(3), a(4));
+            unsafe {
+                match builtin {
+                    Builtin::X86GatherDpd512 => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDps512 => {
+                        crate::arch::intrinsics::gather_k_mask::<16, 16, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQpd512 => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQps512 => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDpq512 => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDpi512 => {
+                        crate::arch::intrinsics::gather_k_mask::<16, 16, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQpq512 => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherQpi512 => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv4Si => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv2Di => {
+                        crate::arch::intrinsics::gather_k_mask::<2, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv2Df => {
+                        crate::arch::intrinsics::gather_k_mask::<2, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv4Sf => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv4Si => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 2, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv2Di => {
+                        crate::arch::intrinsics::gather_k_mask::<2, 2, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv2Df => {
+                        crate::arch::intrinsics::gather_k_mask::<2, 2, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv4Sf => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 2, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv8Si => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv4Di => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv4Df => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, false, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherSiv8Sf => {
+                        crate::arch::intrinsics::gather_k_mask::<8, 8, false, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv8Si => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv4Di => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv4Df => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, true, true>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    Builtin::X86GatherDiv8Sf => {
+                        crate::arch::intrinsics::gather_k_mask::<4, 4, true, false>(
+                            dst, src, base, offsets, mask, scale,
+                        )
+                    }
+                    // The outer arm admitted exactly this family, so a variant outside it cannot arrive here.
+                    _ => engine_abort("gather variant outside its family arm"),
+                }
+            };
             0
         }
         Builtin::X86Pmadd52Lo128
@@ -489,4 +735,140 @@ pub(super) fn exec_scalar(builtin: &Builtin, av: &[u64]) -> u64 {
         Builtin::X86Crc32U64 => unsafe { crate::arch::intrinsics::crc32_u64(a(0), a(1)) },
         _ => engine_abort("non-scalar builtin reached the x86_64 scalar lane"),
     }
+}
+
+/// Executes an intrinsic that stores to memory and returns nothing.
+///
+/// `av` is the ABI slot array in the order LLVM gives every scatter form:
+/// `(base pointer, k mask, offsets vector, values vector, scale)`.
+pub(super) fn exec_store(builtin: &Builtin, av: &[u64]) -> u64 {
+    let a = |i: usize| av[i];
+    let (base, mask, offsets, values, scale) =
+        (a(0), a(1), a(2) as *const u8, a(3) as *const u8, a(4));
+    unsafe {
+        match builtin {
+            Builtin::X86ScatterDpd512 => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, false, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDps512 => {
+                crate::arch::intrinsics::scatter_k_mask::<16, 16, false, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterQpd512 => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, true, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterQps512 => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, true, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDpq512 => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, false, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDpi512 => {
+                crate::arch::intrinsics::scatter_k_mask::<16, 16, false, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterQpq512 => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, true, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterQpi512 => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, true, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv4Si => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, false, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv2Di => {
+                crate::arch::intrinsics::scatter_k_mask::<2, 4, false, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv2Df => {
+                crate::arch::intrinsics::scatter_k_mask::<2, 4, false, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv4Sf => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, false, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv4Si => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 2, true, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv2Di => {
+                crate::arch::intrinsics::scatter_k_mask::<2, 2, true, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv2Df => {
+                crate::arch::intrinsics::scatter_k_mask::<2, 2, true, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv4Sf => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 2, true, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv8Si => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, false, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv4Di => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, false, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv4Df => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, false, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterSiv8Sf => {
+                crate::arch::intrinsics::scatter_k_mask::<8, 8, false, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv8Si => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, true, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv4Di => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, true, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv4Df => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, true, true>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            Builtin::X86ScatterDiv8Sf => {
+                crate::arch::intrinsics::scatter_k_mask::<4, 4, true, false>(
+                    base, mask, offsets, values, scale,
+                )
+            }
+            _ => engine_abort("scatter variant outside the store lane"),
+        }
+    };
+    0
 }

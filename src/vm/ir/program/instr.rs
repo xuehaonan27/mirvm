@@ -149,13 +149,144 @@ pub enum Builtin {
     /// `llvm.x86.avx2.permd(a, idx)` (`_mm256_permutevar8x32_epi32`): a cross-lane dword permute,
     /// `dst.dword[i] = a.dword[idx.dword[i] & 7]`.
     X86Permd256,
-    /// `llvm.x86.avx2.gather.q.pd.256(src, base, vindex, mask, scale)`: a per-lane conditional gather.
-    /// A mask lane whose sign bit is set reads the f64 at `base + vindex * scale`; an unset lane copies
-    /// the `src` lane instead. The unset lanes never touch memory, which is what suppresses faults.
-    X86GatherQPd256,
-    /// `llvm.x86.avx2.gather.d.pd.256`: as above, but `vindex` holds four i32 values that are
-    /// sign-extended to 64 bits for the address arithmetic.
+    /// The gather families. `llvm.x86.avx2.gather.*(src, base, offsets, mask, scale)` takes its
+    /// mask as a vector of sign bits, one per result element; `llvm.x86.avx512.gather*.512`,
+    /// `gather3siv*` and `gather3div*` take it as a k register. What differs inside a family is
+    /// only the result lane count and whether offsets and elements are 64 or 32 bits, so each
+    /// name is one variant and the semantics lane names the shape. A lane the mask excludes is
+    /// copied from `src` and never dereferenced, which is what suppresses faults.
+    /// `llvm.x86.avx2.gather.d.d`.
+    X86GatherDD128,
+    /// `llvm.x86.avx2.gather.d.d.256`.
+    X86GatherDD256,
+    /// `llvm.x86.avx2.gather.d.pd`.
+    X86GatherDPd128,
+    /// `llvm.x86.avx2.gather.d.pd.256`.
     X86GatherDPd256,
+    /// `llvm.x86.avx2.gather.d.ps`.
+    X86GatherDPs128,
+    /// `llvm.x86.avx2.gather.d.ps.256`.
+    X86GatherDPs256,
+    /// `llvm.x86.avx2.gather.d.q`.
+    X86GatherDQ128,
+    /// `llvm.x86.avx2.gather.d.q.256`.
+    X86GatherDQ256,
+    /// `llvm.x86.avx2.gather.q.d`.
+    X86GatherQD128,
+    /// `llvm.x86.avx2.gather.q.d.256`.
+    X86GatherQD256,
+    /// `llvm.x86.avx2.gather.q.pd`.
+    X86GatherQPd128,
+    /// `llvm.x86.avx2.gather.q.pd.256`.
+    X86GatherQPd256,
+    /// `llvm.x86.avx2.gather.q.ps`.
+    X86GatherQPs128,
+    /// `llvm.x86.avx2.gather.q.ps.256`.
+    X86GatherQPs256,
+    /// `llvm.x86.avx2.gather.q.q`.
+    X86GatherQQ128,
+    /// `llvm.x86.avx2.gather.q.q.256`.
+    X86GatherQQ256,
+    /// `llvm.x86.avx512.gather.dpd.512`.
+    X86GatherDpd512,
+    /// `llvm.x86.avx512.gather.dps.512`.
+    X86GatherDps512,
+    /// `llvm.x86.avx512.gather.qpd.512`.
+    X86GatherQpd512,
+    /// `llvm.x86.avx512.gather.qps.512`.
+    X86GatherQps512,
+    /// `llvm.x86.avx512.gather.dpq.512`.
+    X86GatherDpq512,
+    /// `llvm.x86.avx512.gather.dpi.512`.
+    X86GatherDpi512,
+    /// `llvm.x86.avx512.gather.qpq.512`.
+    X86GatherQpq512,
+    /// `llvm.x86.avx512.gather.qpi.512`.
+    X86GatherQpi512,
+    /// `llvm.x86.avx512.gather3siv4.si`.
+    X86GatherSiv4Si,
+    /// `llvm.x86.avx512.gather3siv2.di`.
+    X86GatherSiv2Di,
+    /// `llvm.x86.avx512.gather3siv2.df`.
+    X86GatherSiv2Df,
+    /// `llvm.x86.avx512.gather3siv4.sf`.
+    X86GatherSiv4Sf,
+    /// `llvm.x86.avx512.gather3div4.si`.
+    X86GatherDiv4Si,
+    /// `llvm.x86.avx512.gather3div2.di`.
+    X86GatherDiv2Di,
+    /// `llvm.x86.avx512.gather3div2.df`.
+    X86GatherDiv2Df,
+    /// `llvm.x86.avx512.gather3div4.sf`.
+    X86GatherDiv4Sf,
+    /// `llvm.x86.avx512.gather3siv8.si`.
+    X86GatherSiv8Si,
+    /// `llvm.x86.avx512.gather3siv4.di`.
+    X86GatherSiv4Di,
+    /// `llvm.x86.avx512.gather3siv4.df`.
+    X86GatherSiv4Df,
+    /// `llvm.x86.avx512.gather3siv8.sf`.
+    X86GatherSiv8Sf,
+    /// `llvm.x86.avx512.gather3div8.si`.
+    X86GatherDiv8Si,
+    /// `llvm.x86.avx512.gather3div4.di`.
+    X86GatherDiv4Di,
+    /// `llvm.x86.avx512.gather3div4.df`.
+    X86GatherDiv4Df,
+    /// `llvm.x86.avx512.gather3div8.sf`.
+    X86GatherDiv8Sf,
+    /// The AVX-512 scatter family: the gather families' mirror, storing instead of loading.
+    /// `(base, mask, offsets, values, scale)` in the k-register convention, and only the mask's
+    /// set lanes store, so an excluded lane cannot fault. There is nothing to merge and nothing to
+    /// zero: a lane past the gathered count has no address at all.
+    /// `llvm.x86.avx512.scatter.dpd.512`.
+    X86ScatterDpd512,
+    /// `llvm.x86.avx512.scatter.dps.512`.
+    X86ScatterDps512,
+    /// `llvm.x86.avx512.scatter.qpd.512`.
+    X86ScatterQpd512,
+    /// `llvm.x86.avx512.scatter.qps.512`.
+    X86ScatterQps512,
+    /// `llvm.x86.avx512.scatter.dpq.512`.
+    X86ScatterDpq512,
+    /// `llvm.x86.avx512.scatter.dpi.512`.
+    X86ScatterDpi512,
+    /// `llvm.x86.avx512.scatter.qpq.512`.
+    X86ScatterQpq512,
+    /// `llvm.x86.avx512.scatter.qpi.512`.
+    X86ScatterQpi512,
+    /// `llvm.x86.avx512.scattersiv4.si`.
+    X86ScatterSiv4Si,
+    /// `llvm.x86.avx512.scattersiv2.di`.
+    X86ScatterSiv2Di,
+    /// `llvm.x86.avx512.scattersiv2.df`.
+    X86ScatterSiv2Df,
+    /// `llvm.x86.avx512.scattersiv4.sf`.
+    X86ScatterSiv4Sf,
+    /// `llvm.x86.avx512.scatterdiv4.si`.
+    X86ScatterDiv4Si,
+    /// `llvm.x86.avx512.scatterdiv2.di`.
+    X86ScatterDiv2Di,
+    /// `llvm.x86.avx512.scatterdiv2.df`.
+    X86ScatterDiv2Df,
+    /// `llvm.x86.avx512.scatterdiv4.sf`.
+    X86ScatterDiv4Sf,
+    /// `llvm.x86.avx512.scattersiv8.si`.
+    X86ScatterSiv8Si,
+    /// `llvm.x86.avx512.scattersiv4.di`.
+    X86ScatterSiv4Di,
+    /// `llvm.x86.avx512.scattersiv4.df`.
+    X86ScatterSiv4Df,
+    /// `llvm.x86.avx512.scattersiv8.sf`.
+    X86ScatterSiv8Sf,
+    /// `llvm.x86.avx512.scatterdiv8.si`.
+    X86ScatterDiv8Si,
+    /// `llvm.x86.avx512.scatterdiv4.di`.
+    X86ScatterDiv4Di,
+    /// `llvm.x86.avx512.scatterdiv4.df`.
+    X86ScatterDiv4Df,
+    /// `llvm.x86.avx512.scatterdiv8.sf`.
+    X86ScatterDiv8Sf,
     /// `llvm.x86.avx512.vpmadd52l/h.uq.128/256/512(a, b, c)`: a 52-bit unsigned multiply-add where
     /// `dst.qword[i] = a[i] + (b[i][51:0] * c[i][51:0])`, taking bits 51:0 of the product for the `l`
     /// forms and bits 103:52 for the `h` forms. The addition wraps at 64 bits.
