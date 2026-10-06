@@ -7,7 +7,7 @@ use crate::cargoless::manifest::{
 };
 
 use super::fresh::{dep_unit_class, req_to_ranges};
-use super::{EdgeVersions, FeatureOverrides, PkgSource, UnitClass, registry_entry};
+use super::{EdgeVersions, FeatureOverrides, PkgSource, UnitClass, index_version};
 
 // ---------- feature unification ----------
 
@@ -133,11 +133,7 @@ fn ensure_registry_node(
     if tables.contains_key(&(name.to_string(), version.clone(), class)) {
         return Ok(());
     }
-    let vs = registry_entry(src, name)?;
-    let iv = vs
-        .iter()
-        .find(|v| v.version == *version)
-        .ok_or_else(|| format!("{name} {version} is not in the index"))?;
+    let iv = index_version(src, name, version)?;
     let mut table = FeatTable::new();
     for (f, vals) in &iv.features {
         let parsed = vals

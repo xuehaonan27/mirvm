@@ -9,7 +9,7 @@ use super::features::{FeatDep, FeatNode, NodeKey, edge_version};
 use super::fresh::dep_unit_class;
 use super::{
     CRATES_IO_LOCK_SOURCE, EdgeVersions, PkgSource, SourceOverrides, UnitClass,
-    identity_package_name, identity_source, registry_entry, registry_identity,
+    identity_package_name, identity_source, index_version, registry_entry, registry_identity,
 };
 
 pub(super) fn fill_unused_patches(
@@ -248,11 +248,7 @@ pub(super) fn fill_lock_dependency_lines(
         // write that row with no dependency lines, which the next run reads back as a missing edge
         // assignment for every dependency the index gives it.
         let identity = registry_identity(&name, &source);
-        let vs = registry_entry(src, &identity)?;
-        let iv = vs
-            .iter()
-            .find(|v| v.version == version)
-            .ok_or_else(|| format!("{name} {version} is not in the index"))?;
+        let iv = index_version(src, &identity, &version)?;
         edges.insert(
             (name.clone(), version.clone(), Some(source)),
             iv.deps

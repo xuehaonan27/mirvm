@@ -312,8 +312,24 @@ impl Registry {
 
     /// Read an index entry (use cache on hit; otherwise read from the backend selected by config and cache it).
     pub fn index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
+        self.read_index(source, name, false)
+    }
+
+    /// The same entry with the backend's own copy revalidated first.
+    ///
+    /// The sparse backend keeps one file per crate, written when it was first downloaded, and
+    /// `index_entry` serves it unchanged forever after. That makes the file a snapshot: a version
+    /// published after it was written is invisible to every later run, including a lock that names
+    /// it — and reading a Cargo-written lock without revalidating therefore refused versions Cargo
+    /// had just resolved. Offline mode cannot revalidate and falls back to the snapshot; a backend
+    /// with no remote to ask (a local registry or a directory) has nothing to revalidate from.
+    pub fn refresh_index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
+        self.read_index(source, name, true)
+    }
+
+    fn read_index(&self, source: &str, name: &str, refresh: bool) -> Result<IndexEntry, RErr> {
         let cache_key = format!("{source}\u{1f}{name}");
-        if let Some(entry) = self.index_cache.borrow().get(&cache_key) {
+        if !refresh && let Some(entry) = self.index_cache.borrow().get(&cache_key) {
             return Ok(entry.clone());
         }
         let mut endpoint = self.endpoint(source)?;
@@ -321,7 +337,7 @@ impl Registry {
             Backend::Sparse { base } => {
                 self.ensure_download_config(&mut endpoint)?;
                 let file = self.index_file(source, name)?;
-                if file.is_file() {
+                if file.is_file() && (!refresh || self.offline) {
                     std::fs::read_to_string(&file)
                         .map_err(|e| format!("index cache read failed {}: {e}", file.display()))?
                 } else {

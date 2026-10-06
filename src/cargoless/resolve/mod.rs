@@ -32,7 +32,7 @@ use super::manifest::{
     DepKind, DepSource, GitSpec, IncompatibleRustVersions, PackageManifest, RegistryReference,
     current_rust_version,
 };
-use super::registry::{IndexEntry, Registry};
+use super::registry::{IndexEntry, IndexVersion, Registry};
 
 use features::unify_features;
 use fresh::{FreshSolveContext, solve_fresh};
@@ -54,6 +54,15 @@ mod tests;
 pub trait PkgSource {
     fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String>;
     fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String>;
+    /// The same entry with the source's own copy revalidated rather than served from a snapshot.
+    ///
+    /// A registry's index copy is written once and read unchanged afterwards, so a version published
+    /// after it was written is invisible until something asks for a refresh. Reading a lock is what
+    /// asks: a lock names exact versions, and whoever wrote it may have seen a newer index. Sources
+    /// that keep no remote copy to revalidate from answer exactly as `index_entry` does.
+    fn refresh_index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String> {
+        self.index_entry(source, name)
+    }
     fn ensure_source(
         &mut self,
         source: &str,
@@ -78,6 +87,9 @@ impl PkgSource for Registry {
     }
     fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String> {
         Registry::index_entry(self, source, name)
+    }
+    fn refresh_index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String> {
+        Registry::refresh_index_entry(self, source, name)
     }
     fn ensure_source(
         &mut self,
@@ -590,6 +602,39 @@ fn identity_source(identity: &str) -> Option<&str> {
 fn registry_entry(src: &mut impl PkgSource, identity: &str) -> Result<IndexEntry, String> {
     let source = identity_source(identity).unwrap_or(CRATES_IO_LOCK_SOURCE);
     src.index_entry(source, identity_package_name(identity))
+}
+
+fn registry_entry_refreshed(
+    src: &mut impl PkgSource,
+    identity: &str,
+) -> Result<IndexEntry, String> {
+    let source = identity_source(identity).unwrap_or(CRATES_IO_LOCK_SOURCE);
+    src.refresh_index_entry(source, identity_package_name(identity))
+}
+
+/// One exact version's index metadata, revalidating the source's index copy before giving up.
+///
+/// The version names come from a lock, and the copy a source keeps is a snapshot: whoever wrote the
+/// lock may have seen a newer index than this process has, so a version that is absent is a reason to
+/// revalidate rather than a reason to fail. The lock contract accepts a locked version whether or not
+/// a fresh solve would pick it (a yanked one included), so the refusal only stands once a refresh has
+/// looked too.
+fn index_version(
+    src: &mut impl PkgSource,
+    identity: &str,
+    version: &Version,
+) -> Result<IndexVersion, String> {
+    let found = |entry: &IndexEntry| entry.iter().find(|v| v.version == *version).cloned();
+    if let Some(iv) = found(&registry_entry(src, identity)?) {
+        return Ok(iv);
+    }
+    if let Some(iv) = found(&registry_entry_refreshed(src, identity)?) {
+        return Ok(iv);
+    }
+    Err(format!(
+        "{} {version} is not in the index",
+        identity_package_name(identity)
+    ))
 }
 
 #[derive(Clone, Debug, Default)]

@@ -8,7 +8,7 @@ use crate::cargoless::manifest::{DepKind, PackageManifest};
 use super::features::{FeatDep, FeatNode, NodeKey, decls_to_featdeps, edge_version, root_featdeps};
 use super::{
     CRATES_IO_LOCK_SOURCE, EdgeVersions, PkgSource, Unit, UnitClass, UnitDep,
-    identity_package_name, identity_source, registry_entry,
+    identity_package_name, identity_source, index_version,
 };
 
 // ---------- unit assembly ----------
@@ -161,11 +161,7 @@ fn node_featdeps(
     if let Some(m) = path_manifests.get(name) {
         return decls_to_featdeps(&m.deps);
     }
-    let vs = registry_entry(src, name)?;
-    let iv = vs
-        .iter()
-        .find(|v| v.version == *version)
-        .ok_or_else(|| format!("{name} {version} is not in the index"))?;
+    let iv = index_version(src, name, version)?;
     Ok(iv
         .deps
         .iter()

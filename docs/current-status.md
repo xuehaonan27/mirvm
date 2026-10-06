@@ -115,7 +115,7 @@ Measured on this tree against the Linux x86_64 release build, with the cases tha
 `the proxy helper` ([environment.md](environment.md)); `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 504 pass, 0 fail, 1 ignored. The suite gives each case a
+- `cargo test --locked --all-features`: 505 pass, 0 fail, 1 ignored. The suite gives each case a
   thread, so on a loaded shared host a timing-sensitive case can fail without a defect: one run here
   failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` and
   `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread`, and both pass repeatedly in

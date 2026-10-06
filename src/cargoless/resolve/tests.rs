@@ -11,6 +11,9 @@ use semver::VersionReq;
 struct FakeSource {
     root: PathBuf,
     index: BTreeMap<String, Vec<IndexVersion>>,
+    /// What a revalidated index copy holds, for crates whose cached snapshot a refresh extends. A
+    /// real registry overwrites its cached file, so a refresh here replaces the snapshot entry.
+    refresh_only: BTreeMap<String, Vec<IndexVersion>>,
     git: BTreeMap<(String, String), PackageManifest>,
     /// package name -> explicit `[lib] name` (canned for the case where the extern name
     /// follows a lib name different from the package name, as with
@@ -24,12 +27,18 @@ impl FakeSource {
         Self {
             root,
             index: BTreeMap::new(),
+            refresh_only: BTreeMap::new(),
             git: BTreeMap::new(),
             lib_names: BTreeMap::new(),
         }
     }
     fn add(&mut self, name: &str, versions: Vec<IndexVersion>) {
         self.index.insert(name.to_string(), versions);
+    }
+    /// The entry a refresh returns, which is what a snapshot taken before a version was published
+    /// only learns about by revalidating.
+    fn add_refresh_only(&mut self, name: &str, versions: Vec<IndexVersion>) {
+        self.refresh_only.insert(name.to_string(), versions);
     }
     fn add_git(&mut self, source_id: &str, manifest: PackageManifest) {
         self.git
@@ -54,6 +63,12 @@ impl PkgSource for FakeSource {
 
     fn index_entry(&mut self, _source: &str, name: &str) -> Result<IndexEntry, String> {
         Ok(self.index.get(name).cloned().unwrap_or_default().into())
+    }
+    fn refresh_index_entry(&mut self, _source: &str, name: &str) -> Result<IndexEntry, String> {
+        if let Some(versions) = self.refresh_only.get(name).cloned() {
+            self.index.insert(name.to_string(), versions.clone());
+        }
+        self.index_entry(_source, name)
     }
     fn ensure_source(
         &mut self,
@@ -506,6 +521,49 @@ fn a_registry_row_sharing_the_root_name_keeps_its_lock_edges() {
     assert_eq!(
         second.version_map["serde_core"],
         vec![Version::parse("1.0.229").unwrap()]
+    );
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn a_locked_version_newer_than_the_cached_index_is_revalidated_rather_than_refused() {
+    // A lock can name a version this process's cached index copy has never seen: the copy is a
+    // snapshot, and whoever wrote the lock — Cargo, resolving against a fresh index — saw a newer
+    // one. Reading that lock has to revalidate the copy, because the lock contract accepts a locked
+    // version whether or not a fresh solve would pick it; only a version the refreshed copy lacks
+    // too is a refusal.
+    let d = tmpdir("locked-version-newer-than-the-cache");
+    let root = root_project(
+        &d,
+        "[package]\nname = \"app\"\nversion = \"0.0.0\"\n[dependencies]\nlibc = \"0.2\"\n",
+    );
+    let mut src = FakeSource::new(d.join("srcstore"));
+    src.add("libc", vec![iv("libc", "0.2.189")]);
+
+    let plan = resolve(&root, &mut src).unwrap();
+    assert_eq!(
+        plan.version_map["libc"],
+        vec![Version::parse("0.2.189").unwrap()]
+    );
+
+    // What the other leg writes: the same graph, at the version it resolved instead.
+    let carried = plan.lock.serialize().replace("0.2.189", "0.2.190");
+    std::fs::write(d.join("Cargo.lock"), &carried).unwrap();
+    src.add_refresh_only("libc", vec![iv("libc", "0.2.189"), iv("libc", "0.2.190")]);
+
+    let second = resolve(&root, &mut src).unwrap();
+    assert_eq!(
+        second.version_map["libc"],
+        vec![Version::parse("0.2.190").unwrap()],
+        "the locked version has to be accepted once the index copy has been revalidated"
+    );
+
+    // And a version the refreshed copy lacks too stays a loud refusal, never a silent substitution.
+    std::fs::write(d.join("Cargo.lock"), carried.replace("0.2.190", "0.2.191")).unwrap();
+    let error = resolve(&root, &mut src).unwrap_err();
+    assert!(
+        error.contains("libc 0.2.191 is not in the index"),
+        "unexpected error: {error}"
     );
     std::fs::remove_dir_all(&d).unwrap();
 }

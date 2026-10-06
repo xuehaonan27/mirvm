@@ -50,6 +50,13 @@ Cargo.
   is needed.
 - **C12 accounted boundaries are not closure.** Approximations and deferrals are declared up front and
   may not be passed off as closed.
+- **C13 index freshness is the lock reader's job.** A registry's index copy is one file per crate,
+  written when it was first downloaded and served unchanged afterwards, so it is a snapshot taken at
+  that moment. Reading a lock revalidates it: a lock names exact versions, and whoever wrote it — the
+  Cargo leg of a differential, or a user who ran `cargo` first — may have resolved against a newer
+  index, so a version the snapshot lacks is looked up again after a refresh and only a version the
+  refreshed copy also lacks is refused. Offline mode cannot revalidate and falls back to the
+  snapshot.
 
 ## 2. Model
 
