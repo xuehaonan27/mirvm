@@ -134,11 +134,11 @@ materialized project directory is absent (`ecosystem`, `ffi_zlib`, `ripgrep_rege
 G2).
 
 The smoke tier adds three: E47's rayon-family wall-clock timeouts (`flate2`, `brotli`, `tiny_skia`).
-`rayon` finishes inside its own budget. `png_round` and `wasmtime_wat` are green: the first needed
-`llvm.x86.pclmulqdq.512` (C6), and the second is a guest that returns from `main` with its workers
-parked in guest code, which the process-exit path leaves running rather than waiting for
-([engine-lifecycle.md](designs/engine-lifecycle.md) §4.1). `tokei` is a gate-tier case and is not in
-this tier.
+`rayon` finishes inside its own budget. `png_round` and `wasmtime_wat` are green: the first reaches
+the 512-bit carryless multiply, which the intrinsic queue now implements, and the second is a guest
+that returns from `main` with its workers parked in guest code, which the process-exit path leaves
+running rather than waiting for ([engine-lifecycle.md](designs/engine-lifecycle.md) §4.1). `tokei` is
+a gate-tier case and is not in this tier.
 
 `fib(32)` is RED: the best of three runs is about 8.7s against its 80ms gate (E40). Output is correct
 and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not be claimed.
