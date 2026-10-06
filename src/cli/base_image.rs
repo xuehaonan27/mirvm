@@ -21,6 +21,12 @@ struct BaseBuildCallbacks {
 }
 
 impl Callbacks for BaseBuildCallbacks {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        // The base image is built by this session, so its diagnostics belong to the same stream as
+        // everything else the command says.
+        crate::cli::diagnostics::route_front_end_output(&mut config.opts);
+    }
+
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let (module, instance, exports) = crate::lower::lower_for_base_build(tcx);
         let sess = tcx.sess;

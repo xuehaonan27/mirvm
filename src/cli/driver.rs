@@ -255,6 +255,8 @@ fn print_phase_timing(
 
 impl Callbacks for MirvmCallbacks {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        // The session's own choice of diagnostic rendering, which the tee below then copies.
+        diagnostics::route_front_end_output(&mut config.opts);
         // Warning-counting hook (precondition for L2 entry): psess_created fires after the
         // interface overwrites TRACK_DIAGNOSTIC and before the first parse, so no session
         // diagnostic is missed.

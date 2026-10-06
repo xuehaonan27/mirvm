@@ -173,6 +173,7 @@ struct DepCallbacks {
 
 impl Callbacks for DepCallbacks {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        diagnostics::route_front_end_output(&mut config.opts);
         // A dependency compile belongs to the build, not to the guest: when this command holds
         // build diagnostics back, so does every unit it schedules, and the unit's own outcome
         // decides whether they are shown. A capture never reaches this process (`__cless-dep` and

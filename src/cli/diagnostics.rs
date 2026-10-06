@@ -13,7 +13,8 @@ use std::sync::{Mutex, OnceLock};
 
 use rustc_errors::annotate_snippet_emitter_writer::AnnotateSnippetEmitter;
 use rustc_errors::emitter::{
-    Destination, DynEmitter, HumanReadableErrorType, OutputTheme, get_stderr_color_choice,
+    ColorConfig, Destination, DynEmitter, HumanReadableErrorType, OutputTheme,
+    get_stderr_color_choice,
 };
 use rustc_errors::json::JsonEmitter;
 use rustc_errors::{AutoStream, TerminalUrl};
@@ -327,6 +328,28 @@ impl CompilerEmitterSpec {
             .dcx()
             .set_emitter(make_tee_emitter(&self.options, psess, self.hold));
     }
+}
+
+/// Put the front end into the caller's output mode, before the session is built from `options`.
+///
+/// `MIRVM_OUTPUT=json` promises one JSON object per line, and the front end's diagnostics are
+/// rendered by rustc rather than by [`crate::diag`], so without this its human rendering is the one
+/// prose line inside an otherwise machine-readable stream. Text mode leaves the session's own choice
+/// alone, which is what keeps the frozen rustc text surface byte-identical. Colors are off in both
+/// fields because a machine consumer reads bytes, and `json_rendered` only names the human rendering
+/// a consumer would ask for instead, which nothing does in machine mode.
+pub(crate) fn route_front_end_output(options: &mut Options) {
+    if !crate::options::machine_output() {
+        return;
+    }
+    options.error_format = ErrorOutputType::Json {
+        pretty: false,
+        json_rendered: HumanReadableErrorType {
+            short: false,
+            unicode: false,
+        },
+        color_config: ColorConfig::Never,
+    };
 }
 
 fn resolved_terminal_url(options: &Options) -> TerminalUrl {

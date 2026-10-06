@@ -123,11 +123,14 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   renderer, `MIRVM_OUTPUT=text|json`), `src/error.rs` is the failure root that composes module enums
   and turns one into the process status, `src/sysroot.rs` and `src/options.rs` are typed, and the CLI
   and entry layer speak the grammar with named exit codes; `mirvm_log!` and the `log`/`anyhow`
-  dependencies are gone. Remaining: the `Result<_, String>` tail (vm, cargoless, native, image, plus
-  `src/os_arch/bridge.rs` and one cli site) and the raw print sites that go with it, rustc
-  `--error-format=json`, and the repo-quality gates not yet written (no `Result<_, String>`, no bare
-  exit code, no raw print, no duplicated prose). The `#![allow(dead_code)]` in `src/diag/mod.rs` is
-  deleted by the last print conversion.
+  dependencies are gone, and the front end now follows the mode as well: every session that renders
+  diagnostics asks rustc for its JSON rendering when `MIRVM_OUTPUT=json`, so the one prose line in a
+  JSONL stream is gone and the `diagnostics` case asserts it. Remaining: the `Result<_, String>` tail
+  (vm, cargoless, native, image, plus `src/os_arch/bridge.rs` and one cli site) and the raw print
+  sites that go with it — the engine's own `mirvm[m4-engine]:` lines are still prose in machine mode —
+  and the repo-quality gates not yet written (no `Result<_, String>`, no bare exit code, no raw print,
+  no duplicated prose). The `#![allow(dead_code)]` in `src/diag/mod.rs` is deleted by the last print
+  conversion.
 
 ## Engine and architecture debt
 
@@ -353,10 +356,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   after a multithreaded fork (exit 66), and the only thread the engine creates in a child is the
   `rebuild_session_from_recipe` writer. Both are documented in `tests/data/fixtures/tsan/README.md`.
 - **G11** `UNSCHEDULED`: a mode's `bad()` does not fail its case unless the mode's last statement is
-  fail-sensitive. `repo-quality`, `prepare`, `vmcall` and `framework-self-test` now guard on their fail
-  counter, but several modes still end on a bare `ok` or an `if`/`fi` — `deps-image`, `frag-collect`,
-  `jit-cache`, `metering`, `unit-share`, `telemetry`, `pack`, `diagnostics`, `cargoless-git` and
-  `cargoless-sources` among them — so a non-final `bad` in them is reported and discarded.
+  fail-sensitive. `repo-quality`, `prepare`, `vmcall`, `framework-self-test` and `diagnostics` guard
+  on their fail counter, but several modes still end on a bare `ok` or an `if`/`fi` — `deps-image`,
+  `frag-collect`, `jit-cache`, `metering`, `unit-share`, `telemetry`, `pack`, `cargoless-git` and
+  `cargoless-sources` among them — so a non-final `bad` in them is reported and discarded. The guard
+  is one line at the end of `mode_run`, so converting one is cheap; what it costs is that every check
+  the mode already had starts being enforced, which is the point.
   `case_summary` (`tests/lib/harness.sh`) is still not any mode's verdict.
 - **G12** `ACCEPTED`: the network-dependent cases need the dev container's HTTP proxy, and mirvm's own
   registry client does not read Cargo's config, so an unexported proxy makes them fail in a way that

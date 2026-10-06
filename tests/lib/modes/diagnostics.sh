@@ -78,6 +78,22 @@ run_case() { # <name> <deps> <fixture> <unused-name> <missing-symbol> <guest-hex
     else
         bad "$name compiler/control tee is not a byte-exact copy"
     fi
+
+    # Machine mode: the front end's diagnostics are rendered by rustc rather than by `src/diag`, so a
+    # session that keeps its human rendering puts prose in the middle of a JSONL stream. The claim
+    # here is exactly that conversion: the warning arrives as rustc's own JSON object and no longer as
+    # its human rendering. The guest's fd 2 bytes are the guest's and the engine's remaining raw
+    # prints are their own conversion, so neither belongs in this assertion.
+    MIRVM_HOME="$HOME_DIR" MIRVM_DEPS="$deps" MIRVM_SYSROOT="$TEST_SYSROOT" MIRVM_OUTPUT=json \
+        "$MIRVM" run -v "$fixture" >"$plain/stdout.json" 2>"$plain/stderr.json" || true
+    if grep -qF '"$message_type":"diagnostic"' "$plain/stderr.json" \
+        && grep -qF "$unused_name" "$plain/stderr.json" \
+        && ! grep -qE "^warning: function .*${unused_name}" "$plain/stderr.json"; then
+        ok "$name machine mode renders the front end's warning as rustc JSON, not prose"
+    else
+        bad "$name machine mode left the front end's human rendering in the stream"
+        head -3 "$plain/stderr.json"
+    fi
 }
 
 direct_guest_hex=$(printf '%s' 'warning: 1 warning emitted
@@ -158,4 +174,7 @@ if [ -f "$runner_session/diagnostics.log" ] \
 else
     bad "runner fake-binary parse error did not enter diagnostics.log"
 fi
+
+# `bad` only prints; a case's verdict is this mode's exit status, so the mode has to end by asking.
+[ "$fail" -eq 0 ]
 }
