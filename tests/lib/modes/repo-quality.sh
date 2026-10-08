@@ -232,6 +232,107 @@ check_platform_boundary() {
     fi
 }
 
+# The product half of one file: its lines from the top, stopping where an inline
+# `#[cfg(test)] mod … {` begins. A `#[cfg(test)] mod tests;` declaration only points at a sibling
+# file, so the product half continues past it. Test-only files are skipped by the callers.
+product_half() { # <file>
+    awk '/^#\[cfg\((all\()?test/ { getline following; if (following ~ /^[[:space:]]*(pub )?mod [A-Za-z_0-9]+[[:space:]]*\{/) exit } { sub(/\/\/.*$/, ""); print }' "$1"
+}
+
+# Files whose product half is checked: never a test module or a test driver.
+product_files() {
+    grep -rl . src --include='*.rs' \
+        | grep -vE '(^|/)tests?\.rs$|/tests/|/embed_tests/|/test_driver\.rs$'
+}
+
+# No failure is an unstructured string: a fallible signature names the failure type it returns,
+# because a string loses the identity a machine consumer matches on (the same reason anyhow is
+# banned). The scan counts angle brackets, so an error position is told from a success one:
+# `Result<Vec<String>, E>` passes, `Result<Result<(), String>, E>` does not.
+check_no_string_errors() {
+    local bad
+    bad=$(
+        for file in $(product_files); do
+            grep -q 'Result<' "$file" || continue
+            product_half "$file" | awk -v file="$file" '
+                {
+                    line = $0
+                    i = 1
+                    while (i <= length(line)) {
+                        c = substr(line, i, 1)
+                        if (depth == 0) {
+                            if (substr(line, i, 7) == "Result<") { depth = 1; tail = ""; i += 7; continue }
+                        } else if (c == "<") {
+                            depth++
+                        } else if (c == ">" && substr(line, i - 1, 1) != "-") {
+                            depth--
+                            if (depth == 0) {
+                                if (tail ~ /,[ \t]*String[ \t]*$/) { printf "%s:%d\n", file, FNR; exit }
+                                tail = ""
+                            }
+                        }
+                        if (depth > 0 && !(c == ">" && depth == 1)) tail = tail c
+                        i++
+                    }
+                }
+            '
+        done
+    )
+    if [ -n "$bad" ]; then
+        echo "failure type spelled as String (name the error type the signature returns):" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
+# A process status is chosen in one place. `src/diag/exit.rs` names every code mirvm chooses; a
+# digit at an exit site is a second spelling of that vocabulary. `0` is success and `134` is the
+# SIGABRT re-raise a signal fault must reproduce, which is not mirvm's code to renumber.
+check_no_bare_exit() {
+    local bad
+    bad=$(grep -rnE '(std::process::exit|[^a-zA-Z_]exit|ExitCode::from)\([0-9]+\)' src --include='*.rs' \
+        | grep -v '^src/diag/exit.rs:' | grep -vE '\(0\)|\(134\)')
+    if [ -n "$bad" ]; then
+        echo "exit codes spelled as digits (name the constant in src/diag/exit.rs):" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
+# Every line mirvm prints goes through the vocabulary: a diagnostic through `src/diag`, product
+# output through `src/out.rs`. The print macros write a second, unrouted, un-levelled channel, so
+# they are banned outright — including the development instruments, which have their own sink.
+check_no_raw_print() {
+    local bad
+    bad=$(
+        for file in $(product_files); do
+            product_half "$file" | grep -nE '(^|[^a-zA-Z_])(e?print(ln)?!)' | sed "s|^|$file:|"
+        done
+    )
+    if [ -n "$bad" ]; then
+        echo "raw print under src/ (use src/diag or src/out):" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
+# The output grammar is spelled once, in the renderer that owns it. A hand-written `mirvm[...]:`
+# belongs to `src/diag` alone; every other site hands the renderer a component, a severity and a
+# message. Message *content* may repeat where two paths must report the same fact (the interpreter
+# and the JIT share a trap contract), which is why this checks the shape, not the words.
+check_one_output_grammar() {
+    local offending
+    offending=$(for file in $(product_files); do
+        [ "$file" = src/diag/mod.rs ] && continue
+        product_half "$file" | grep -nE '"mirvm(\[[a-z0-9-]+\])?:[^:]' | sed "s|^|$file:|"
+    done)
+    if [ -n "$offending" ]; then
+        echo "the output grammar spelled outside src/diag:" >&2
+        printf '%s\n' "$offending" >&2
+        return 1
+    fi
+}
+
 mode_run() {
     case_init --no-product
     run_check "cargo fmt" "${CARGO:-cargo}" fmt --all -- --check
@@ -245,6 +346,10 @@ mode_run() {
     run_check "store naming" check_store_naming
     run_check "no anyhow" check_no_anyhow
     run_check "error codes" check_error_codes
+    run_check "no string errors" check_no_string_errors
+    run_check "no bare exit code" check_no_bare_exit
+    run_check "no raw print" check_no_raw_print
+    run_check "one output grammar" check_one_output_grammar
     run_check "diag purity" check_diag_purity
     run_check "platform boundary" check_platform_boundary
     print_section_report

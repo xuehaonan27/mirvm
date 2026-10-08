@@ -4,7 +4,7 @@
 use super::*;
 
 impl<'a> Verifier<'a> {
-    pub(super) fn operand(&self, body: &FuncBody, op: &Operand) -> Result<(), String> {
+    pub(super) fn operand(&self, body: &FuncBody, op: &Operand) -> Result<(), crate::error::Error> {
         match op {
             Operand::Slot(slot) => self.slot(body, *slot),
             Operand::Mem { expr, .. } | Operand::AddrOf(expr) => self.place(body, expr),
@@ -18,13 +18,17 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    pub(super) fn place(&self, body: &FuncBody, place: &PlaceExpr) -> Result<(), String> {
+    pub(super) fn place(
+        &self,
+        body: &FuncBody,
+        place: &PlaceExpr,
+    ) -> Result<(), crate::error::Error> {
         match place.base {
             PlaceBase::Local(off) => {
                 if off > body.frame_size {
-                    return Err(format!(
-                        "local offset {off} exceeds frame size {}",
-                        body.frame_size
+                    return Err(crate::fail!(
+                        Engine,
+                        format!("local offset {off} exceeds frame size {}", body.frame_size)
                     ));
                 }
             }
@@ -43,7 +47,10 @@ impl<'a> Verifier<'a> {
                 PlaceStep::VTableAlignOffset { meta, packed, .. } => {
                     self.operand(body, meta)?;
                     if packed.is_some_and(|n| n == 0 || !n.is_power_of_two()) {
-                        return Err("vtable packed alignment is not a non-zero power of two".into());
+                        return Err(crate::fail!(
+                            Engine,
+                            "vtable packed alignment is not a non-zero power of two"
+                        ));
                     }
                 }
                 PlaceStep::IndexScaled { idx, .. } => self.slot(body, *idx)?,
@@ -52,14 +59,22 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
-    pub(super) fn scalar_place(&self, body: &FuncBody, place: &ScalarPlace) -> Result<(), String> {
+    pub(super) fn scalar_place(
+        &self,
+        body: &FuncBody,
+        place: &ScalarPlace,
+    ) -> Result<(), crate::error::Error> {
         match place {
             ScalarPlace::Slot(slot) => self.slot(body, *slot),
             ScalarPlace::Mem { expr, .. } => self.place(body, expr),
         }
     }
 
-    pub(super) fn ret_dest(&self, body: &FuncBody, ret: &RetDest) -> Result<(), String> {
+    pub(super) fn ret_dest(
+        &self,
+        body: &FuncBody,
+        ret: &RetDest,
+    ) -> Result<(), crate::error::Error> {
         match ret {
             RetDest::Ignore => Ok(()),
             RetDest::Scalar(p) => self.scalar_place(body, p),
@@ -68,14 +83,22 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    pub(super) fn switch_discr(&self, body: &FuncBody, discr: &SwitchDiscr) -> Result<(), String> {
+    pub(super) fn switch_discr(
+        &self,
+        body: &FuncBody,
+        discr: &SwitchDiscr,
+    ) -> Result<(), crate::error::Error> {
         match discr {
             SwitchDiscr::Scalar(op) => self.operand(body, op),
             SwitchDiscr::Wide(place) => self.place(body, place),
         }
     }
 
-    pub(super) fn bin128_rhs(&self, body: &FuncBody, rhs: &Bin128Rhs) -> Result<(), String> {
+    pub(super) fn bin128_rhs(
+        &self,
+        body: &FuncBody,
+        rhs: &Bin128Rhs,
+    ) -> Result<(), crate::error::Error> {
         match rhs {
             Bin128Rhs::Wide(p) => self.place(body, p),
             Bin128Rhs::Scalar(op) => self.operand(body, op),
@@ -86,7 +109,7 @@ impl<'a> Verifier<'a> {
         &self,
         body: &FuncBody,
         ops: impl IntoIterator<Item = &'b Operand>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::Error> {
         for op in ops {
             self.operand(body, op)?;
         }
@@ -97,7 +120,7 @@ impl<'a> Verifier<'a> {
         &self,
         body: &FuncBody,
         places: impl IntoIterator<Item = &'b PlaceExpr>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::Error> {
         for place in places {
             self.place(body, place)?;
         }
@@ -108,14 +131,14 @@ impl<'a> Verifier<'a> {
         &self,
         body: &FuncBody,
         places: impl IntoIterator<Item = &'b ScalarPlace>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::Error> {
         for place in places {
             self.scalar_place(body, place)?;
         }
         Ok(())
     }
 
-    pub(super) fn slot(&self, body: &FuncBody, slot: Slot) -> Result<(), String> {
+    pub(super) fn slot(&self, body: &FuncBody, slot: Slot) -> Result<(), crate::error::Error> {
         self.span(body, slot.off, slot.width.bytes(), "scalar slot")
     }
 
@@ -125,54 +148,64 @@ impl<'a> Verifier<'a> {
         off: u32,
         size: u32,
         what: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::Error> {
         let end = off
             .checked_add(size)
-            .ok_or_else(|| format!("{what} range overflows"))?;
+            .ok_or_else(|| crate::fail!(Engine, format!("{what} range overflows")))?;
         if end > body.frame_size {
-            return Err(format!(
-                "{what} {off}..{end} exceeds frame size {}",
-                body.frame_size
+            return Err(crate::fail!(
+                Engine,
+                format!("{what} {off}..{end} exceeds frame size {}", body.frame_size)
             ));
         }
         Ok(())
     }
 
-    pub(super) fn func(&self, id: FuncId) -> Result<(), String> {
+    pub(super) fn func(&self, id: FuncId) -> Result<(), crate::error::Error> {
         if id as usize >= self.funcs {
-            return Err(format!("function id {id} is outside 0..{}", self.funcs));
+            return Err(crate::fail!(
+                Engine,
+                format!("function id {id} is outside 0..{}", self.funcs)
+            ));
         }
         Ok(())
     }
 
-    pub(super) fn tls(&self, id: TlsId) -> Result<(), String> {
+    pub(super) fn tls(&self, id: TlsId) -> Result<(), crate::error::Error> {
         if id as usize >= self.tls {
-            return Err(format!("TLS id {id} is outside 0..{}", self.tls));
+            return Err(crate::fail!(
+                Engine,
+                format!("TLS id {id} is outside 0..{}", self.tls)
+            ));
         }
         Ok(())
     }
 
-    pub(super) fn asm(&self, id: AsmStubId) -> Result<(), String> {
+    pub(super) fn asm(&self, id: AsmStubId) -> Result<(), crate::error::Error> {
         if id as usize >= self.asm {
-            return Err(format!(
-                "inline-asm stub id {id} is outside 0..{}",
-                self.asm
+            return Err(crate::fail!(
+                Engine,
+                format!("inline-asm stub id {id} is outside 0..{}", self.asm)
             ));
         }
         Ok(())
     }
 
-    pub(super) fn bb(&self, body: &FuncBody, bb: Bb) -> Result<(), String> {
+    pub(super) fn bb(&self, body: &FuncBody, bb: Bb) -> Result<(), crate::error::Error> {
         if bb as usize >= body.blocks.len() {
-            return Err(format!(
-                "basic block bb{bb} is outside 0..{}",
-                body.blocks.len()
+            return Err(crate::fail!(
+                Engine,
+                format!("basic block bb{bb} is outside 0..{}", body.blocks.len())
             ));
         }
         Ok(())
     }
 
-    pub(super) fn unwind(&self, body: &FuncBody, unwind: UnwindAction) -> Result<(), String> {
+    pub(super) fn unwind(
+        &self,
+        body: &FuncBody,
+        unwind: UnwindAction,
+    ) -> Result<(), crate::error::Error> {
         match unwind {
             UnwindAction::Cleanup(bb) => self.bb(body, bb),
             UnwindAction::Continue | UnwindAction::Terminate => Ok(()),
@@ -184,13 +217,13 @@ impl<'a> Verifier<'a> {
         addr: u64,
         size: u64,
         allow_prefix: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::Error> {
         if addr == 0 {
-            return Err("contains a null frozen address".into());
+            return Err(crate::fail!(Engine, "contains a null frozen address"));
         }
         let end = addr
             .checked_add(size)
-            .ok_or("frozen address range overflows")?;
+            .ok_or(crate::fail!(Engine, "frozen address range overflows"))?;
         let contains = self
             .instance
             .frozen
@@ -204,8 +237,9 @@ impl<'a> Verifier<'a> {
                 addr >= start && end <= limit
             });
         if !contains && !allow_prefix {
-            return Err(format!(
-                "address range {addr:#x}..{end:#x} is outside frozen memory"
+            return Err(crate::fail!(
+                Engine,
+                format!("address range {addr:#x}..{end:#x} is outside frozen memory")
             ));
         }
         Ok(())

@@ -18,15 +18,15 @@ pub struct WorkspaceManifest {
 }
 
 impl WorkspaceManifest {
-    pub fn read(input: &Path) -> Result<Self, String> {
+    pub fn read(input: &Path) -> Result<Self, crate::error::Error> {
         Self::read_inner(input)
     }
 
-    pub(crate) fn read_dependency(input: &Path) -> Result<Self, String> {
+    pub(crate) fn read_dependency(input: &Path) -> Result<Self, crate::error::Error> {
         Self::read_inner(input)
     }
 
-    fn read_inner(input: &Path) -> Result<Self, String> {
+    fn read_inner(input: &Path) -> Result<Self, crate::error::Error> {
         let input = std::fs::canonicalize(input)
             .or_else(|_| std::path::absolute(input))
             .map_err(|e| {
@@ -34,17 +34,26 @@ impl WorkspaceManifest {
                     "failed to make project directory absolute {}: {e}",
                     input.display()
                 )
-            })?;
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         let start = if input.file_name().is_some_and(|name| name == "Cargo.toml") {
             input.parent().unwrap_or(Path::new(".")).to_path_buf()
         } else {
             input
         };
         let root = find_workspace_root(&start)?.unwrap_or_else(|| start.clone());
-        let root_text = std::fs::read_to_string(root.join("Cargo.toml"))
-            .map_err(|e| format!("failed to read {}/Cargo.toml: {e}", root.display()))?;
-        let root_value: toml::Value = toml::from_str(&root_text)
-            .map_err(|e| format!("failed to parse {}/Cargo.toml: {e}", root.display()))?;
+        let root_text = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| {
+            crate::fail!(
+                Resolver,
+                format!("failed to read {}/Cargo.toml: {e}", root.display())
+            )
+        })?;
+        let root_value: toml::Value = toml::from_str(&root_text).map_err(|e| {
+            crate::fail!(
+                Resolver,
+                format!("failed to parse {}/Cargo.toml: {e}", root.display())
+            )
+        })?;
         let Some(workspace) = root_value.get("workspace").and_then(toml::Value::as_table) else {
             let package = PackageManifest::parse(&root_text, &root)?;
             return Ok(Self {
@@ -89,7 +98,7 @@ impl WorkspaceManifest {
             member_dirs.insert(root.clone());
         }
         if member_dirs.is_empty() {
-            return Err("workspace has no usable members".into());
+            return Err(crate::fail!(Resolver, "workspace has no usable members"));
         }
 
         // Cargo automatically makes path dependencies inside the workspace root members;
@@ -98,15 +107,26 @@ impl WorkspaceManifest {
         loop {
             let mut discovered = BTreeSet::new();
             for dir in &member_dirs {
-                let text = std::fs::read_to_string(dir.join("Cargo.toml"))
-                    .map_err(|e| format!("failed to read {}/Cargo.toml: {e}", dir.display()))?;
-                let value: toml::Value = toml::from_str(&text)
-                    .map_err(|e| format!("failed to parse {}/Cargo.toml: {e}", dir.display()))?;
+                let text = std::fs::read_to_string(dir.join("Cargo.toml")).map_err(|e| {
+                    crate::fail!(
+                        Resolver,
+                        format!("failed to read {}/Cargo.toml: {e}", dir.display())
+                    )
+                })?;
+                let value: toml::Value = toml::from_str(&text).map_err(|e| {
+                    crate::fail!(
+                        Resolver,
+                        format!("failed to parse {}/Cargo.toml: {e}", dir.display())
+                    )
+                })?;
                 if dir != &root && value.get("workspace").is_some() {
-                    return Err(format!(
-                        "workspace member {} declares [workspace] itself; nested workspaces are \
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "workspace member {} declares [workspace] itself; nested workspaces are \
                          not implemented",
-                        dir.display()
+                            dir.display()
+                        )
                     ));
                 }
                 let materialized = materialize_member(value, &root_value, &root)?;
@@ -128,24 +148,37 @@ impl WorkspaceManifest {
 
         let mut members = Vec::new();
         for dir in &member_dirs {
-            let text = std::fs::read_to_string(dir.join("Cargo.toml"))
-                .map_err(|e| format!("failed to read {}/Cargo.toml: {e}", dir.display()))?;
-            let value: toml::Value = toml::from_str(&text)
-                .map_err(|e| format!("failed to parse {}/Cargo.toml: {e}", dir.display()))?;
+            let text = std::fs::read_to_string(dir.join("Cargo.toml")).map_err(|e| {
+                crate::fail!(
+                    Resolver,
+                    format!("failed to read {}/Cargo.toml: {e}", dir.display())
+                )
+            })?;
+            let value: toml::Value = toml::from_str(&text).map_err(|e| {
+                crate::fail!(
+                    Resolver,
+                    format!("failed to parse {}/Cargo.toml: {e}", dir.display())
+                )
+            })?;
             if dir != &root && value.get("workspace").is_some() {
-                return Err(format!(
-                    "workspace member {} declares [workspace] itself; nested workspaces are \
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "workspace member {} declares [workspace] itself; nested workspaces are \
                      not implemented",
-                    dir.display()
+                        dir.display()
+                    )
                 ));
             }
             let materialized = materialize_member(value, &root_value, &root)?;
-            let encoded = toml::to_string(&materialized).map_err(|e| {
-                format!(
-                    "failed to materialize workspace member {}: {e}",
-                    dir.display()
-                )
-            })?;
+            let encoded = toml::to_string(&materialized)
+                .map_err(|e| {
+                    format!(
+                        "failed to materialize workspace member {}: {e}",
+                        dir.display()
+                    )
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?;
             let mut package = PackageManifest::parse(&encoded, dir)?;
             // Cargo uses only the top-level workspace resolver; a member's own resolver is ignored.
             package.resolver = resolver;
@@ -164,17 +197,20 @@ impl WorkspaceManifest {
                 })
                 .max_by_key(|(_, implied)| *implied)
         {
-            eprintln!(
+            crate::diag::mirror(format_args!(
                 "warning: virtual workspace defaulting to `resolver = \"1\"` despite one or more workspace members being on edition {edition} which implies `resolver = \"{implied_resolver}\"`\n  |\n  = note: to keep the current resolver, specify `workspace.resolver = \"1\"` in the workspace root's manifest\n  = note: to use the edition {edition} resolver, specify `workspace.resolver = \"{implied_resolver}\"` in the workspace root's manifest\n  = note: for more details see https://doc.rust-lang.org/cargo/reference/resolver.html#resolver-versions"
-            );
+            ));
         }
         if let Some(pair) = members.windows(2).find(|pair| pair[0].name == pair[1].name) {
-            return Err(format!(
-                "workspace has two packages named `{}` ({} and {}); package selection cannot \
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "workspace has two packages named `{}` ({} and {}); package selection cannot \
                  disambiguate them reliably",
-                pair[0].name,
-                pair[0].root.display(),
-                pair[1].root.display()
+                    pair[0].name,
+                    pair[0].root.display(),
+                    pair[1].root.display()
+                )
             ));
         }
         // Both resolver 3's fallback ordering and the new lock's format choice use the lowest
@@ -208,9 +244,12 @@ impl WorkspaceManifest {
         } else {
             let dirs = expand_patterns(&root, &defaults, true, "workspace.default-members")?;
             if let Some(outside) = dirs.iter().find(|dir| !member_dirs.contains(*dir)) {
-                return Err(format!(
-                    "workspace.default-members {} is not a workspace member",
-                    outside.display()
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "workspace.default-members {} is not a workspace member",
+                        outside.display()
+                    )
                 ));
             }
             dirs
@@ -226,15 +265,26 @@ impl WorkspaceManifest {
                 if !manifest.is_file() {
                     continue;
                 }
-                let text = std::fs::read_to_string(&manifest)
-                    .map_err(|e| format!("failed to read {}: {e}", manifest.display()))?;
-                let value: toml::Value = toml::from_str(&text)
-                    .map_err(|e| format!("failed to parse {}: {e}", manifest.display()))?;
+                let text = std::fs::read_to_string(&manifest).map_err(|e| {
+                    crate::fail!(
+                        Resolver,
+                        format!("failed to read {}: {e}", manifest.display())
+                    )
+                })?;
+                let value: toml::Value = toml::from_str(&text).map_err(|e| {
+                    crate::fail!(
+                        Resolver,
+                        format!("failed to parse {}: {e}", manifest.display())
+                    )
+                })?;
                 if value.get("package").is_some() {
-                    return Err(format!(
-                        "package {} is inside the workspace but is neither a member nor excluded; \
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "package {} is inside the workspace but is neither a member nor excluded; \
                          Cargo rejects this shape",
-                        dir.display()
+                            dir.display()
+                        )
                     ));
                 }
             }
@@ -250,7 +300,7 @@ impl WorkspaceManifest {
 
     /// The workspace subset of Cargo package ID specs: bare name, `name@version`, and
     /// `path+file:///...#name@version`. Like Cargo, multiple matches require disambiguation.
-    pub fn member_by_spec(&self, spec: &str) -> Result<&PackageManifest, String> {
+    pub fn member_by_spec(&self, spec: &str) -> Result<&PackageManifest, crate::error::Error> {
         let parsed = PackageSpec::parse(spec)?;
         let matches: Vec<_> = self
             .members
@@ -259,11 +309,15 @@ impl WorkspaceManifest {
             .collect();
         match matches.as_slice() {
             [member] => Ok(*member),
-            [] => Err(format!(
-                "no workspace package matches package spec `{spec}`"
+            [] => Err(crate::fail!(
+                Resolver,
+                format!("no workspace package matches package spec `{spec}`")
             )),
-            _ => Err(format!(
-                "package spec `{spec}` matches multiple packages; add a version or a full path package ID"
+            _ => Err(crate::fail!(
+                Resolver,
+                format!(
+                    "package spec `{spec}` matches multiple packages; add a version or a full path package ID"
+                )
             )),
         }
     }
@@ -276,16 +330,15 @@ struct PackageSpec {
 }
 
 impl PackageSpec {
-    fn parse(spec: &str) -> Result<Self, String> {
+    fn parse(spec: &str) -> Result<Self, crate::error::Error> {
         let (source, fragment) = spec
             .split_once('#')
             .map_or((None, spec), |(source, fragment)| (Some(source), fragment));
         let (name, version) = match fragment.rsplit_once('@') {
             Some((name, version)) if !name.is_empty() && !version.is_empty() => {
-                let requirement =
-                    semver::VersionReq::parse(&format!("={version}")).map_err(|error| {
-                        format!("invalid version in package spec `{spec}`: {error}")
-                    })?;
+                let requirement = semver::VersionReq::parse(&format!("={version}"))
+                    .map_err(|error| format!("invalid version in package spec `{spec}`: {error}"))
+                    .map_err(|e| crate::fail!(Resolver, e))?;
                 (Some(name.to_string()), Some(requirement))
             }
             _ if !fragment.is_empty() => (Some(fragment.to_string()), None),
@@ -298,7 +351,8 @@ impl PackageSpec {
                     .or_else(|| source.strip_prefix("file://"))
                     .ok_or_else(|| {
                         format!("workspace package spec `{spec}` source is not path+file")
-                    })?;
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?;
                 percent_decode(encoded).map(PathBuf::from)
             })
             .transpose()?;
@@ -323,27 +377,34 @@ impl PackageSpec {
     }
 }
 
-fn percent_decode(input: &str) -> Result<String, String> {
+fn percent_decode(input: &str) -> Result<String, crate::error::Error> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
         if bytes[at] == b'%' {
-            let hex = bytes
-                .get(at + 1..at + 3)
-                .ok_or_else(|| format!("incomplete percent escape in file URL: `{input}`"))?;
-            let text = std::str::from_utf8(hex).map_err(|error| error.to_string())?;
-            out.push(
-                u8::from_str_radix(text, 16)
-                    .map_err(|_| format!("invalid percent escape in file URL: `%{text}`"))?,
-            );
+            let hex = bytes.get(at + 1..at + 3).ok_or_else(|| {
+                crate::fail!(
+                    Resolver,
+                    format!("incomplete percent escape in file URL: `{input}`")
+                )
+            })?;
+            let text = std::str::from_utf8(hex)
+                .map_err(|error| crate::fail!(Resolver, error.to_string()))?;
+            out.push(u8::from_str_radix(text, 16).map_err(|_| {
+                crate::fail!(
+                    Resolver,
+                    format!("invalid percent escape in file URL: `%{text}`")
+                )
+            })?);
             at += 3;
         } else {
             out.push(bytes[at]);
             at += 1;
         }
     }
-    String::from_utf8(out).map_err(|error| format!("file URL is not UTF-8: {error}"))
+    String::from_utf8(out)
+        .map_err(|error| crate::fail!(Resolver, format!("file URL is not UTF-8: {error}")))
 }
 
 fn inferred_package_resolver(root: &toml::Value) -> Option<String> {
@@ -370,16 +431,18 @@ fn inferred_package_resolver(root: &toml::Value) -> Option<String> {
     }
 }
 
-fn find_workspace_root(start: &Path) -> Result<Option<PathBuf>, String> {
+fn find_workspace_root(start: &Path) -> Result<Option<PathBuf>, crate::error::Error> {
     for dir in start.ancestors() {
         let file = dir.join("Cargo.toml");
         if !file.is_file() {
             continue;
         }
-        let text = std::fs::read_to_string(&file)
-            .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
-        let value: toml::Value = toml::from_str(&text)
-            .map_err(|e| format!("failed to parse {}: {e}", file.display()))?;
+        let text = std::fs::read_to_string(&file).map_err(|e| {
+            crate::fail!(Resolver, format!("failed to read {}: {e}", file.display()))
+        })?;
+        let value: toml::Value = toml::from_str(&text).map_err(|e| {
+            crate::fail!(Resolver, format!("failed to parse {}: {e}", file.display()))
+        })?;
         if value.get("workspace").is_some() {
             return Ok(Some(dir.to_path_buf()));
         }
@@ -387,18 +450,21 @@ fn find_workspace_root(start: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-fn string_array(value: Option<&toml::Value>, field: &str) -> Result<Vec<String>, String> {
+fn string_array(
+    value: Option<&toml::Value>,
+    field: &str,
+) -> Result<Vec<String>, crate::error::Error> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
     value
         .as_array()
-        .ok_or_else(|| format!("{field} must be an array of strings"))?
+        .ok_or_else(|| crate::fail!(Resolver, format!("{field} must be an array of strings")))?
         .iter()
         .map(|item| {
-            item.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| format!("{field} contains a non-string member"))
+            item.as_str().map(str::to_string).ok_or_else(|| {
+                crate::fail!(Resolver, format!("{field} contains a non-string member"))
+            })
         })
         .collect()
 }
@@ -408,20 +474,24 @@ fn expand_patterns(
     patterns: &[String],
     require_match: bool,
     field: &str,
-) -> Result<BTreeSet<PathBuf>, String> {
+) -> Result<BTreeSet<PathBuf>, crate::error::Error> {
     let mut out = BTreeSet::new();
     for pattern in patterns {
         if Path::new(pattern).is_absolute() {
-            return Err(format!(
-                "workspace member pattern `{pattern}` must be relative to the workspace root"
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "workspace member pattern `{pattern}` must be relative to the workspace root"
+                )
             ));
         }
         let parts: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
         let mut matches = BTreeSet::new();
         expand_pattern_at(root, &parts, 0, &mut matches)?;
         if require_match && matches.is_empty() {
-            return Err(format!(
-                "{field} pattern `{pattern}` matches no package containing Cargo.toml"
+            return Err(crate::fail!(
+                Resolver,
+                format!("{field} pattern `{pattern}` matches no package containing Cargo.toml")
             ));
         }
         out.extend(matches);
@@ -434,13 +504,13 @@ fn expand_pattern_at(
     parts: &[&str],
     at: usize,
     out: &mut BTreeSet<PathBuf>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     if at == parts.len() {
         if dir.join("Cargo.toml").is_file() {
             out.insert(
                 std::fs::canonicalize(dir)
                     .or_else(|_| std::path::absolute(dir))
-                    .map_err(|e| e.to_string())?,
+                    .map_err(|e| crate::fail!(Resolver, e.to_string()))?,
             );
         }
         return Ok(());
@@ -453,9 +523,17 @@ fn expand_pattern_at(
             return Ok(());
         };
         for entry in entries {
-            let entry =
-                entry.map_err(|e| format!("failed to read workspace member directory: {e}"))?;
-            if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            let entry = entry.map_err(|e| {
+                crate::fail!(
+                    Resolver,
+                    format!("failed to read workspace member directory: {e}")
+                )
+            })?;
+            if entry
+                .file_type()
+                .map_err(|e| crate::fail!(Resolver, e.to_string()))?
+                .is_dir()
+            {
                 expand_pattern_at(&entry.path(), parts, at, out)?;
             }
         }
@@ -464,15 +542,25 @@ fn expand_pattern_at(
     if !part.contains(['*', '?', '[', '\\']) {
         return expand_pattern_at(&dir.join(part), parts, at + 1, out);
     }
-    let entries = std::fs::read_dir(dir).map_err(|e| {
-        format!(
-            "failed to read {} while expanding workspace member patterns: {e}",
-            dir.display()
-        )
-    })?;
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| {
+            format!(
+                "failed to read {} while expanding workspace member patterns: {e}",
+                dir.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("failed to read workspace member directory: {e}"))?;
-        if entry.file_type().map_err(|e| e.to_string())?.is_dir()
+        let entry = entry.map_err(|e| {
+            crate::fail!(
+                Resolver,
+                format!("failed to read workspace member directory: {e}")
+            )
+        })?;
+        if entry
+            .file_type()
+            .map_err(|e| crate::fail!(Resolver, e.to_string()))?
+            .is_dir()
             && wildcard_match(part, &entry.file_name().to_string_lossy())?
         {
             expand_pattern_at(&entry.path(), parts, at + 1, out)?;
@@ -481,7 +569,7 @@ fn expand_pattern_at(
     Ok(())
 }
 
-fn wildcard_match(pattern: &str, text: &str) -> Result<bool, String> {
+fn wildcard_match(pattern: &str, text: &str) -> Result<bool, crate::error::Error> {
     let pattern: Vec<char> = pattern.chars().collect();
     let text: Vec<char> = text.chars().collect();
     let mut memo = std::collections::BTreeMap::new();
@@ -494,7 +582,7 @@ fn wildcard_match_at(
     pi: usize,
     ti: usize,
     memo: &mut std::collections::BTreeMap<(usize, usize), bool>,
-) -> Result<bool, String> {
+) -> Result<bool, crate::error::Error> {
     if let Some(result) = memo.get(&(pi, ti)) {
         return Ok(*result);
     }
@@ -506,9 +594,12 @@ fn wildcard_match_at(
         }
         Some('?') => ti < text.len() && wildcard_match_at(pattern, text, pi + 1, ti + 1, memo)?,
         Some('\\') => {
-            let literal = pattern
-                .get(pi + 1)
-                .ok_or_else(|| "workspace glob may not end with a backslash".to_string())?;
+            let literal = pattern.get(pi + 1).ok_or_else(|| {
+                crate::fail!(
+                    Resolver,
+                    "workspace glob may not end with a backslash".to_string()
+                )
+            })?;
             ti < text.len()
                 && text[ti] == *literal
                 && wildcard_match_at(pattern, text, pi + 2, ti + 1, memo)?
@@ -531,7 +622,7 @@ fn match_character_class(
     pattern: &[char],
     start: usize,
     candidate: Option<char>,
-) -> Result<(usize, bool), String> {
+) -> Result<(usize, bool), crate::error::Error> {
     let mut at = start + 1;
     let negated = matches!(pattern.get(at), Some('!') | Some('^'));
     if negated {
@@ -545,18 +636,24 @@ fn match_character_class(
         }
         let (current, consumed) = if current == '\\' {
             (
-                *pattern.get(at + 1).ok_or_else(|| {
-                    "incomplete escape in workspace glob character class".to_string()
-                })?,
+                *pattern
+                    .get(at + 1)
+                    .ok_or_else(|| {
+                        "incomplete escape in workspace glob character class".to_string()
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?,
                 2,
             )
         } else {
             (current, 1)
         };
         if pattern.get(at + consumed) == Some(&'-') {
-            let end = *pattern
-                .get(at + consumed + 1)
-                .ok_or_else(|| "incomplete character range in workspace glob".to_string())?;
+            let end = *pattern.get(at + consumed + 1).ok_or_else(|| {
+                crate::fail!(
+                    Resolver,
+                    "incomplete character range in workspace glob".to_string()
+                )
+            })?;
             matched |= candidate.is_some_and(|value| current <= value && value <= end);
             at += consumed + 2;
         } else {
@@ -564,21 +661,32 @@ fn match_character_class(
             at += consumed;
         }
     }
-    Err("workspace glob character class is missing `]`".into())
+    Err(crate::fail!(
+        Resolver,
+        "workspace glob character class is missing `]`"
+    ))
 }
 
 fn materialize_member(
     mut member: toml::Value,
     workspace_root: &toml::Value,
     root: &Path,
-) -> Result<toml::Value, String> {
-    let member_table = member
-        .as_table_mut()
-        .ok_or_else(|| "member Cargo.toml top level is not a table".to_string())?;
+) -> Result<toml::Value, crate::error::Error> {
+    let member_table = member.as_table_mut().ok_or_else(|| {
+        crate::fail!(
+            Resolver,
+            "member Cargo.toml top level is not a table".to_string()
+        )
+    })?;
     let workspace = workspace_root
         .get("workspace")
         .and_then(toml::Value::as_table)
-        .ok_or_else(|| "workspace root is missing [workspace]".to_string())?;
+        .ok_or_else(|| {
+            crate::fail!(
+                Resolver,
+                "workspace root is missing [workspace]".to_string()
+            )
+        })?;
 
     if let Some(package) = member_table
         .get_mut("package")
@@ -612,13 +720,17 @@ fn materialize_member(
                     "version",
                 ];
                 if !INHERITABLE.contains(&key.as_str()) {
-                    return Err(format!(
-                        "package.{key} cannot be inherited from workspace.package"
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!("package.{key} cannot be inherited from workspace.package")
                     ));
                 }
                 if inherited_value.is_some_and(|table| table.len() != 1) {
-                    return Err(format!(
-                        "package.{key}.workspace=true cannot be combined with other sub-keys"
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "package.{key}.workspace=true cannot be combined with other sub-keys"
+                        )
                     ));
                 }
                 let value = inherited
@@ -626,7 +738,8 @@ fn materialize_member(
                     .cloned()
                     .ok_or_else(|| {
                         format!("package.{key} inherits workspace but the root has no such field")
-                    })?;
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?;
                 package.insert(key, value);
             }
         }
@@ -643,13 +756,18 @@ fn materialize_member(
         })
     {
         if lints.len() != 1 {
-            return Err(
-                "[lints] workspace=true cannot be declared together with other lints".into(),
-            );
+            return Err(crate::fail!(
+                Resolver,
+                "[lints] workspace=true cannot be declared together with other lints"
+            ));
         }
-        let inherited = workspace.get("lints").cloned().ok_or_else(|| {
-            "[lints] inherits workspace but the root has no [workspace.lints]".to_string()
-        })?;
+        let inherited = workspace
+            .get("lints")
+            .cloned()
+            .ok_or_else(|| {
+                "[lints] inherits workspace but the root has no [workspace.lints]".to_string()
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         member_table.insert("lints".into(), inherited);
     }
 
@@ -747,7 +865,7 @@ fn materialize_dependency_table(
     field: &str,
     workspace: &toml::map::Map<String, toml::Value>,
     root: &Path,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let names: Vec<String> = deps.keys().cloned().collect();
     for name in names {
         let Some(local) = deps.get(&name).cloned() else {
@@ -770,7 +888,8 @@ fn materialize_dependency_table(
             .cloned()
             .ok_or_else(|| {
                 format!("{field}.{name} inherits workspace but the root has no such dependency")
-            })?;
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         deps.insert(name, merge_dependency(base, local, root)?);
     }
     Ok(())
@@ -819,7 +938,7 @@ fn merge_dependency(
     base: toml::Value,
     local: toml::Value,
     root: &Path,
-) -> Result<toml::Value, String> {
+) -> Result<toml::Value, crate::error::Error> {
     let mut base = match base {
         toml::Value::String(version) => {
             let mut table = toml::map::Map::new();
@@ -827,12 +946,18 @@ fn merge_dependency(
             table
         }
         toml::Value::Table(table) => table,
-        _ => return Err("workspace dependency must be a string or a table".into()),
+        _ => {
+            return Err(crate::fail!(
+                Resolver,
+                "workspace dependency must be a string or a table"
+            ));
+        }
     };
     if base.contains_key("optional") {
-        return Err(
-            "workspace.dependencies cannot declare optional; the member dependency must".into(),
-        );
+        return Err(crate::fail!(
+            Resolver,
+            "workspace.dependencies cannot declare optional; the member dependency must"
+        ));
     }
     if let Some(path) = base.get("path").and_then(toml::Value::as_str) {
         base.insert(
@@ -840,29 +965,42 @@ fn merge_dependency(
             toml::Value::String(root.join(path).display().to_string()),
         );
     }
-    let local = local
-        .as_table()
-        .ok_or_else(|| "a workspace=true dependency must be a table".to_string())?;
+    let local = local.as_table().ok_or_else(|| {
+        crate::fail!(
+            Resolver,
+            "a workspace=true dependency must be a table".to_string()
+        )
+    })?;
     if let Some(key) = local
         .keys()
         .find(|key| !matches!(key.as_str(), "workspace" | "features" | "optional"))
     {
-        return Err(format!(
-            "an inherited workspace dependency cannot declare `{key}` beyond features/optional"
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "an inherited workspace dependency cannot declare `{key}` beyond features/optional"
+            )
         ));
     }
     let mut features = match base.remove("features") {
-        Some(value) => value
-            .as_array()
-            .cloned()
-            .ok_or_else(|| "workspace dependency features must be an array".to_string())?,
+        Some(value) => value.as_array().cloned().ok_or_else(|| {
+            crate::fail!(
+                Resolver,
+                "workspace dependency features must be an array".to_string()
+            )
+        })?,
         None => Vec::new(),
     };
     if let Some(extra) = local.get("features") {
         features.extend(
             extra
                 .as_array()
-                .ok_or_else(|| "member dependency features must be an array".to_string())?
+                .ok_or_else(|| {
+                    crate::fail!(
+                        Resolver,
+                        "member dependency features must be an array".to_string()
+                    )
+                })?
                 .iter()
                 .cloned(),
         );
@@ -1013,8 +1151,8 @@ mod tests {
         )
         .unwrap();
         let error = WorkspaceManifest::read(&root).unwrap_err();
-        assert!(error.contains("workspace.members"), "{error}");
-        assert!(error.contains("missing"), "{error}");
+        assert!(error.to_string().contains("workspace.members"), "{error}");
+        assert!(error.to_string().contains("missing"), "{error}");
 
         std::fs::write(
             root.join("Cargo.toml"),
@@ -1022,8 +1160,11 @@ mod tests {
         )
         .unwrap();
         let error = WorkspaceManifest::read(&root).unwrap_err();
-        assert!(error.contains("workspace.default-members"), "{error}");
-        assert!(error.contains("missing"), "{error}");
+        assert!(
+            error.to_string().contains("workspace.default-members"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("missing"), "{error}");
 
         std::fs::write(
             root.join("Cargo.toml"),
@@ -1038,7 +1179,10 @@ mod tests {
         )
         .unwrap();
         let error = WorkspaceManifest::read(&unlisted).unwrap_err();
-        assert!(error.contains("neither a member nor excluded"), "{error}");
+        assert!(
+            error.to_string().contains("neither a member nor excluded"),
+            "{error}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1167,7 +1311,7 @@ mod tests {
         )
         .unwrap();
         let error = materialize_member(invalid_member, &root, &dir).unwrap_err();
-        assert!(error.contains("features/optional"), "{error}");
+        assert!(error.to_string().contains("features/optional"), "{error}");
 
         let invalid_root: toml::Value = toml::from_str(
             "[workspace]\n[workspace.dependencies]\ndep={ path='dep', optional=true }\n",
@@ -1179,6 +1323,9 @@ mod tests {
         )
         .unwrap();
         let error = materialize_member(inherited, &invalid_root, &dir).unwrap_err();
-        assert!(error.contains("cannot declare optional"), "{error}");
+        assert!(
+            error.to_string().contains("cannot declare optional"),
+            "{error}"
+        );
     }
 }

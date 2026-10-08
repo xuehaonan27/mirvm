@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 pub fn resolve(
     env_get: impl Fn(&str) -> Option<String>,
     root: &Path,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::error::Error> {
     if let Some(v) = env_get("CARGO_ENCODED_RUSTFLAGS") {
         return Ok(split_encoded(&v));
     }
@@ -49,7 +49,7 @@ pub fn resolve(
 }
 
 /// Real-environment entry point used by drive().
-pub fn from_env_and_disk(root: &Path) -> Result<Vec<String>, String> {
+pub fn from_env_and_disk(root: &Path) -> Result<Vec<String>, crate::error::Error> {
     resolve(|k| std::env::var(k).ok(), root)
 }
 
@@ -85,11 +85,11 @@ fn find_config(root: &Path, home: Option<&Path>) -> Option<PathBuf> {
 /// target.'cfg(all())', finally build.rustflags (first hit wins). Missing all three = empty
 /// list (not an error); invalid values (non-string/non-array, bad toml) = loud error — user
 /// mistakes should not be swallowed silently.
-fn parse_config(path: &Path) -> Result<Vec<String>, String> {
+fn parse_config(path: &Path) -> Result<Vec<String>, crate::error::Error> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let v: toml::Value =
-        toml::from_str(&text).map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        .map_err(|e| crate::fail!(Resolver, format!("failed to read {}: {e}", path.display())))?;
+    let v: toml::Value = toml::from_str(&text)
+        .map_err(|e| crate::fail!(Resolver, format!("failed to parse {}: {e}", path.display())))?;
     let target = v.get("target").and_then(toml::Value::as_table);
     let target_hit = |key: &str| -> Option<&toml::Value> {
         target
@@ -109,25 +109,31 @@ fn parse_config(path: &Path) -> Result<Vec<String>, String> {
 }
 
 /// rustflags value: string (split on whitespace) or array of strings; other types error loudly.
-fn flags_value(v: &toml::Value, path: &Path) -> Result<Vec<String>, String> {
+fn flags_value(v: &toml::Value, path: &Path) -> Result<Vec<String>, crate::error::Error> {
     match v {
         toml::Value::String(s) => Ok(split_ws(s)),
         toml::Value::Array(xs) => {
             let mut out = Vec::with_capacity(xs.len());
             for x in xs {
                 let Some(s) = x.as_str() else {
-                    return Err(format!(
-                        "rustflags array members in {} must be strings: {x}",
-                        path.display()
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "rustflags array members in {} must be strings: {x}",
+                            path.display()
+                        )
                     ));
                 };
                 out.push(s.to_string());
             }
             Ok(out)
         }
-        _ => Err(format!(
-            "rustflags in {} must be a string or array of strings: {v}",
-            path.display()
+        _ => Err(crate::fail!(
+            Resolver,
+            format!(
+                "rustflags in {} must be a string or array of strings: {v}",
+                path.display()
+            )
         )),
     }
 }

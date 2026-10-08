@@ -29,7 +29,7 @@ pub(crate) use super::macos_aarch64::bridge::{entry_asm, slot_jump_asm};
 ///
 /// The slots are private to the image and filled by `crate::vm::native_instance::wire` once the
 /// owning Engine exists, which is why the entries carry no address of their own.
-pub(crate) fn bridge_asm() -> Result<String, String> {
+pub(crate) fn bridge_asm() -> Result<String, crate::error::Error> {
     let format = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     let mut out = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
     // The entries carry the visibility the platform's redirection needs; the slots carry the one
@@ -46,10 +46,15 @@ pub(crate) fn bridge_asm() -> Result<String, String> {
         Visibility::Private
     };
     for &call in INTERPOSED_CALLS {
-        let owner = owner_slot(call)
-            .ok_or_else(|| format!("interposed call `{call}` has no owner slot"))?;
-        let register = crate::arch::asmstub::bridge_owner_register(call)
-            .ok_or_else(|| format!("interposed call `{call}` has no owner register"))?;
+        let owner = owner_slot(call).ok_or_else(|| {
+            crate::fail!(Os, format!("interposed call `{call}` has no owner slot"))
+        })?;
+        let register = crate::arch::asmstub::bridge_owner_register(call).ok_or_else(|| {
+            crate::fail!(
+                Os,
+                format!("interposed call `{call}` has no owner register")
+            )
+        })?;
         let entry = linker::bridge_entry_name(call);
         // Aligned, because an entry is branched to directly and the platform's own linker would
         // have aligned a function of its own making.

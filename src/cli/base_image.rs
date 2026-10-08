@@ -101,7 +101,7 @@ pub(super) fn build_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
     if code != ExitCode::SUCCESS || !callbacks.ok {
-        return ExitCode::from(1);
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     ExitCode::SUCCESS
 }

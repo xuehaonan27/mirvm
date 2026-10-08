@@ -511,7 +511,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     // and one shape for both keeps the two call sites from having to know which platform they are
     // on. Its name is the hash of its content, so it stands in for that content in this key.
     let bridge = crate::native::artifact::bridge::artifact(&dir, std::path::Path::new("cc"), b"")
-        .map_err(Error::assemble)?;
+        .map_err(|e| Error::assemble(e.to_string()))?;
     let bridge_name = bridge
         .file_name()
         .unwrap_or_default()

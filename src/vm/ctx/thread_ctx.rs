@@ -228,7 +228,11 @@ impl ThreadContexts {
         };
         let mut ctx = slot.ctx.lock().unwrap();
         let Some(ctx) = ctx.as_deref_mut() else {
-            eprintln!("mirvm[m4-engine]: attempted to attach a finalized Engine context");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "attempted to attach a finalized Engine context"
+            );
             std::process::abort();
         };
         let ptr = ctx as *mut Ctx;
@@ -389,7 +393,11 @@ fn block_thread_signals_for_exit() -> SignalMask {
     match set_thread_mask(MaskOp::Block, &all_blockable_mask()) {
         Ok(previous) => previous,
         Err(error) => {
-            eprintln!("mirvm[m4-engine]: failed to block signals before pthread exit: {error}");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "failed to block signals before pthread exit: {error}"
+            );
             std::process::abort();
         }
     }
@@ -397,8 +405,10 @@ fn block_thread_signals_for_exit() -> SignalMask {
 
 fn restore_thread_signal_mask_for_exit(mask: &SignalMask) {
     if let Err(error) = set_thread_mask(MaskOp::Set, mask) {
-        eprintln!(
-            "mirvm[m4-engine]: failed to restore signals while draining pthread exit: {error}"
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "failed to restore signals while draining pthread exit: {error}"
         );
         std::process::abort();
     }
@@ -407,8 +417,10 @@ fn restore_thread_signal_mask_for_exit(mask: &SignalMask) {
 fn drain_thread_signal_inbox_for_exit(inbox: super::super::signal::ThreadInboxHandle) {
     while let Some((delivery, signum)) = inbox.take_delivery(0) {
         if let Err(fault) = dispatch_signal_delivery(delivery, signum) {
-            eprintln!(
-                "mirvm[m4-engine]: target pthread signal handler faulted during thread exit: {}",
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "target pthread signal handler faulted during thread exit: {}",
                 fault.message
             );
             std::process::abort();
@@ -470,7 +482,11 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
         // represented by the activation id and stack, which the guard clears.
         let thread_inbox = (*contexts).thread_inbox;
         if (*contexts).current_activation != 0 || !(*contexts).active_engines.is_empty() {
-            eprintln!("mirvm[m4-engine]: pthread exited inside an active Engine call");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "pthread exited inside an active Engine call"
+            );
             std::process::abort();
         }
         let key = *CTX_KEY.get().unwrap();
@@ -543,7 +559,11 @@ pub fn attach(shared: &Arc<Shared>) -> *mut Ctx {
         let p = crate::os::thread::tls_get(key);
         let contexts = if p.is_null() {
             if THREAD_CONTEXT_EXITING.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("mirvm[m4-engine]: Engine callback entered after pthread teardown");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "Engine callback entered after pthread teardown"
+                );
                 std::process::abort();
             }
             let contexts = Box::into_raw(Box::new(ThreadContexts::new()));
@@ -576,22 +596,38 @@ pub fn current() -> *mut Ctx {
 
 pub(crate) fn begin_engine_fault(ctx: *mut Ctx) -> (Arc<Shared>, EngineFaultToken) {
     if ctx.is_null() {
-        eprintln!("mirvm[m4-engine]: EngineFault started without an active Engine context");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault started without an active Engine context"
+        );
         std::process::abort();
     }
     let Some(key) = CTX_KEY.get().copied() else {
-        eprintln!("mirvm[m4-engine]: EngineFault started before thread context initialization");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault started before thread context initialization"
+        );
         std::process::abort();
     };
     let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
     if contexts.is_null() || unsafe { (*contexts).current } != ctx {
-        eprintln!("mirvm[m4-engine]: EngineFault started outside its active Engine context");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault started outside its active Engine context"
+        );
         std::process::abort();
     }
     let owner = unsafe { (*ctx).shared_arc() };
     let nonce = unsafe { (*contexts).next_fault_nonce };
     if nonce == 0 {
-        eprintln!("mirvm[m4-engine]: EngineFault token counter exhausted");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault token counter exhausted"
+        );
         std::process::abort();
     }
     let token = EngineFaultToken {
@@ -620,13 +656,21 @@ pub(crate) fn engine_fault_in_flight() -> bool {
 /// Consume an EngineFault at its owning execution boundary.
 pub(crate) fn finish_engine_fault(token: EngineFaultToken) {
     let Some(key) = CTX_KEY.get().copied() else {
-        eprintln!("mirvm[m4-engine]: EngineFault finished after thread context teardown");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault finished after thread context teardown"
+        );
         std::process::abort();
     };
     let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
     if contexts.is_null() || unsafe { (*contexts).in_flight_faults.last().copied() } != Some(token)
     {
-        eprintln!("mirvm[m4-engine]: EngineFault was consumed by a non-owning Engine boundary");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault was consumed by a non-owning Engine boundary"
+        );
         std::process::abort();
     }
     let current = unsafe { (*contexts).current };
@@ -635,7 +679,11 @@ pub(crate) fn finish_engine_fault(token: EngineFaultToken) {
         || token.raising_ctx.is_null()
         || unsafe { (*token.raising_ctx).shared().id } != token.owner_id
     {
-        eprintln!("mirvm[m4-engine]: EngineFault owner context no longer matches its exception");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault owner context no longer matches its exception"
+        );
         std::process::abort();
     }
 

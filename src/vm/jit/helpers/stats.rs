@@ -144,7 +144,7 @@ extern "C" fn stat_dump() {
             TIER_OPTIMIZED.load(Ordering::Relaxed)
         ));
     }
-    eprintln!("{line}");
+    crate::diag::instrument(format_args!("{line}"));
 }
 
 /// Called from `Compiler::new`, which one Engine does once per tier: the environment is read and the
@@ -230,22 +230,22 @@ extern "C" fn ledger_dump() {
         if count == 0 {
             continue;
         }
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "mirvm-jit-ledger: {} count={count} body_bytes={body} code_bytes={code} micros={micros} \
              body_per_us={:.1} code_per_body={:.2}",
             kind.name(),
             body as f64 / micros.max(1) as f64,
             code as f64 / body.max(1) as f64,
-        );
+        ));
     }
     rows.sort_by_key(|row| row.body);
     for row in rows.iter() {
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "mirvm-jit-ledger-row: {} body={} code={} micros={}",
             row.built.name(),
             row.body,
             row.code,
             row.micros
-        );
+        ));
     }
 }

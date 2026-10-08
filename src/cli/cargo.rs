@@ -22,13 +22,13 @@ pub(super) fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut argv = argv.peekable();
     match take_internal_capture_directory(&mut argv) {
         Err(()) => {
-            eprintln!("mirvm capture: runner is missing the capture directory");
-            return ExitCode::from(2);
+            crate::diag_error!(Capture, "runner is missing the capture directory");
+            return ExitCode::from(crate::diag::exit::USAGE);
         }
         Ok(Some(directory)) => {
             if set_forwarded_capture_directory(directory).is_err() {
-                eprintln!("mirvm capture: runner received more than one capture request");
-                return ExitCode::from(2);
+                crate::diag_error!(Capture, "runner received more than one capture request");
+                return ExitCode::from(crate::diag::exit::USAGE);
             }
         }
         Ok(None) => {}
@@ -39,10 +39,8 @@ pub(super) fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     ) {
         Ok(router) => router,
         Err(error) => {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot start diagnostics stream: {error}"
-            ));
-            return ExitCode::from(70);
+            crate::diag_error!(Capture, "cannot start diagnostics stream: {error}");
+            return ExitCode::from(crate::diag::exit::SOFTWARE);
         }
     };
     let guest_process = GuestProcessState::from_cargo_runner();

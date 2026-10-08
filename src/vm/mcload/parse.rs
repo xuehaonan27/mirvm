@@ -47,30 +47,43 @@ pub(super) struct Image<'a> {
 impl<'a> Image<'a> {
     /// Read the headers, rejecting a shape this loader does not handle: another file type,
     /// another machine, or a program-header entry size smaller than the format defines.
-    pub(super) fn parse(bytes: &'a [u8]) -> Result<Self, String> {
-        let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
+    pub(super) fn parse(bytes: &'a [u8]) -> Result<Self, crate::error::Error> {
+        let header = elf::FileHeader::parse(bytes)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
         if header.kind != elf::ET_DYN {
-            return Err(
-                "MC image is not ET_DYN (self-produced family should be a shared object)".into(),
-            );
-        }
-        if header.machine != crate::arch::ELF_MACHINE {
-            return Err(format!(
-                "MC image was built for ELF machine {} but this host is {}",
-                header.machine,
-                crate::arch::ELF_MACHINE
+            return Err(crate::fail!(
+                Native,
+                "MC image is not ET_DYN (self-produced family should be a shared object)"
             ));
         }
-        let phoff = usize::try_from(header.phoff).map_err(|_| bad())?;
+        if header.machine != crate::arch::ELF_MACHINE {
+            return Err(crate::fail!(
+                Native,
+                format!(
+                    "MC image was built for ELF machine {} but this host is {}",
+                    header.machine,
+                    crate::arch::ELF_MACHINE
+                )
+            ));
+        }
+        let phoff = usize::try_from(header.phoff)
+            .map_err(|_| bad())
+            .map_err(|e| crate::fail!(Native, e))?;
         let phentsize = usize::from(header.phentsize);
         if phentsize < elf::PHDR_SIZE {
-            return Err(bad());
+            return Err(crate::fail!(Native, bad()));
         }
-        let sections = elf::sections(bytes, &header).ok_or_else(bad)?;
+        let sections = elf::sections(bytes, &header)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
         let mut program_headers = Vec::with_capacity(usize::from(header.phnum));
         for index in 0..usize::from(header.phnum) {
-            program_headers
-                .push(program_header_at(bytes, phoff, phentsize, index).ok_or_else(bad)?);
+            program_headers.push(
+                program_header_at(bytes, phoff, phentsize, index)
+                    .ok_or_else(bad)
+                    .map_err(|e| crate::fail!(Native, e))?,
+            );
         }
         Ok(Self {
             bytes,
@@ -87,8 +100,9 @@ impl<'a> Image<'a> {
     }
 
     /// The section-header string table, which names every section.
-    pub(super) fn section_names(&self) -> Result<elf::Section, String> {
-        self.section_at(self.shstrndx).ok_or_else(bad)
+    pub(super) fn section_names(&self) -> Result<elf::Section, crate::error::Error> {
+        self.section_at(self.shstrndx)
+            .ok_or_else(|| crate::fail!(Native, bad()))
     }
 
     /// Find the sections the other phases work on, compared against `names`.

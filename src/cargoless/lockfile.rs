@@ -55,12 +55,13 @@ pub struct Lockfile {
     pub unused_patches: Vec<UnusedPatch>,
 }
 
-type LErr = String;
+type LErr = crate::error::Error;
 
 impl Lockfile {
     pub fn read(path: &Path) -> Result<Self, LErr> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            crate::fail!(Resolver, format!("failed to read {}: {e}", path.display()))
+        })?;
         Self::parse(&text)
     }
 
@@ -91,12 +92,15 @@ impl Lockfile {
             replace: Option<String>,
             dependencies: Option<Vec<String>>,
         }
-        let raw: RawLock =
-            toml::from_str(text).map_err(|e| format!("failed to parse Cargo.lock: {e}"))?;
+        let raw: RawLock = toml::from_str(text)
+            .map_err(|e| crate::fail!(Resolver, format!("failed to parse Cargo.lock: {e}")))?;
         let format_version = raw.version.unwrap_or(1);
         if !(1..=4).contains(&format_version) {
-            return Err(format!(
-                "Cargo.lock format version {format_version} is outside the supported subset"
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "Cargo.lock format version {format_version} is outside the supported subset"
+                )
             ));
         }
         let mut packages = Vec::new();
@@ -106,9 +110,12 @@ impl Lockfile {
                 && !src.starts_with("sparse+")
                 && !src.starts_with("git+")
             {
-                return Err(format!(
-                    "source of lock package {} is outside the supported subset: {src}",
-                    p.name
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "source of lock package {} is outside the supported subset: {src}",
+                        p.name
+                    )
                 ));
             }
             if p.source
@@ -121,24 +128,29 @@ impl Lockfile {
                     matches!(precise.len(), 40 | 64)
                         && precise.bytes().all(|byte| byte.is_ascii_hexdigit())
                 }) {
-                    return Err(format!(
-                        "source of lock Git package {} lacks a 40/64-digit precise commit: {source}",
-                        p.name
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "source of lock Git package {} lacks a 40/64-digit precise commit: {source}",
+                            p.name
+                        )
                     ));
                 }
                 if p.checksum.is_some() {
-                    return Err(format!(
-                        "lock Git package {} must not carry a checksum",
-                        p.name
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!("lock Git package {} must not carry a checksum", p.name)
                     ));
                 }
             }
-            let version = semver::Version::parse(&p.version).map_err(|e| {
-                format!(
-                    "invalid version {} of lock package {}: {e}",
-                    p.version, p.name
-                )
-            })?;
+            let version = semver::Version::parse(&p.version)
+                .map_err(|e| {
+                    format!(
+                        "invalid version {} of lock package {}: {e}",
+                        p.version, p.name
+                    )
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?;
             let dependencies = p
                 .dependencies
                 .unwrap_or_default()
@@ -160,12 +172,14 @@ impl Lockfile {
             .unwrap_or_default()
             .into_iter()
             .map(|patch| {
-                let version = semver::Version::parse(&patch.version).map_err(|error| {
-                    format!(
-                        "invalid version {} of unused lock patch {}: {error}",
-                        patch.version, patch.name
-                    )
-                })?;
+                let version = semver::Version::parse(&patch.version)
+                    .map_err(|error| {
+                        format!(
+                            "invalid version {} of unused lock patch {}: {error}",
+                            patch.version, patch.name
+                        )
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?;
                 Ok(UnusedPatch {
                     name: patch.name,
                     version,
@@ -173,7 +187,7 @@ impl Lockfile {
                     checksum: patch.checksum,
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, crate::error::Error>>()?;
         Ok(Self {
             format_version,
             packages,
@@ -281,17 +295,22 @@ fn parse_dep_line(line: &str) -> Result<LockedDep, LErr> {
     let mut it = without_src.split_whitespace();
     let name = it
         .next()
-        .ok_or_else(|| format!("invalid lock dependency line: {line}"))?;
+        .ok_or_else(|| crate::fail!(Resolver, format!("invalid lock dependency line: {line}")))?;
     let version = it
         .next()
         .map(|v| {
-            semver::Version::parse(v)
-                .map_err(|e| format!("invalid version {v} on lock dependency line {line}: {e}"))
+            semver::Version::parse(v).map_err(|e| {
+                crate::fail!(
+                    Resolver,
+                    format!("invalid version {v} on lock dependency line {line}: {e}")
+                )
+            })
         })
         .transpose()?;
     if source.is_some() && version.is_none() {
-        return Err(format!(
-            "a lock dependency line with a source must carry a version: {line}"
+        return Err(crate::fail!(
+            Resolver,
+            format!("a lock dependency line with a source must carry a version: {line}")
         ));
     }
     if let Some(source) = &source {
@@ -299,13 +318,17 @@ fn parse_dep_line(line: &str) -> Result<LockedDep, LErr> {
             && !source.starts_with("sparse+")
             && !source.starts_with("git+")
         {
-            return Err(format!(
-                "source of lock dependency line is outside the supported subset: {source}"
+            return Err(crate::fail!(
+                Resolver,
+                format!("source of lock dependency line is outside the supported subset: {source}")
             ));
         }
         if source.starts_with("git+") && source.contains('#') {
-            return Err(format!(
-                "source of a lock Git dependency line must not carry a precise commit fragment: {source}"
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "source of a lock Git dependency line must not carry a precise commit fragment: {source}"
+                )
             ));
         }
     }
@@ -407,7 +430,7 @@ version = "0.2.0"
              source='git+https://github.com/x/y?branch=main'\n",
         )
         .unwrap_err();
-        assert!(err.contains("precise commit"), "{err}");
+        assert!(err.to_string().contains("precise commit"), "{err}");
     }
 
     #[test]

@@ -281,14 +281,14 @@ pub fn store(
     if crate::options::a2_debug() {
         // What the entry stores beside its fragments: the frozen region, as the chunks it is cut into,
         // and how much of that the store already held — which is what an edit's frozen bytes cost.
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "[a2-debug] program entry: {} bodies -> fragments, frozen {} B in {frozen_chunks} chunks \
              ({} stored, {} deduped)",
             records.len(),
             frozen.1,
             chunk_published.stored,
             chunk_published.deduped
-        );
+        ));
     }
     // Atomic publish: a reader sees either the previous entry or this one, never a half-written file.
     let path = entry_path(rustc_args);

@@ -286,8 +286,8 @@ pub(crate) struct FileRef<'a> {
 
 /// Serialize one manifest. The bytes are what a unit manifest is named by, so the caller that wants a
 /// content address hashes exactly these.
-pub(crate) fn encode(file: &FileRef<'_>) -> Result<Vec<u8>, String> {
-    postcard::to_stdvec(file).map_err(|error| error.to_string())
+pub(crate) fn encode(file: &FileRef<'_>) -> Result<Vec<u8>, crate::error::Error> {
+    postcard::to_stdvec(file).map_err(|error| crate::fail!(Image, error.to_string()))
 }
 
 /// A layer's frozen region, taken out of its module so the manifest can name chunks instead of
@@ -316,7 +316,9 @@ impl Frozen {
                 // A region that cannot be rebuilt is a bug in this process, not a cache decision: say
                 // so rather than run a module whose statics have no home.
                 if crate::options::a2_debug() {
-                    eprintln!("[a2-debug] frozen region not put back: {error}");
+                    crate::diag::instrument(format_args!(
+                        "[a2-debug] frozen region not put back: {error}"
+                    ));
                 }
             }
         }
@@ -348,7 +350,7 @@ pub(crate) fn take_frozen(
 /// A chunk the store no longer holds, or a length the chunks do not reassemble to, is an error the
 /// caller turns into a miss: a region missing a byte is wrong at every address in it. A manifest
 /// whose module already carries its region — the writer stored it whole — needs nothing.
-pub(crate) fn restore_frozen(file: &mut File) -> Result<(), String> {
+pub(crate) fn restore_frozen(file: &mut File) -> Result<(), crate::error::Error> {
     let Some(reference) = file.frozen.as_ref() else {
         return Ok(());
     };
@@ -368,7 +370,7 @@ pub(crate) fn project_module(
     unit: &Unit,
     symbols: &Symbols,
     session: &mut crate::store::frags::Session,
-) -> Result<Vec<Record>, String> {
+) -> Result<Vec<Record>, crate::error::Error> {
     let mut bodies = Vec::new();
     module.funcs.drain_into(&mut bodies);
     let mut records = Vec::with_capacity(bodies.len());
@@ -385,10 +387,10 @@ pub(crate) fn project_module(
                         .function_names
                         .get(index)
                         .map_or("<unnamed>", |name| name);
-                    eprintln!(
+                    crate::diag::instrument(format_args!(
                         "[a2-debug] project failed at record {index} of {} ({name}): {error}",
                         bodies.len()
-                    );
+                    ));
                 }
                 failure = Some(error);
                 break;
@@ -409,21 +411,27 @@ pub(crate) fn rehydrate_module(
     records: &[Record],
     unit: &Unit,
     symbols: &Symbols,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     if module.function_names.len() != records.len() {
-        return Err(format!(
-            "manifest stores {} functions but the module names {}",
-            records.len(),
-            module.function_names.len()
+        return Err(crate::fail!(
+            Image,
+            format!(
+                "manifest stores {} functions but the module names {}",
+                records.len(),
+                module.function_names.len()
+            )
         ));
     }
     let ids: Vec<[u8; 32]> = records.iter().map(|record| record.fragment).collect();
     let fragments = crate::store::frags::Index::load().read_many(&ids);
     let mut bodies = Vec::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
-        let fragment = fragments
-            .get(&record.fragment)
-            .ok_or_else(|| "a fragment the manifest names is not in the store".to_string())?;
+        let fragment = fragments.get(&record.fragment).ok_or_else(|| {
+            crate::fail!(
+                Image,
+                "a fragment the manifest names is not in the store".to_string()
+            )
+        })?;
         let name = module.function_names.get(index).map_or("?", |name| name);
         bodies.push(rehydrate(fragment, &record.bindings, name, unit, symbols)?);
     }
@@ -474,7 +482,7 @@ pub(crate) fn project_owned(
     id: u32,
     unit: &Unit,
     symbols: &Symbols,
-) -> Result<Owned, String> {
+) -> Result<Owned, crate::error::Error> {
     // An id this unit owns is local, whether it came from this session's lowering or from a loaded
     // manifest of the same unit; only another layer's id becomes a symbol.
     if let Some((owner, local)) = unit.owner(space, id)
@@ -493,8 +501,9 @@ pub(crate) fn project_owned(
         (Some(Binding::Symbol { kind, name }), Space::Tls) if kind == SymbolKind::Tls => {
             Ok(Owned::Symbol { kind, name })
         }
-        _ => Err(format!(
-            "no symbol names id {id}, which this unit does not own"
+        _ => Err(crate::fail!(
+            Image,
+            format!("no symbol names id {id}, which this unit does not own")
         )),
     }
 }
@@ -524,7 +533,7 @@ impl Tables {
         unit: &Unit,
         symbols: &Symbols,
         tls_by_sym: &std::collections::HashMap<Box<str>, crate::vm::ir::TlsId>,
-    ) -> Result<Tables, String> {
+    ) -> Result<Tables, crate::error::Error> {
         let mut tables = Tables::default();
         for (name, id) in module.exports.drain() {
             tables
@@ -565,40 +574,51 @@ impl Tables {
         module: &mut crate::vm::ir::Module,
         unit: &Unit,
         symbols: &Symbols,
-    ) -> Result<SymbolIndexes, String> {
+    ) -> Result<SymbolIndexes, crate::error::Error> {
         let mut exports = HashMap::with_capacity(self.exports.len());
         for (name, owned) in &self.exports {
-            let id = resolve_owned(Space::Func, owned, unit, symbols).ok_or_else(|| {
-                format!("export `{name}` does not resolve against the stack below")
-            })?;
+            let id = resolve_owned(Space::Func, owned, unit, symbols)
+                .ok_or_else(|| format!("export `{name}` does not resolve against the stack below"))
+                .map_err(|e| crate::fail!(Image, e))?;
             exports.insert(name.clone(), id);
         }
         let mut links = Vec::with_capacity(self.fn_entry_links.len());
         for (addr, owned) in &self.fn_entry_links {
-            let id = resolve_owned(Space::Func, owned, unit, symbols).ok_or_else(|| {
-                format!(
-                    "entry link {:#x} does not resolve against the stack below",
-                    addr.0
-                )
-            })?;
+            let id = resolve_owned(Space::Func, owned, unit, symbols)
+                .ok_or_else(|| {
+                    format!(
+                        "entry link {:#x} does not resolve against the stack below",
+                        addr.0
+                    )
+                })
+                .map_err(|e| crate::fail!(Image, e))?;
             links.push((*addr, id));
         }
         if module.entry_stub_sites.len() != self.entry_stub_funcs.len() {
-            return Err("entry-stub table size changed between write and load".into());
+            return Err(crate::fail!(
+                Image,
+                "entry-stub table size changed between write and load"
+            ));
         }
         for (site, owned) in module
             .entry_stub_sites
             .iter_mut()
             .zip(&self.entry_stub_funcs)
         {
-            site.func = resolve_owned(Space::Func, owned, unit, symbols)
-                .ok_or_else(|| "entry stub does not resolve against the stack below".to_string())?;
+            site.func = resolve_owned(Space::Func, owned, unit, symbols).ok_or_else(|| {
+                crate::fail!(
+                    Image,
+                    "entry stub does not resolve against the stack below".to_string()
+                )
+            })?;
         }
         let mut tls = HashMap::with_capacity(self.tls_syms.len());
         for (name, owned) in &self.tls_syms {
-            let id = resolve_owned(Space::Tls, owned, unit, symbols).ok_or_else(|| {
-                format!("TLS symbol `{name}` does not resolve against the stack below")
-            })?;
+            let id = resolve_owned(Space::Tls, owned, unit, symbols)
+                .ok_or_else(|| {
+                    format!("TLS symbol `{name}` does not resolve against the stack below")
+                })
+                .map_err(|e| crate::fail!(Image, e))?;
             tls.insert(name.clone(), id);
         }
         module.exports = exports.clone();
@@ -627,7 +647,7 @@ pub(crate) fn project(
     body: &FuncBody,
     unit: &Unit,
     symbols: &Symbols,
-) -> Result<Projected, String> {
+) -> Result<Projected, crate::error::Error> {
     let canonical = frag::canonical(body);
     let mut bindings = Vec::with_capacity(canonical.targets.len());
     for target in &canonical.targets {
@@ -643,7 +663,11 @@ pub(crate) fn project(
     })
 }
 
-fn project_target(target: Target, unit: &Unit, symbols: &Symbols) -> Result<Binding, String> {
+fn project_target(
+    target: Target,
+    unit: &Unit,
+    symbols: &Symbols,
+) -> Result<Binding, crate::error::Error> {
     let in_range =
         |value: u32, (start, len): (u32, u32)| value.checked_sub(start).is_some_and(|at| at < len);
     let in_domain =
@@ -658,9 +682,12 @@ fn project_target(target: Target, unit: &Unit, symbols: &Symbols) -> Result<Bind
         Target::Link(addr) if in_domain(addr.0, unit.code) => {
             Ok(Binding::Stub(addr.0 - unit.code.0))
         }
-        other => symbols
-            .name_of(other)
-            .ok_or_else(|| format!("no symbol names {other:?}, which this unit does not own")),
+        other => symbols.name_of(other).ok_or_else(|| {
+            crate::fail!(
+                Image,
+                format!("no symbol names {other:?}, which this unit does not own")
+            )
+        }),
     }
 }
 
@@ -784,7 +811,7 @@ pub(crate) fn rehydrate(
     name: &str,
     unit: &Unit,
     symbols: &Symbols,
-) -> Result<FuncBody, String> {
+) -> Result<FuncBody, crate::error::Error> {
     let mut body = frag::decode(fragment)?;
     body.name = name.into();
     let mut binder = Binder {
@@ -797,7 +824,7 @@ pub(crate) fn rehydrate(
     // The walk is infallible so that one exhaustive match serves both directions; a binding that does
     // not resolve records the reason here and the body is discarded.
     match binder.failed {
-        Some(error) => Err(error),
+        Some(error) => Err(crate::fail!(Image, error)),
         None => Ok(body),
     }
 }
@@ -811,69 +838,104 @@ struct Binder<'a> {
 }
 
 impl Binder<'_> {
-    fn at(&self, ordinal: u32, want: &str) -> Result<&Binding, String> {
+    fn at(&self, ordinal: u32, want: &str) -> Result<&Binding, crate::error::Error> {
         self.bindings
             .get(ordinal as usize)
-            .ok_or_else(|| format!("ordinal {ordinal} is outside the binding table"))
+            .ok_or_else(|| {
+                crate::fail!(
+                    Image,
+                    format!("ordinal {ordinal} is outside the binding table")
+                )
+            })
             .and_then(|binding| match binding {
                 Binding::Symbol { .. } => Ok(binding),
                 Binding::Func(_) if want == "function" => Ok(binding),
                 Binding::Tls(_) if want == "TLS" => Ok(binding),
                 Binding::Asm(_) if want == "asm stub" => Ok(binding),
                 Binding::Frozen(_) | Binding::Stub(_) if want == "address" => Ok(binding),
-                _ => Err(format!("ordinal {ordinal} does not name a {want}")),
+                _ => Err(crate::fail!(
+                    Image,
+                    format!("ordinal {ordinal} does not name a {want}")
+                )),
             })
     }
 
-    fn bind_func(&self, id: &mut FuncId) -> Result<(), String> {
+    fn bind_func(&self, id: &mut FuncId) -> Result<(), crate::error::Error> {
         *id = match self.at(*id, "function")? {
             Binding::Func(local) => self.unit.funcs.0 + local,
             Binding::Symbol {
                 kind: SymbolKind::Func,
                 name,
-            } => self
-                .symbols
-                .func(name)
-                .ok_or_else(|| format!("function symbol `{name}` is not in the stack below"))?,
-            other => return Err(format!("function ordinal bound to {other:?}")),
+            } => self.symbols.func(name).ok_or_else(|| {
+                crate::fail!(
+                    Image,
+                    format!("function symbol `{name}` is not in the stack below")
+                )
+            })?,
+            other => {
+                return Err(crate::fail!(
+                    Image,
+                    format!("function ordinal bound to {other:?}")
+                ));
+            }
         };
         Ok(())
     }
 
-    fn bind_tls(&self, id: &mut TlsId) -> Result<(), String> {
+    fn bind_tls(&self, id: &mut TlsId) -> Result<(), crate::error::Error> {
         *id = match self.at(*id, "TLS")? {
             Binding::Tls(local) => self.unit.tls.0 + local,
             Binding::Symbol {
                 kind: SymbolKind::Tls,
                 name,
-            } => self
-                .symbols
-                .tls(name)
-                .ok_or_else(|| format!("TLS symbol `{name}` is not in the stack below"))?,
-            other => return Err(format!("TLS ordinal bound to {other:?}")),
+            } => self.symbols.tls(name).ok_or_else(|| {
+                crate::fail!(
+                    Image,
+                    format!("TLS symbol `{name}` is not in the stack below")
+                )
+            })?,
+            other => {
+                return Err(crate::fail!(
+                    Image,
+                    format!("TLS ordinal bound to {other:?}")
+                ));
+            }
         };
         Ok(())
     }
 
-    fn bind_asm(&self, id: &mut AsmStubId) -> Result<(), String> {
+    fn bind_asm(&self, id: &mut AsmStubId) -> Result<(), crate::error::Error> {
         *id = match self.at(*id, "asm stub")? {
             Binding::Asm(local) => self.unit.asm.0 + local,
-            other => return Err(format!("asm-stub ordinal bound to {other:?}")),
+            other => {
+                return Err(crate::fail!(
+                    Image,
+                    format!("asm-stub ordinal bound to {other:?}")
+                ));
+            }
         };
         Ok(())
     }
 
-    fn bind_link(&self, addr: &mut LinkAddr) -> Result<(), String> {
+    fn bind_link(&self, addr: &mut LinkAddr) -> Result<(), crate::error::Error> {
         let ordinal = u32::try_from(addr.0).unwrap_or(u32::MAX);
         *addr = match self.at(ordinal, "address")? {
             Binding::Frozen(offset) => LinkAddr(self.unit.frozen.0 + offset),
             Binding::Stub(offset) => LinkAddr(self.unit.code.0 + offset),
-            Binding::Symbol { kind, name } => LinkAddr(
-                self.symbols
-                    .address(*kind, name)
-                    .ok_or_else(|| format!("address symbol `{name}` is not in the stack below"))?,
-            ),
-            other => return Err(format!("address ordinal bound to {other:?}")),
+            Binding::Symbol { kind, name } => {
+                LinkAddr(self.symbols.address(*kind, name).ok_or_else(|| {
+                    crate::fail!(
+                        Image,
+                        format!("address symbol `{name}` is not in the stack below")
+                    )
+                })?)
+            }
+            other => {
+                return Err(crate::fail!(
+                    Image,
+                    format!("address ordinal bound to {other:?}")
+                ));
+            }
         };
         Ok(())
     }
@@ -882,22 +944,22 @@ impl Binder<'_> {
 impl SiteVisitor for Binder<'_> {
     fn func(&mut self, id: &mut FuncId) {
         if let Err(error) = self.bind_func(id) {
-            self.failed.get_or_insert(error);
+            self.failed.get_or_insert(error.to_string());
         }
     }
     fn tls(&mut self, id: &mut TlsId) {
         if let Err(error) = self.bind_tls(id) {
-            self.failed.get_or_insert(error);
+            self.failed.get_or_insert(error.to_string());
         }
     }
     fn asm(&mut self, id: &mut AsmStubId) {
         if let Err(error) = self.bind_asm(id) {
-            self.failed.get_or_insert(error);
+            self.failed.get_or_insert(error.to_string());
         }
     }
     fn link(&mut self, addr: &mut LinkAddr) {
         if let Err(error) = self.bind_link(addr) {
-            self.failed.get_or_insert(error);
+            self.failed.get_or_insert(error.to_string());
         }
     }
 }
@@ -1126,7 +1188,7 @@ mod tests {
         let symbols = Symbols::default();
         let body = body_with_sites(0, 0, 7, 0);
         let error = project(&body, &unit, &symbols).unwrap_err();
-        assert!(error.contains("no symbol names"), "{error}");
+        assert!(error.to_string().contains("no symbol names"), "{error}");
     }
 
     #[test]
@@ -1167,7 +1229,7 @@ mod tests {
         let mut bindings = projected.record.bindings.clone();
         bindings[0] = Binding::Func(0);
         let error = rehydrate(&projected.bytes, &bindings, "sym", &unit, &symbols).unwrap_err();
-        assert!(error.contains("does not name a TLS"), "{error}");
+        assert!(error.to_string().contains("does not name a TLS"), "{error}");
     }
 
     #[test]
@@ -1184,7 +1246,10 @@ mod tests {
             &Symbols::default(),
         )
         .unwrap_err();
-        assert!(error.contains("is not in the stack below"), "{error}");
+        assert!(
+            error.to_string().contains("is not in the stack below"),
+            "{error}"
+        );
     }
 
     /// A layer's addresses are classified by the region that contains them: its own slot and every slot

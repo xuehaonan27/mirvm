@@ -24,23 +24,26 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
     let request = match TestRequest::parse(cargo_args) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("mirvm test: {e}");
-            return ExitCode::from(2);
+            crate::diag_error!(Test, "{e}");
+            return ExitCode::from(crate::diag::exit::USAGE);
         }
     };
     if request.doc && request.no_run {
-        eprintln!("error: can't skip running doc tests with --no-run");
-        return ExitCode::from(101);
+        crate::diag_error!(Test, "error: can't skip running doc tests with --no-run");
+        return ExitCode::from(crate::diag::exit::TEST_FAILED);
     }
     if request.doc && request.has_non_doc_target_selection() {
-        eprintln!("error: can't mix --doc with other target selecting options");
-        return ExitCode::from(101);
+        crate::diag_error!(
+            Test,
+            "error: can't mix --doc with other target selecting options"
+        );
+        return ExitCode::from(crate::diag::exit::TEST_FAILED);
     }
     let mut workspace = match WorkspaceManifest::read(dir) {
         Ok(workspace) => workspace,
         Err(e) => {
-            eprintln!("mirvm: failed to read project {}: {e}", dir.display());
-            return ExitCode::from(1);
+            crate::diag_error!(Test, "failed to read project {}: {e}", dir.display());
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     };
     if request.offline {
@@ -54,23 +57,26 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         }
     }
     if request.locked && !workspace.root.join("Cargo.lock").is_file() {
-        eprintln!("mirvm test: --locked requires an existing Cargo.lock at the workspace root");
-        return ExitCode::from(1);
+        crate::diag_error!(
+            Test,
+            "--locked requires an existing Cargo.lock at the workspace root"
+        );
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     let mut manifests = match request.select_packages(&workspace) {
         Ok(manifests) => manifests,
         Err(e) => {
-            eprintln!("mirvm test: {e}");
-            return ExitCode::from(1);
+            crate::diag_error!(Test, "{e}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     };
     if let Err(e) = request.restrict_named_targets(&mut manifests) {
-        eprintln!("mirvm test: {e}");
-        return ExitCode::from(1);
+        crate::diag_error!(Test, "{e}");
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     if let Err(e) = request.apply_features(&mut manifests) {
-        eprintln!("mirvm test: {e}");
-        return ExitCode::from(1);
+        crate::diag_error!(Test, "{e}");
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     sort_packages_dependency_first(&mut manifests);
     let mut known = workspace.members.clone();
@@ -83,15 +89,15 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         let mut lock_workspace = workspace.clone();
         lock_workspace.members = known.clone();
         if let Err(e) = generate_workspace_lock(&lock_workspace) {
-            eprintln!("mirvm test: failed to generate workspace Cargo.lock: {e}");
-            return ExitCode::from(1);
+            crate::diag_error!(Test, "failed to generate workspace Cargo.lock: {e}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     }
     let plans = match resolve_workspace_plans(&manifests, &known) {
         Ok(plans) => plans,
         Err(e) => {
-            eprintln!("mirvm: dependency resolution failed: {e}");
-            return ExitCode::from(1);
+            crate::diag_error!(Test, "dependency resolution failed: {e}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     };
     let mut prepared = Vec::new();
@@ -146,7 +152,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         }
     }
     if failed {
-        ExitCode::from(101)
+        ExitCode::from(crate::diag::exit::TEST_FAILED)
     } else {
         ExitCode::SUCCESS
     }
@@ -174,7 +180,7 @@ struct DoctestTask {
 fn resolve_workspace_plans(
     manifests: &[PackageManifest],
     known_members: &[PackageManifest],
-) -> Result<Vec<ResolvePlan>, String> {
+) -> Result<Vec<ResolvePlan>, crate::error::Error> {
     let project = manifests
         .first()
         .map(|manifest| manifest.lock_root.as_path())
@@ -221,7 +227,10 @@ fn resolve_workspace_plans(
         }
         features = next;
     }
-    Err("workspace feature unification did not converge after 64 rounds (graph anomaly)".into())
+    Err(crate::fail!(
+        Test,
+        "workspace feature unification did not converge after 64 rounds (graph anomaly)"
+    ))
 }
 
 fn prepare_test_package(
@@ -231,21 +240,21 @@ fn prepare_test_package(
 ) -> Result<PreparedTests, ExitCode> {
     manifest.profile = manifest.test_profile;
     if request.locked && !manifest.lock_root.join("Cargo.lock").is_file() {
-        eprintln!("mirvm test: --locked requires an existing Cargo.lock");
-        return Err(ExitCode::from(1));
+        crate::diag_error!(Test, "--locked requires an existing Cargo.lock");
+        return Err(ExitCode::from(crate::diag::exit::FAILURE));
     }
 
     if let Err(e) =
         buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
     {
-        eprintln!("mirvm: {e}");
-        return Err(ExitCode::from(1));
+        crate::diag_error!(Test, "{e}");
+        return Err(ExitCode::from(crate::diag::exit::FAILURE));
     }
     let selected = match request.select(&manifest, &plan.root_features) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("mirvm test: {e}");
-            return Err(ExitCode::from(1));
+            crate::diag_error!(Test, "{e}");
+            return Err(ExitCode::from(crate::diag::exit::FAILURE));
         }
     };
     let doctest_target = request.wants_doctest().then(|| {
@@ -257,10 +266,11 @@ fn prepare_test_package(
     let doctest_target = match doctest_target {
         Some(Some(target)) => Some(target),
         Some(None) if request.doc => {
-            eprintln!(
-                "mirvm test: --doc requires a package with a lib target that has doctest enabled"
+            crate::diag_error!(
+                Test,
+                "--doc requires a package with a lib target that has doctest enabled"
             );
-            return Err(ExitCode::from(101));
+            return Err(ExitCode::from(crate::diag::exit::TEST_FAILED));
         }
         _ => None,
     };
@@ -270,8 +280,8 @@ fn prepare_test_package(
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("mirvm: failed to build sysroot: {e}");
-                return Err(ExitCode::from(1));
+                crate::diag_error!(Test, "failed to build sysroot: {e}");
+                return Err(ExitCode::from(crate::diag::exit::FAILURE));
             }
         },
     };
@@ -281,8 +291,8 @@ fn prepare_test_package(
     let rustflags = match crate::cargoless::rustflags::from_env_and_disk(&manifest.root) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("mirvm: failed to parse rustflags: {e}");
-            return Err(ExitCode::from(1));
+            crate::diag_error!(Test, "failed to parse rustflags: {e}");
+            return Err(ExitCode::from(crate::diag::exit::FAILURE));
         }
     };
     let compiled = match compile_plan(
@@ -298,8 +308,8 @@ fn prepare_test_package(
     ) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("mirvm: {e}");
-            return Err(ExitCode::from(1));
+            crate::diag_error!(Test, "{e}");
+            return Err(ExitCode::from(crate::diag::exit::FAILURE));
         }
     };
     let UnitTables { outputs, re_ran } = compiled.tables;
@@ -320,8 +330,8 @@ fn prepare_test_package(
     ) {
         Ok(fp) => fp,
         Err(e) => {
-            eprintln!("mirvm: root package fingerprint computation failed: {e}");
-            return Err(ExitCode::from(1));
+            crate::diag_error!(Test, "root package fingerprint computation failed: {e}");
+            return Err(ExitCode::from(crate::diag::exit::FAILURE));
         }
     };
     let root_bo = manifest.has_build_script.then(|| {
@@ -426,8 +436,8 @@ fn prepare_test_package(
                     bin_launchers.insert(target.name.clone(), path);
                 }
                 Err(e) => {
-                    eprintln!("mirvm test: {e}");
-                    return Err(ExitCode::from(1));
+                    crate::diag_error!(Test, "{e}");
+                    return Err(ExitCode::from(crate::diag::exit::FAILURE));
                 }
             }
         }
@@ -488,7 +498,7 @@ fn prepare_test_package(
             );
             recipes.push((item.target.name.clone(), recipe_path, args, target_fp, env));
         } else if !run_root_check(&self_exe, &manifest.root, &args, &env, false) {
-            return Err(ExitCode::from(1));
+            return Err(ExitCode::from(crate::diag::exit::FAILURE));
         }
     }
 
@@ -500,15 +510,15 @@ fn prepare_test_package(
             if !request.no_run {
                 let _ = run_recipe_child(&self_exe, &manifest.root, &sysroot, recipe, &[]);
             }
-            return Err(ExitCode::from(1));
+            return Err(ExitCode::from(crate::diag::exit::FAILURE));
         }
     }
     let doctest = if let Some(target) = doctest_target {
         let builder = match write_doctest_builder(&self_exe, &layout, &manifest, &root_fp) {
             Ok(builder) => builder,
             Err(error) => {
-                eprintln!("mirvm test: {error}");
-                return Err(ExitCode::from(1));
+                crate::diag_error!(Test, "{error}");
+                return Err(ExitCode::from(crate::diag::exit::FAILURE));
             }
         };
         let args = schedule::doctest_rustdoc_args(
@@ -588,16 +598,16 @@ struct SelectedTarget<'a> {
 }
 
 impl TestRequest {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse(args: &[String]) -> Result<Self, crate::error::Error> {
         let mut out = Self::default();
         let mut i = 0;
         while i < args.len() {
             let arg = &args[i];
-            let take_value = |i: &mut usize, name: &str| -> Result<String, String> {
+            let take_value = |i: &mut usize, name: &str| -> Result<String, crate::error::Error> {
                 *i += 1;
                 args.get(*i)
                     .cloned()
-                    .ok_or_else(|| format!("{name} requires a target name"))
+                    .ok_or_else(|| crate::fail!(Test, format!("{name} requires a target name")))
             };
             match arg.as_str() {
                 "--lib" => out.lib = true,
@@ -666,13 +676,19 @@ impl TestRequest {
                     add_feature_values(&mut out.features, &arg[11..]);
                 }
                 _ if arg.starts_with('-') => {
-                    return Err(format!(
-                        "unsupported Cargo test argument `{arg}`, will not be silently swallowed"
+                    return Err(crate::fail!(
+                        Test,
+                        format!(
+                            "unsupported Cargo test argument `{arg}`, will not be silently swallowed"
+                        )
                     ));
                 }
                 _ => {
                     if out.filter.replace(arg.clone()).is_some() {
-                        return Err("Cargo test accepts only one TESTNAME filter string".into());
+                        return Err(crate::fail!(
+                            Test,
+                            "Cargo test accepts only one TESTNAME filter string"
+                        ));
                     }
                 }
             }
@@ -684,12 +700,18 @@ impl TestRequest {
     fn select_packages(
         &self,
         workspace: &WorkspaceManifest,
-    ) -> Result<Vec<PackageManifest>, String> {
+    ) -> Result<Vec<PackageManifest>, crate::error::Error> {
         if self.workspace && !self.packages.is_empty() {
-            return Err("--workspace and --package cannot be used together".into());
+            return Err(crate::fail!(
+                Test,
+                "--workspace and --package cannot be used together"
+            ));
         }
         if !self.workspace && !self.excludes.is_empty() {
-            return Err("--exclude can only be used with --workspace".into());
+            return Err(crate::fail!(
+                Test,
+                "--exclude can only be used with --workspace"
+            ));
         }
         let mut roots = BTreeSet::new();
         if self.workspace {
@@ -715,12 +737,12 @@ impl TestRequest {
             .cloned()
             .collect();
         if selected.is_empty() {
-            return Err("package selection is empty".into());
+            return Err(crate::fail!(Test, "package selection is empty"));
         }
         Ok(selected)
     }
 
-    fn apply_features(&self, manifests: &mut [PackageManifest]) -> Result<(), String> {
+    fn apply_features(&self, manifests: &mut [PackageManifest]) -> Result<(), crate::error::Error> {
         for manifest in manifests.iter_mut() {
             manifest.default_features_enabled = !self.no_default_features;
             if self.all_features {
@@ -740,9 +762,9 @@ impl TestRequest {
                     .find(|manifest| manifest.name == package)
                 {
                     if !manifest.check_cfg_feature_values().contains(feature) {
-                        return Err(format!(
-                            "package `{}` has no feature `{feature}`",
-                            manifest.name
+                        return Err(crate::fail!(
+                            Test,
+                            format!("package `{}` has no feature `{feature}`", manifest.name)
                         ));
                     }
                     manifest.requested_features.insert(feature.to_string());
@@ -765,8 +787,11 @@ impl TestRequest {
                     }
                 }
                 if !found {
-                    return Err(format!(
-                        "feature `{spec}` points to neither a selected package nor its direct dependency"
+                    return Err(crate::fail!(
+                        Test,
+                        format!(
+                            "feature `{spec}` points to neither a selected package nor its direct dependency"
+                        )
                     ));
                 }
                 continue;
@@ -779,15 +804,19 @@ impl TestRequest {
                 }
             }
             if !found {
-                return Err(format!(
-                    "none of the selected packages have feature `{feature}`"
+                return Err(crate::fail!(
+                    Test,
+                    format!("none of the selected packages have feature `{feature}`")
                 ));
             }
         }
         Ok(())
     }
 
-    fn restrict_named_targets(&self, manifests: &mut Vec<PackageManifest>) -> Result<(), String> {
+    fn restrict_named_targets(
+        &self,
+        manifests: &mut Vec<PackageManifest>,
+    ) -> Result<(), crate::error::Error> {
         for (kind, names) in [
             (TargetKind::Bin, &self.bin_names),
             (TargetKind::Test, &self.test_names),
@@ -800,7 +829,10 @@ impl TestRequest {
                     .flat_map(|manifest| &manifest.targets)
                     .any(|target| target.kind == kind && &target.name == name)
                 {
-                    return Err(format!("no {kind:?} target named `{name}`"));
+                    return Err(crate::fail!(
+                        Test,
+                        format!("no {kind:?} target named `{name}`")
+                    ));
                 }
             }
         }
@@ -827,7 +859,7 @@ impl TestRequest {
             });
         }
         if manifests.is_empty() {
-            return Err("target selection is empty".into());
+            return Err(crate::fail!(Test, "target selection is empty"));
         }
         Ok(())
     }
@@ -867,7 +899,7 @@ impl TestRequest {
         &self,
         manifest: &'a PackageManifest,
         root_features: &BTreeSet<String>,
-    ) -> Result<Vec<SelectedTarget<'a>>, String> {
+    ) -> Result<Vec<SelectedTarget<'a>>, crate::error::Error> {
         let explicit = self.has_explicit_selection();
         let mut selected = Vec::new();
         for target in &manifest.targets {
@@ -902,10 +934,13 @@ impl TestRequest {
                 .all(|f| root_features.contains(f));
             if !features_ready {
                 if explicit && named {
-                    return Err(format!(
-                        "target `{}` requires features that are not enabled: {}",
-                        target.name,
-                        target.required_features.join(", ")
+                    return Err(crate::fail!(
+                        Test,
+                        format!(
+                            "target `{}` requires features that are not enabled: {}",
+                            target.name,
+                            target.required_features.join(", ")
+                        )
                     ));
                 }
                 continue;
@@ -918,7 +953,7 @@ impl TestRequest {
             });
         }
         if selected.is_empty() && !self.doc {
-            return Err("no testable targets".into());
+            return Err(crate::fail!(Test, "no testable targets"));
         }
 
         // When an integration test is selected, Cargo also compiles every available normal bin to
@@ -958,12 +993,12 @@ fn add_feature_values(out: &mut BTreeSet<String>, value: &str) {
 /// One-time all-member resolution for a lockless workspace. Cargo's workspace lock covers all members'
 /// feature-reachable dependencies, separate from this compilation's actual selection; the synthetic root only forms this maximal resolution graph.
 /// Delete it before writing, and add members' non-optional Dev edges back to their respective lock rows.
-fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> {
+fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), crate::error::Error> {
     let mut synthetic = workspace
         .members
         .first()
         .cloned()
-        .ok_or_else(|| "workspace has no members".to_string())?;
+        .ok_or_else(|| crate::fail!(Test, "workspace has no members".to_string()))?;
     synthetic.name = format!("__mirvm_workspace_root_{:x}", std::process::id());
     synthetic.version = semver::Version::new(0, 0, 0);
     synthetic.root = workspace.root.clone();
@@ -1020,9 +1055,12 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
             .iter_mut()
             .find(|package| package.name == member.name && package.version == member.version)
         else {
-            return Err(format!(
-                "resolution result is missing workspace member {}",
-                member.name
+            return Err(crate::fail!(
+                Test,
+                format!(
+                    "resolution result is missing workspace member {}",
+                    member.name
+                )
             ));
         };
         for dep in member
@@ -1052,7 +1090,12 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
                     })
                     .cloned(),
             }
-            .ok_or_else(|| format!("Dev dependency {} has no resolved version", dep.package))?;
+            .ok_or_else(|| {
+                crate::fail!(
+                    Test,
+                    format!("Dev dependency {} has no resolved version", dep.package)
+                )
+            })?;
             let ambiguous = plan
                 .version_map
                 .get(&dep.package)
@@ -1136,15 +1179,17 @@ fn compile_root_lib(
     match cmd.status() {
         Ok(status) if status.success() => Ok(()),
         Ok(_) => {
-            eprintln!(
-                "mirvm: lib compilation failed: root package {} {}",
-                manifest.name, manifest.version
+            crate::diag_error!(
+                Test,
+                "lib compilation failed: root package {} {}",
+                manifest.name,
+                manifest.version
             );
-            Err(ExitCode::from(1))
+            Err(ExitCode::from(crate::diag::exit::FAILURE))
         }
         Err(e) => {
-            eprintln!("mirvm: lib compilation child process failed to start: {e}");
-            Err(ExitCode::from(1))
+            crate::diag_error!(Test, "lib compilation child process failed to start: {e}");
+            Err(ExitCode::from(crate::diag::exit::FAILURE))
         }
     }
 }
@@ -1186,15 +1231,20 @@ fn compile_root_proc_macro(
     match cmd.status() {
         Ok(status) if status.success() => Ok(()),
         Ok(_) => {
-            eprintln!(
-                "mirvm: proc-macro compilation failed: root package {} {}",
-                manifest.name, manifest.version
+            crate::diag_error!(
+                Test,
+                "proc-macro compilation failed: root package {} {}",
+                manifest.name,
+                manifest.version
             );
-            Err(ExitCode::from(1))
+            Err(ExitCode::from(crate::diag::exit::FAILURE))
         }
         Err(error) => {
-            eprintln!("mirvm: proc-macro compilation child process failed to start: {error}");
-            Err(ExitCode::from(1))
+            crate::diag_error!(
+                Test,
+                "proc-macro compilation child process failed to start: {error}"
+            );
+            Err(ExitCode::from(crate::diag::exit::FAILURE))
         }
     }
 }
@@ -1267,11 +1317,12 @@ fn write_root_recipe(
         .build_dir(&manifest.name, root_fp)
         .join("test-recipes");
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
-        eprintln!(
-            "mirvm: failed to create test recipe directory {}: {e}",
+        crate::diag_error!(
+            Test,
+            "failed to create test recipe directory {}: {e}",
             dir.display()
         );
-        std::process::exit(1);
+        std::process::exit(crate::diag::exit::FAILURE.into());
     });
     let kind = format!("{:?}", target.kind).to_ascii_lowercase();
     let safe_name: String = target
@@ -1299,8 +1350,8 @@ fn write_root_recipe(
     let bytes = serde_json::to_vec(&recipe).expect("test recipe serialization failed");
     if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
         std::fs::write(&path, bytes).unwrap_or_else(|e| {
-            eprintln!("mirvm: failed to write test recipe {}: {e}", path.display());
-            std::process::exit(1);
+            crate::diag_error!(Test, "failed to write test recipe {}: {e}", path.display());
+            std::process::exit(crate::diag::exit::FAILURE.into());
         });
     }
     path
@@ -1311,17 +1362,17 @@ fn write_doctest_builder(
     layout: &Layout,
     manifest: &PackageManifest,
     root_fp: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, crate::error::Error> {
     let dir = layout.build_dir(&manifest.name, root_fp).join("doctest");
     let builder = dir.join("mirvm-doctest-builder");
     crate::cargo_shim::ensure_self_symlink(self_exe, &builder)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::fail!(Test, error.to_string()))?;
     Ok(builder)
 }
 
 fn run_doctest_task(task: &DoctestTask, sysroot: &Path, test_args: &[String], quiet: bool) -> i32 {
     if !quiet {
-        eprintln!("{:>12} {}", "Doc-tests", task.package);
+        crate::diag_error!(Test, "{:>12} {}", "Doc-tests", task.package);
     }
     let mut command = std::process::Command::new(&task.rustdoc);
     command.args(&task.args);
@@ -1340,7 +1391,7 @@ fn run_doctest_task(task: &DoctestTask, sysroot: &Path, test_args: &[String], qu
         .and_then(|status| status.code())
         .unwrap_or(1);
     if code != 0 {
-        eprintln!("error: doctest failed, to rerun pass `--doc`");
+        crate::diag_error!(Test, "error: doctest failed, to rerun pass `--doc`");
     }
     code
 }
@@ -1355,16 +1406,18 @@ fn write_bin_launcher(
     rustc_args: Vec<String>,
     env: Vec<(String, String)>,
     target_fp: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, crate::error::Error> {
     let dir = layout
         .build_dir(&manifest.name, root_fp)
         .join("bin-launchers");
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "failed to create bin launcher directory {}: {e}",
-            dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| {
+            format!(
+                "failed to create bin launcher directory {}: {e}",
+                dir.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Test, e))?;
     let safe_name: String = target
         .name
         .chars()
@@ -1384,11 +1437,15 @@ fn write_bin_launcher(
         cwd: manifest.root.clone(),
         argv0: launcher.display().to_string(),
     };
-    let bytes =
-        serde_json::to_vec(&recipe).map_err(|e| format!("bin recipe serialization failed: {e}"))?;
+    let bytes = serde_json::to_vec(&recipe)
+        .map_err(|e| crate::fail!(Test, format!("bin recipe serialization failed: {e}")))?;
     if std::fs::read(&recipe_path).ok().as_deref() != Some(bytes.as_slice()) {
-        std::fs::write(&recipe_path, bytes)
-            .map_err(|e| format!("write bin recipe {} failed: {e}", recipe_path.display()))?;
+        std::fs::write(&recipe_path, bytes).map_err(|e| {
+            crate::fail!(
+                Test,
+                format!("write bin recipe {} failed: {e}", recipe_path.display())
+            )
+        })?;
     }
 
     let correct = std::fs::read_link(&launcher)
@@ -1399,14 +1456,18 @@ fn write_bin_launcher(
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(format!(
-                    "replace bin launcher {} failed: {e}",
-                    launcher.display()
+                return Err(crate::fail!(
+                    Test,
+                    format!("replace bin launcher {} failed: {e}", launcher.display())
                 ));
             }
         }
-        crate::os::fs::symlink(self_exe, &launcher)
-            .map_err(|e| format!("create bin launcher {} failed: {e}", launcher.display()))?;
+        crate::os::fs::symlink(self_exe, &launcher).map_err(|e| {
+            crate::fail!(
+                Test,
+                format!("create bin launcher {} failed: {e}", launcher.display())
+            )
+        })?;
     }
     Ok(launcher)
 }

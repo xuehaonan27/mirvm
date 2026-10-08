@@ -14,18 +14,19 @@ fn align(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
 }
 
-fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, String> {
+fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, crate::error::Error> {
     if value.contains(&0) {
-        return Err("guest function name contains NUL".into());
+        return Err(crate::fail!(Native, "guest function name contains NUL"));
     }
-    let offset = u32::try_from(table.len()).map_err(|_| "ELF string table too large")?;
+    let offset = u32::try_from(table.len())
+        .map_err(|_| crate::fail!(Native, "ELF string table too large"))?;
     table.extend_from_slice(value);
     table.push(0);
     Ok(offset)
 }
 
 /// The ELF layout: one dynamic symbol per function, in one load segment.
-pub(super) fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
+pub(super) fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), crate::error::Error> {
     /// The section index of `.text`, which every synthetic symbol is defined in.
     const TEXT_SECTION_INDEX: u16 = 1;
     const EHDR: usize = elf::EHDR_SIZE;
@@ -65,16 +66,19 @@ pub(super) fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> 
     }
 
     let text_off = align(EHDR + PHNUM * PHDR, SLOT);
-    let text_len = names.len().checked_mul(SLOT).ok_or("ELF text too large")?;
+    let text_len = names
+        .len()
+        .checked_mul(SLOT)
+        .ok_or(crate::fail!(Native, "ELF text too large"))?;
     let dynstr_off = text_off + text_len;
     let dynsym_off = align(dynstr_off + dynstr.len(), 8);
     let sym_len = (names.len() + 1)
         .checked_mul(elf::SYM_ENTRY_SIZE)
-        .ok_or("ELF symtab too large")?;
+        .ok_or(crate::fail!(Native, "ELF symtab too large"))?;
     let hash_off = align(dynsym_off + sym_len, 4);
     let hash_len = (2 + 1 + names.len() + 1)
         .checked_mul(4)
-        .ok_or("ELF hash too large")?;
+        .ok_or(crate::fail!(Native, "ELF hash too large"))?;
     let dynamic_off = align(hash_off + hash_len, 8);
     let dynamic_len = 6 * elf::DYN_ENTRY_SIZE;
     let strtab_off = dynamic_off + dynamic_len;

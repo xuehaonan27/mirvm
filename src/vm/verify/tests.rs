@@ -38,11 +38,11 @@ impl Artifact {
         Artifact { module, instance }
     }
 
-    fn verify(&self) -> Result<(), String> {
+    fn verify(&self) -> Result<(), crate::error::Error> {
         super::module(&self.module, &self.instance)
     }
 
-    fn verify_prefix(&self, prefix: Prefix) -> Result<(), String> {
+    fn verify_prefix(&self, prefix: Prefix) -> Result<(), crate::error::Error> {
         module_below(
             &self.module,
             &self.instance,
@@ -54,7 +54,7 @@ impl Artifact {
     }
 
     /// Verify as a layer above the given entry links.
-    fn verify_above(&self, entries: &[LinkAddr]) -> Result<(), String> {
+    fn verify_above(&self, entries: &[LinkAddr]) -> Result<(), crate::error::Error> {
         module_below(
             &self.module,
             &self.instance,
@@ -140,7 +140,7 @@ fn executable_with_roles(
 fn executable_requires_exactly_one_main_panic_boundary() {
     let missing = executable_with_roles(&[], &[]);
     let err = missing.verify().unwrap_err();
-    assert!(err.contains("0 main panic boundaries"), "{err}");
+    assert!(err.to_string().contains("0 main panic boundaries"), "{err}");
 
     let valid = executable_with_roles(
         &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
@@ -156,7 +156,7 @@ fn executable_requires_exactly_one_main_panic_boundary() {
         &[(Builtin::CatchUnwind, UnwindAction::Continue)],
     );
     let err = duplicate.verify().unwrap_err();
-    assert!(err.contains("2 main panic boundaries"), "{err}");
+    assert!(err.to_string().contains("2 main panic boundaries"), "{err}");
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn main_panic_boundary_requires_continue_unwind() {
         &[(Builtin::CatchUnwind, UnwindAction::Continue)],
     );
     let err = invalid.verify().unwrap_err();
-    assert!(err.contains("must use Continue"), "{err}");
+    assert!(err.to_string().contains("must use Continue"), "{err}");
 }
 
 #[test]
@@ -176,14 +176,14 @@ fn executable_requires_one_well_formed_main_panic_catcher() {
         &[],
     );
     let err = missing.verify().unwrap_err();
-    assert!(err.contains("0 main panic catchers"), "{err}");
+    assert!(err.to_string().contains("0 main panic catchers"), "{err}");
 
     let malformed = executable_with_roles(
         &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
         &[(Builtin::HostAbort, UnwindAction::Continue)],
     );
     let err = malformed.verify().unwrap_err();
-    assert!(err.contains("must be CatchUnwind"), "{err}");
+    assert!(err.to_string().contains("must be CatchUnwind"), "{err}");
 
     let mut malformed_shape = executable_with_roles(
         &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
@@ -198,7 +198,10 @@ fn executable_requires_one_well_formed_main_panic_catcher() {
     *ret = RetDest::Ignore;
     malformed_shape.module.funcs = funcs.into();
     let err = malformed_shape.verify().unwrap_err();
-    assert!(err.contains("three pointer-width arguments"), "{err}");
+    assert!(
+        err.to_string().contains("three pointer-width arguments"),
+        "{err}"
+    );
 
     let mut malformed_width = executable_with_roles(
         &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
@@ -215,7 +218,10 @@ fn executable_requires_one_well_formed_main_panic_catcher() {
     };
     malformed_width.module.funcs = funcs.into();
     let err = malformed_width.verify().unwrap_err();
-    assert!(err.contains("three pointer-width arguments"), "{err}");
+    assert!(
+        err.to_string().contains("three pointer-width arguments"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -260,7 +266,7 @@ fn rejects_bad_block_and_frame_slot() {
     }));
     m.funcs.push(b);
     let err = Artifact::new(m).verify().unwrap_err();
-    assert!(err.contains("exceeds frame size"), "{err}");
+    assert!(err.to_string().contains("exceeds frame size"), "{err}");
 }
 
 #[test]
@@ -269,7 +275,7 @@ fn rejects_bad_external_references() {
     m.funcs.push(body(Terminator::Return));
     m.exports.insert("bad".into(), 1);
     let err = Artifact::new(m).verify().unwrap_err();
-    assert!(err.contains("function id 1"), "{err}");
+    assert!(err.to_string().contains("function id 1"), "{err}");
 }
 
 #[test]
@@ -291,7 +297,7 @@ fn an_entry_owned_by_a_layer_below_is_a_valid_relocation_target() {
     artifact.instance.rebuild_load_map();
 
     let err = artifact.verify().unwrap_err();
-    assert!(err.contains("unknown entry"), "{err}");
+    assert!(err.to_string().contains("unknown entry"), "{err}");
     artifact.verify_above(&[below]).unwrap();
 }
 
@@ -304,13 +310,19 @@ fn strict_artifact_requires_exactly_one_site_for_each_executable_entry() {
     let mut missing = strict_p1_header(addr);
     missing.module.entry_stub_sites.clear();
     let err = missing.verify().unwrap_err();
-    assert!(err.contains("has no matching entry stub"), "{err}");
+    assert!(
+        err.to_string().contains("has no matching entry stub"),
+        "{err}"
+    );
 
     let mut duplicate = strict_p1_header(addr);
     let first = duplicate.module.entry_stub_sites[0].clone();
     duplicate.module.entry_stub_sites.push(first);
     let err = duplicate.verify().unwrap_err();
-    assert!(err.contains("duplicates entry link address"), "{err}");
+    assert!(
+        err.to_string().contains("duplicates entry link address"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -322,7 +334,7 @@ fn entry_site_must_not_overlap_frozen_memory() {
     artifact.instance.rebuild_load_map();
     artifact.instance.load_map.require_mapped();
     let err = artifact.verify().unwrap_err();
-    assert!(err.contains("overlaps frozen memory"), "{err}");
+    assert!(err.to_string().contains("overlaps frozen memory"), "{err}");
 }
 
 #[test]
@@ -344,8 +356,8 @@ fn verifies_guest_panic_cleanup_function_ids() {
         drop_payload: 2,
     });
     let err = Artifact::new(invalid).verify().unwrap_err();
-    assert!(err.contains("payload drop glue"), "{err}");
-    assert!(err.contains("function id 2"), "{err}");
+    assert!(err.to_string().contains("payload drop glue"), "{err}");
+    assert!(err.to_string().contains("function id 2"), "{err}");
 }
 
 #[test]

@@ -34,7 +34,7 @@ pub fn gettid() -> i32 {
 /// `sys/syscall.h`, spelled here because the C library exposes no `SYS_*` names for this platform.
 pub const SYS_FORK: i64 = 2;
 pub const SYS_EXIT: i64 = 1;
-/// This platform ends the process with `exit(2)`; there is no separate group call.
+/// This platform ends the process with `exit(crate::diag::exit::USAGE.into())`; there is no separate group call.
 pub const SYS_EXIT_GROUP: i64 = SYS_EXIT;
 pub const SYS_RT_SIGRETURN: i64 = 184;
 

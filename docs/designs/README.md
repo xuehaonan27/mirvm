@@ -257,6 +257,7 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 | [jit-code-cache-design.md](jit-code-cache-design.md) | Decided RFC | the persistent JIT machine-code cache: the translator's relocation choke point, relocatable per-function artifacts, load-time linking, adaptive optimization tiers |
 | [d15-cargoless-design.md](d15-cargoless-design.md) | Implemented | resolving and scheduling without cargo: manifests, versions, topology, build scripts, proc-macros |
 | [mirvm-test-cargoless-contract.md](mirvm-test-cargoless-contract.md) | Contract | `mirvm test` for single packages and workspaces with no Cargo process at run time |
+| [output-grammar.md](output-grammar.md) | Contract | what mirvm writes where: product output versus diagnostics, the line grammar and its machine rendering, the failure root, named exit codes, and the checks that enforce one spelling |
 
 When this index and a document disagree, the document owns its topic; when a document and the code
 disagree about what is implemented, [current-status.md](../current-status.md) and the code win.

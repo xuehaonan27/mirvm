@@ -16,17 +16,24 @@ static NEXT_NATIVE_INSTANCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn isolate_required_libraries(
     module: &mut Module,
     engine_id: u64,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     if module.required_native_libs.is_empty() {
         return Ok(());
     }
     let dir = crate::store::RUNTIME_NATIVE.dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("fail to create per-Engine native directory: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::fail!(
+            Engine,
+            format!("fail to create per-Engine native directory: {e}")
+        )
+    })?;
     if !module.required_native_hashes.is_empty()
         && module.required_native_hashes.len() != module.required_native_libs.len()
     {
-        return Err("required native library/hash count mismatch".into());
+        return Err(crate::fail!(
+            Engine,
+            "required native library/hash count mismatch"
+        ));
     }
     let mut isolated: Vec<PathBuf> = Vec::with_capacity(module.required_native_libs.len());
     for (index, path) in module.required_native_libs.iter().enumerate() {
@@ -47,9 +54,12 @@ pub(crate) fn isolate_required_libraries(
                     for path in isolated {
                         let _ = std::fs::remove_file(path);
                     }
-                    return Err(format!(
-                        "fail to verify private native library `{}`: {error}",
-                        private.display()
+                    return Err(crate::fail!(
+                        Engine,
+                        format!(
+                            "fail to verify private native library `{}`: {error}",
+                            private.display()
+                        )
                     ));
                 }
             };
@@ -58,9 +68,12 @@ pub(crate) fn isolate_required_libraries(
                 for path in isolated {
                     let _ = std::fs::remove_file(path);
                 }
-                return Err(format!(
-                    "required native library `{}` changed after package verification",
-                    path
+                return Err(crate::fail!(
+                    Engine,
+                    format!(
+                        "required native library `{}` changed after package verification",
+                        path
+                    )
                 ));
             }
         }
@@ -85,19 +98,25 @@ fn package_native_hash(data: &[u8]) -> u128 {
 
 /// Copy `source` into `dir` under a name unique to this process and owner, so a concurrent
 /// Engine or a repeated load never reuses a path glibc already keyed an object by.
-pub(super) fn copy_unique(source: &Path, dir: &Path, owner: &str) -> Result<PathBuf, String> {
+pub(super) fn copy_unique(
+    source: &Path,
+    dir: &Path,
+    owner: &str,
+) -> Result<PathBuf, crate::error::Error> {
     let serial = NEXT_NATIVE_INSTANCE.fetch_add(1, Ordering::Relaxed);
     let name = source
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("native.so");
     let private = dir.join(format!("{}-{owner}-{serial}-{name}", std::process::id()));
-    std::fs::copy(source, &private).map_err(|e| {
-        let _ = std::fs::remove_file(&private);
-        format!(
-            "fail to copy native library `{}` for {owner}: {e}",
-            source.display()
-        )
-    })?;
+    std::fs::copy(source, &private)
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&private);
+            format!(
+                "fail to copy native library `{}` for {owner}: {e}",
+                source.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Engine, e))?;
     Ok(private)
 }

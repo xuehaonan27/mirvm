@@ -41,7 +41,7 @@ pub struct CargoConfig {
 }
 
 impl CargoConfig {
-    pub fn load_at(current: &Path, cargo_home: Option<&Path>) -> Result<Self, String> {
+    pub fn load_at(current: &Path, cargo_home: Option<&Path>) -> Result<Self, crate::error::Error> {
         let mut layers = Vec::new();
         if let Some(home) = cargo_home
             && let Some(file) = config_file(home)
@@ -64,7 +64,7 @@ impl CargoConfig {
     pub fn incompatible_rust_versions(
         &self,
         resolver: ResolverVersion,
-    ) -> Result<IncompatibleRustVersions, String> {
+    ) -> Result<IncompatibleRustVersions, crate::error::Error> {
         let mut selected = None;
         for layer in &self.layers {
             if let Some(value) = layer
@@ -77,7 +77,7 @@ impl CargoConfig {
                         "resolver.incompatible-rust-versions in Cargo config {} must be a string",
                         layer.path.display()
                     )
-                })?;
+                }).map_err(|e| crate::fail!(Resolver, e))?;
                 selected = Some(IncompatibleRustVersions::parse(value)?);
             }
         }
@@ -90,17 +90,23 @@ impl CargoConfig {
         }))
     }
 
-    pub fn registry(&self, name: &str) -> Result<RegistryConfig, String> {
+    pub fn registry(&self, name: &str) -> Result<RegistryConfig, crate::error::Error> {
         self.optional_registry(name)?.ok_or_else(|| {
             let env_name = registry_env_name(name);
-            format!(
-                "Cargo registry `{name}` has no configured index (needs [registries.{name}] or \
+            crate::fail!(
+                Resolver,
+                format!(
+                    "Cargo registry `{name}` has no configured index (needs [registries.{name}] or \
                  CARGO_REGISTRIES_{env_name}_INDEX)"
+                )
             )
         })
     }
 
-    pub fn optional_registry(&self, name: &str) -> Result<Option<RegistryConfig>, String> {
+    pub fn optional_registry(
+        &self,
+        name: &str,
+    ) -> Result<Option<RegistryConfig>, crate::error::Error> {
         let mut index = None;
         let mut token = None;
         let mut credential_provider = None;
@@ -151,7 +157,7 @@ impl CargoConfig {
         }))
     }
 
-    pub fn crates_io(&self) -> Result<RegistryConfig, String> {
+    pub fn crates_io(&self) -> Result<RegistryConfig, crate::error::Error> {
         let mut token = std::env::var("CARGO_REGISTRY_TOKEN").ok();
         let mut credential_provider = std::env::var("CARGO_REGISTRY_CREDENTIAL_PROVIDER").ok();
         for layer in &self.layers {
@@ -183,7 +189,10 @@ impl CargoConfig {
         })
     }
 
-    pub fn registry_name_for_index(&self, index: &str) -> Result<Option<String>, String> {
+    pub fn registry_name_for_index(
+        &self,
+        index: &str,
+    ) -> Result<Option<String>, crate::error::Error> {
         let mut names = std::collections::BTreeSet::new();
         for layer in &self.layers {
             let Some(registries) = layer
@@ -211,7 +220,7 @@ impl CargoConfig {
         Ok(None)
     }
 
-    pub fn source(&self, name: &str) -> Result<Option<SourceConfig>, String> {
+    pub fn source(&self, name: &str) -> Result<Option<SourceConfig>, crate::error::Error> {
         let mut selected = SourceConfig::default();
         let mut found = false;
         for layer in &self.layers {
@@ -249,14 +258,15 @@ impl CargoConfig {
         .filter(|present| *present)
         .count();
         if kinds > 1 {
-            return Err(format!(
-                "Cargo source `{name}` declares registry/local-registry/directory at once"
+            return Err(crate::fail!(
+                Resolver,
+                format!("Cargo source `{name}` declares registry/local-registry/directory at once")
             ));
         }
         Ok(found.then_some(selected))
     }
 
-    pub fn global_credential_providers(&self) -> Result<Vec<String>, String> {
+    pub fn global_credential_providers(&self) -> Result<Vec<String>, crate::error::Error> {
         let mut providers = Vec::new();
         for layer in &self.layers {
             let Some(value) = layer
@@ -266,12 +276,15 @@ impl CargoConfig {
             else {
                 continue;
             };
-            let values = value.as_array().ok_or_else(|| {
-                format!(
-                    "registry.global-credential-providers in Cargo config {} must be an array",
-                    layer.path.display()
-                )
-            })?;
+            let values = value
+                .as_array()
+                .ok_or_else(|| {
+                    format!(
+                        "registry.global-credential-providers in Cargo config {} must be an array",
+                        layer.path.display()
+                    )
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?;
             providers = values
                 .iter()
                 .map(|value| {
@@ -285,7 +298,7 @@ impl CargoConfig {
         Ok(providers)
     }
 
-    pub fn credential_provider(&self, name: &str) -> Result<String, String> {
+    pub fn credential_provider(&self, name: &str) -> Result<String, crate::error::Error> {
         let env_name = registry_env_name(name);
         if let Ok(value) = std::env::var(format!("CARGO_CREDENTIAL_ALIAS_{env_name}")) {
             return Ok(value);
@@ -303,7 +316,7 @@ impl CargoConfig {
         Ok(selected.unwrap_or_else(|| name.to_string()))
     }
 
-    fn credential_token(&self, name: &str) -> Result<Option<String>, String> {
+    fn credential_token(&self, name: &str) -> Result<Option<String>, crate::error::Error> {
         let Some(home) = &self.cargo_home else {
             return Ok(None);
         };
@@ -311,18 +324,22 @@ impl CargoConfig {
             if !file.is_file() {
                 continue;
             }
-            let text = std::fs::read_to_string(&file).map_err(|error| {
-                format!(
-                    "failed to read Cargo credentials {}: {error}",
-                    file.display()
-                )
-            })?;
-            let value: toml::Value = toml::from_str(&text).map_err(|error| {
-                format!(
-                    "failed to parse Cargo credentials {}: {error}",
-                    file.display()
-                )
-            })?;
+            let text = std::fs::read_to_string(&file)
+                .map_err(|error| {
+                    format!(
+                        "failed to read Cargo credentials {}: {error}",
+                        file.display()
+                    )
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?;
+            let value: toml::Value = toml::from_str(&text)
+                .map_err(|error| {
+                    format!(
+                        "failed to parse Cargo credentials {}: {error}",
+                        file.display()
+                    )
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?;
             let token = if name == "crates-io" {
                 value
                     .get("registry")
@@ -368,23 +385,41 @@ fn config_file(directory: &Path) -> Option<PathBuf> {
     toml.is_file().then_some(toml)
 }
 
-fn load_file(path: &Path, stack: &mut Vec<PathBuf>, layers: &mut Vec<Layer>) -> Result<(), String> {
+fn load_file(
+    path: &Path,
+    stack: &mut Vec<PathBuf>,
+    layers: &mut Vec<Layer>,
+) -> Result<(), crate::error::Error> {
     let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if stack.contains(&identity) {
-        return Err(format!("Cargo config include cycle: {}", path.display()));
+        return Err(crate::fail!(
+            Resolver,
+            format!("Cargo config include cycle: {}", path.display())
+        ));
     }
     stack.push(identity);
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("failed to read Cargo config {}: {error}", path.display()))?;
-    let value: toml::Value = toml::from_str(&text)
-        .map_err(|error| format!("failed to parse Cargo config {}: {error}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("failed to read Cargo config {}: {error}", path.display())
+        )
+    })?;
+    let value: toml::Value = toml::from_str(&text).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("failed to parse Cargo config {}: {error}", path.display())
+        )
+    })?;
     if let Some(includes) = value.get("include") {
-        let includes = includes.as_array().ok_or_else(|| {
-            format!(
-                "include in Cargo config {} must be an array",
-                path.display()
-            )
-        })?;
+        let includes = includes
+            .as_array()
+            .ok_or_else(|| {
+                format!(
+                    "include in Cargo config {} must be an array",
+                    path.display()
+                )
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         for include in includes {
             let (relative, optional) = include_value(include, path)?;
             let include_path = path.parent().unwrap_or(Path::new(".")).join(relative);
@@ -392,10 +427,13 @@ fn load_file(path: &Path, stack: &mut Vec<PathBuf>, layers: &mut Vec<Layer>) -> 
                 if optional {
                     continue;
                 }
-                return Err(format!(
-                    "Cargo config {} includes {}, which does not exist",
-                    path.display(),
-                    include_path.display()
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "Cargo config {} includes {}, which does not exist",
+                        path.display(),
+                        include_path.display()
+                    )
                 ));
             }
             load_file(&include_path, stack, layers)?;
@@ -409,16 +447,22 @@ fn load_file(path: &Path, stack: &mut Vec<PathBuf>, layers: &mut Vec<Layer>) -> 
     Ok(())
 }
 
-fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), String> {
+fn include_value(
+    value: &toml::Value,
+    source: &Path,
+) -> Result<(PathBuf, bool), crate::error::Error> {
     if let Some(path) = value.as_str() {
         return Ok((PathBuf::from(path), false));
     }
-    let table = value.as_table().ok_or_else(|| {
-        format!(
-            "include member in Cargo config {} must be a path or a table",
-            source.display()
-        )
-    })?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| {
+            format!(
+                "include member in Cargo config {} must be a path or a table",
+                source.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?;
     let path = table
         .get("path")
         .and_then(toml::Value::as_str)
@@ -427,7 +471,8 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
                 "include table in Cargo config {} lacks a string path",
                 source.display()
             )
-        })?;
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?;
     let optional = table
         .get("optional")
         .map(|value| {
@@ -438,37 +483,55 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
                 )
             })
         })
-        .transpose()?
+        .transpose()
+        .map_err(|e| crate::fail!(Resolver, e))?
         .unwrap_or(false);
     Ok((PathBuf::from(path), optional))
 }
 
-fn config_string(value: &toml::Value, source: &Path, field: &str) -> Result<String, String> {
+fn config_string(
+    value: &toml::Value,
+    source: &Path,
+    field: &str,
+) -> Result<String, crate::error::Error> {
     value.as_str().map(str::to_string).ok_or_else(|| {
-        format!(
-            "{field} in Cargo config {} must be a string",
-            source.display()
+        crate::fail!(
+            Resolver,
+            format!(
+                "{field} in Cargo config {} must be a string",
+                source.display()
+            )
         )
     })
 }
 
-fn config_command(value: &toml::Value, source: &Path, field: &str) -> Result<String, String> {
+fn config_command(
+    value: &toml::Value,
+    source: &Path,
+    field: &str,
+) -> Result<String, crate::error::Error> {
     if let Some(command) = value.as_str() {
         return Ok(command.to_string());
     }
     let array = value.as_array().ok_or_else(|| {
-        format!(
-            "{field} in Cargo config {} must be a string or an array",
-            source.display()
+        crate::fail!(
+            Resolver,
+            format!(
+                "{field} in Cargo config {} must be a string or an array",
+                source.display()
+            )
         )
     })?;
     array
         .iter()
         .map(|part| {
             part.as_str().map(str::to_string).ok_or_else(|| {
-                format!(
-                    "array members of {field} in Cargo config {} must be strings",
-                    source.display()
+                crate::fail!(
+                    Resolver,
+                    format!(
+                        "array members of {field} in Cargo config {} must be strings",
+                        source.display()
+                    )
                 )
             })
         })

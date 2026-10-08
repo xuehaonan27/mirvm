@@ -33,7 +33,10 @@ impl Shared {
             .unwrap_or_else(|error| panic!("Engine Shared initialization failed: {error}"))
     }
 
-    pub(crate) fn try_new(mut module: Module, instance: Instance) -> Result<Self, String> {
+    pub(crate) fn try_new(
+        mut module: Module,
+        instance: Instance,
+    ) -> Result<Self, crate::error::Error> {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         // One fact, decided once: whether a session is armed now fixes this
         // Engine's code domain for its whole lifetime.

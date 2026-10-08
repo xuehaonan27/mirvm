@@ -392,7 +392,7 @@ fn collect_decl<'a, S: PkgSource>(
                 .map_err(|error| {
                     let mut saved = provider.source_error.borrow_mut();
                     if saved.is_none() {
-                        *saved = Some(error.clone());
+                        *saved = Some(error.to_string());
                     }
                     io_err(error)
                 })?;
@@ -541,8 +541,8 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
     }
 }
 
-fn io_err(e: impl Into<String>) -> std::io::Error {
-    std::io::Error::other(e.into())
+fn io_err(e: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(e.to_string())
 }
 
 /// req -> Ranges conversion (mirrors the version_ranges::semver algorithm but **keeps
@@ -669,7 +669,7 @@ pub(super) fn solve_fresh(
     activated: &BTreeSet<(String, Version, String)>,
     preferred_exact_versions: &mut BTreeMap<String, Version>,
     context: &FreshSolveContext<'_>,
-) -> Result<Solved, String> {
+) -> Result<Solved, crate::error::Error> {
     let (first, discovered) = solve_fresh_pass(
         root,
         path_manifests,
@@ -706,7 +706,7 @@ fn solve_fresh_pass(
     activated: &BTreeSet<(String, Version, String)>,
     preferred_exact_versions: &BTreeMap<String, Version>,
     context: &FreshSolveContext<'_>,
-) -> Result<(Solved, BTreeMap<String, Version>), String> {
+) -> Result<(Solved, BTreeMap<String, Version>), crate::error::Error> {
     let provider = CratesIo {
         src: std::cell::RefCell::new(src),
         manifests: path_manifests,
@@ -727,16 +727,22 @@ fn solve_fresh_pass(
         Ok(selected) => selected,
         Err(error) => {
             if let Some(source_error) = provider.source_error.borrow().clone() {
-                return Err(format!("failed to read dependency source: {source_error}"));
+                return Err(crate::fail!(
+                    Resolver,
+                    format!("failed to read dependency source: {source_error}")
+                ));
             }
-            return Err(format!(
-                "dependency resolution failed (pubgrub): {}",
-                match error {
-                    pubgrub::PubGrubError::NoSolution(derivation) => {
-                        pubgrub::DefaultStringReporter::report(&derivation)
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "dependency resolution failed (pubgrub): {}",
+                    match error {
+                        pubgrub::PubGrubError::NoSolution(derivation) => {
+                            pubgrub::DefaultStringReporter::report(&derivation)
+                        }
+                        other => format!("{other}"),
                     }
-                    other => format!("{other}"),
-                }
+                )
             ));
         }
     };
@@ -761,7 +767,9 @@ fn solve_fresh_pass(
     if crate::options::debug_unify() {
         for ((pn, pver, key, _dis, class), (pkg, bucket)) in edge_assign.iter() {
             if pkg.starts_with("yoke") {
-                eprintln!("DBG-ASSIGN ({pn}@{pver}, {key}, {class:?}) -> {pkg}#{bucket}");
+                crate::diag::instrument(format_args!(
+                    "DBG-ASSIGN ({pn}@{pver}, {key}, {class:?}) -> {pkg}#{bucket}"
+                ));
             }
         }
     }
@@ -858,7 +866,8 @@ fn solve_fresh_pass(
                         "[replace] original package {} {version} is not in the registry index",
                         identity_package_name(name)
                     )
-                })?;
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?;
             lock.packages.push(LockedPkg {
                 name: identity_package_name(name).to_string(),
                 version: version.clone(),

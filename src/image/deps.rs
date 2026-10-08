@@ -123,7 +123,7 @@ pub(crate) fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, 
     }
     let key = key.digest();
     if crate::options::a2_debug() {
-        eprintln!("[a2-debug] pre-key={key} externs={paths:?}");
+        crate::diag::instrument(format_args!("[a2-debug] pre-key={key} externs={paths:?}"));
     }
     Some((key, stamps))
 }
@@ -191,7 +191,9 @@ pub fn try_load(
         Ok(instance) => instance,
         Err(error) => {
             if crate::options::a2_debug() {
-                eprintln!("[a2-debug] deps image {key} rejected: {error}");
+                crate::diag::instrument(format_args!(
+                    "[a2-debug] deps image {key} rejected: {error}"
+                ));
             }
             return None;
         }
@@ -203,7 +205,9 @@ pub fn try_load(
     };
     if crate::vm::verify::module_below(&f.module, &instance, below).is_err() {
         if crate::options::a2_debug() {
-            eprintln!("[a2-debug] deps image {key} rejected: verification failed against the base");
+            crate::diag::instrument(format_args!(
+                "[a2-debug] deps image {key} rejected: verification failed against the base"
+            ));
         }
         return None;
     }
@@ -258,14 +262,14 @@ pub fn store_and_wrap(
     let verified = crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
     let cacheable = publishable && verified;
     if !cacheable && crate::options::a2_debug() {
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "[a2-debug] split image not published: {}",
             if !publishable {
                 "snapshot is not fixed-domain publishable"
             } else {
                 "verification against the stack below failed"
             }
-        );
+        ));
     }
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
@@ -294,7 +298,9 @@ pub fn store_and_wrap(
         if let Err(error) = &projected
             && crate::options::a2_debug()
         {
-            eprintln!("[a2-debug] closure manifest not written: {error}");
+            crate::diag::instrument(format_args!(
+                "[a2-debug] closure manifest not written: {error}"
+            ));
         }
         let taken = manifest::take_frozen(&mut bi.module, &mut chunks);
         let manifest = projected.ok().map(|(records, tables)| {
@@ -346,10 +352,10 @@ pub fn store_and_wrap(
                 .publish()
                 .map(|published| {
                     if crate::options::a2_debug() {
-                        eprintln!(
+                        crate::diag::instrument(format_args!(
                             "[a2-debug] stored {} fragments ({} already shared), {} B",
                             published.stored, published.deduped, published.bytes
-                        );
+                        ));
                     }
                 })
                 .is_ok();

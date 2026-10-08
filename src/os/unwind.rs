@@ -171,7 +171,11 @@ pub unsafe fn raise(exception: *mut RawException) -> i32 {
 pub unsafe fn resume_or_rethrow(exception: *mut RawException) -> ! {
     let _walk = walk_gate_shared();
     let reason = unsafe { _Unwind_Resume_or_Rethrow(exception) };
-    eprintln!("mirvm: _Unwind_Resume_or_Rethrow unexpectedly returned {reason}");
+    crate::diag_direct_at!(
+        crate::diag::Severity::Error,
+        Os,
+        "_Unwind_Resume_or_Rethrow unexpectedly returned {reason}"
+    );
     std::process::abort()
 }
 

@@ -42,6 +42,7 @@ pub(crate) mod native;
 pub mod options;
 pub(crate) mod os;
 pub(crate) mod os_arch;
+pub(crate) mod out;
 pub mod pack;
 pub(crate) mod store;
 pub mod sysroot;

@@ -7,6 +7,10 @@
 //! Codes that are not mirvm's own are deliberately absent: a guest exit code, a rustc exit code and
 //! the `SIGABRT` re-raise travel through unchanged and must not be renumbered here.
 
+/// The command did its job. Spelled for the same reason as the failure codes: a caller reads the
+/// vocabulary, not a digit.
+pub const SUCCESS: u8 = 0;
+
 /// An operation failed: I/O, resolution, compilation, packaging.
 pub const FAILURE: u8 = 1;
 

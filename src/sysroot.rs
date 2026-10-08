@@ -400,12 +400,18 @@ fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
     let staging = crate::store::SYSROOT_BUILD.dir();
     let root_dir = staging.join("root");
     materialize_pseudo_root(&library, &root_dir)?;
-    let manifest =
-        PackageManifest::read_dir(&root_dir).map_err(|detail| Error::ParseManifest { detail })?;
+    let manifest = PackageManifest::read_dir(&root_dir).map_err(|detail| Error::ParseManifest {
+        detail: detail.to_string(),
+    })?;
     let mut src = VendorDir::new(vec![library.join("vendor")], workspace_overrides(&library));
-    let plan = resolve::resolve(&manifest, &mut src).map_err(|detail| Error::Resolve { detail })?;
-    buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
-        .map_err(|detail| Error::Links { detail })?;
+    let plan = resolve::resolve(&manifest, &mut src).map_err(|detail| Error::Resolve {
+        detail: detail.to_string(),
+    })?;
+    buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan).map_err(
+        |detail| Error::Links {
+            detail: detail.to_string(),
+        },
+    )?;
 
     // Artifacts are built in a staging directory next to the sysroot (same filesystem, so the
     // publish rename is atomic) and the old sysroot stays usable until then.
@@ -426,7 +432,9 @@ fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
         false,
         false,
     )
-    .map_err(|detail| Error::Compile { detail })?;
+    .map_err(|detail| Error::Compile {
+        detail: detail.to_string(),
+    })?;
 
     // Write the stamp inside tmp so it is published by the same rename; the content key is
     // recomputed here from the same source as the fast path

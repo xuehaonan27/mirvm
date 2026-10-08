@@ -67,52 +67,86 @@ pub(crate) struct Layout {
 ///
 /// The file is rewritten, so its signature no longer covers it: a caller on a platform whose loader
 /// checks one must hand the path to `crate::os::dll::reseal` before mapping it again.
-pub(crate) fn read_and_suppress(path: &Path, format: ObjectFormat) -> Result<Layout, String> {
-    let mut bytes = std::fs::read(path)
-        .map_err(|error| format!("fail to read private native `{}`: {error}", path.display()))?;
+pub(crate) fn read_and_suppress(
+    path: &Path,
+    format: ObjectFormat,
+) -> Result<Layout, crate::error::Error> {
+    let mut bytes = std::fs::read(path).map_err(|error| {
+        crate::fail!(
+            Native,
+            format!("fail to read private native `{}`: {error}", path.display())
+        )
+    })?;
     let layout = match format {
         ObjectFormat::Elf => elf_layout(&mut bytes, path)?,
         ObjectFormat::MachO => macho_layout(&mut bytes, path)?,
     };
-    std::fs::write(path, &bytes).map_err(|error| {
-        format!(
-            "fail to suppress native lifecycle `{}`: {error}",
-            path.display()
-        )
-    })?;
+    std::fs::write(path, &bytes)
+        .map_err(|error| {
+            format!(
+                "fail to suppress native lifecycle `{}`: {error}",
+                path.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Native, e))?;
     Ok(layout)
 }
 
 /// The ELF half: two arrays and two singular functions in the dynamic table, each named by a tag
 /// that is rewritten once its value has been read.
-fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
+fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, crate::error::Error> {
     let bad = || format!("native `{}` is not valid ELF64 LE", path.display());
-    let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
+    let header = elf::FileHeader::parse(bytes)
+        .ok_or_else(bad)
+        .map_err(|e| crate::fail!(Native, e))?;
     if header.kind != elf::ET_DYN || header.machine != crate::arch::ELF_MACHINE {
-        return Err(bad());
+        return Err(crate::fail!(Native, bad()));
     }
-    let phoff = usize::try_from(header.phoff).map_err(|_| bad())?;
+    let phoff = usize::try_from(header.phoff)
+        .map_err(|_| bad())
+        .map_err(|e| crate::fail!(Native, e))?;
     let phentsize = usize::from(header.phentsize);
     let phnum = usize::from(header.phnum);
     if phentsize < elf::PHDR_SIZE {
-        return Err(bad());
+        return Err(crate::fail!(Native, bad()));
     }
     let mut dynamic = None;
     let mut result = Layout::default();
     for index in 0..phnum {
         let base = phoff
-            .checked_add(index.checked_mul(phentsize).ok_or_else(bad)?)
-            .ok_or_else(bad)?;
-        let ty = read_u32(bytes, base + elf::phdr::TYPE).ok_or_else(bad)?;
-        let flags = read_u32(bytes, base + elf::phdr::FLAGS).ok_or_else(bad)?;
-        let off = read_u64(bytes, base + elf::phdr::OFFSET).ok_or_else(bad)?;
-        let vaddr = read_u64(bytes, base + elf::phdr::VADDR).ok_or_else(bad)?;
-        let filesz = read_u64(bytes, base + elf::phdr::FILESZ).ok_or_else(bad)?;
-        let memsz = read_u64(bytes, base + elf::phdr::MEMSZ).ok_or_else(bad)?;
+            .checked_add(
+                index
+                    .checked_mul(phentsize)
+                    .ok_or_else(bad)
+                    .map_err(|e| crate::fail!(Native, e))?,
+            )
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
+        let ty = read_u32(bytes, base + elf::phdr::TYPE)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
+        let flags = read_u32(bytes, base + elf::phdr::FLAGS)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
+        let off = read_u64(bytes, base + elf::phdr::OFFSET)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
+        let vaddr = read_u64(bytes, base + elf::phdr::VADDR)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
+        let filesz = read_u64(bytes, base + elf::phdr::FILESZ)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
+        let memsz = read_u64(bytes, base + elf::phdr::MEMSZ)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
         if ty == elf::PT_LOAD {
-            let end = vaddr
-                .checked_add(memsz)
-                .ok_or_else(|| format!("native `{}` load range overflow", path.display()))?;
+            let end = vaddr.checked_add(memsz).ok_or_else(|| {
+                crate::fail!(
+                    Native,
+                    format!("native `{}` load range overflow", path.display())
+                )
+            })?;
             result.loads.push((vaddr, end));
             if flags & elf::PF_X != 0 {
                 result.executable_loads.push((vaddr, end));
@@ -122,13 +156,23 @@ fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
         }
     }
     let Some((dynamic_off, dynamic_size)) = dynamic else {
-        return Err(format!("native `{}` has no PT_DYNAMIC", path.display()));
+        return Err(crate::fail!(
+            Native,
+            format!("native `{}` has no PT_DYNAMIC", path.display())
+        ));
     };
-    let start = usize::try_from(dynamic_off).map_err(|_| bad())?;
-    let size = usize::try_from(dynamic_size).map_err(|_| bad())?;
-    let end = start.checked_add(size).ok_or_else(bad)?;
+    let start = usize::try_from(dynamic_off)
+        .map_err(|_| bad())
+        .map_err(|e| crate::fail!(Native, e))?;
+    let size = usize::try_from(dynamic_size)
+        .map_err(|_| bad())
+        .map_err(|e| crate::fail!(Native, e))?;
+    let end = start
+        .checked_add(size)
+        .ok_or_else(bad)
+        .map_err(|e| crate::fail!(Native, e))?;
     if end > bytes.len() || !size.is_multiple_of(elf::DYN_ENTRY_SIZE) {
-        return Err(bad());
+        return Err(crate::fail!(Native, bad()));
     }
 
     let mut init_array_addr = None;
@@ -136,11 +180,21 @@ fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
     let mut fini_array_addr = None;
     let mut fini_array_size = None;
     for entry in (start..end).step_by(elf::DYN_ENTRY_SIZE) {
-        let tag = i64::from_le_bytes(bytes[entry..entry + 8].try_into().map_err(|_| bad())?);
+        let tag = i64::from_le_bytes(
+            bytes[entry..entry + 8]
+                .try_into()
+                .map_err(|_| bad())
+                .map_err(|e| crate::fail!(Native, e))?,
+        );
         if tag == elf::DT_NULL {
             break;
         }
-        let value = u64::from_le_bytes(bytes[entry + 8..entry + 16].try_into().map_err(|_| bad())?);
+        let value = u64::from_le_bytes(
+            bytes[entry + 8..entry + 16]
+                .try_into()
+                .map_err(|_| bad())
+                .map_err(|e| crate::fail!(Native, e))?,
+        );
         match tag {
             elf::DT_INIT => result.init = Some(value),
             elf::DT_FINI => result.fini = Some(value),
@@ -149,9 +203,12 @@ fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
             elf::DT_FINI_ARRAY => fini_array_addr = Some(value),
             elf::DT_FINI_ARRAYSZ => fini_array_size = Some(value),
             elf::DT_PREINIT_ARRAY | elf::DT_PREINIT_ARRAYSZ => {
-                return Err(format!(
-                    "native `{}` unexpectedly contains a preinit array",
-                    path.display()
+                return Err(crate::fail!(
+                    Native,
+                    format!(
+                        "native `{}` unexpectedly contains a preinit array",
+                        path.display()
+                    )
                 ));
             }
             _ => continue,
@@ -190,21 +247,25 @@ pub(crate) fn callable_list(section: &Section) -> Option<CallableList> {
 /// rebases these slots, so a zeroed one arrives as the slide and is called, and pointing the section
 /// at nothing would move everything laid out after it. Only the type is load-bearing for the loader,
 /// and the caller signs the image again afterwards.
-fn detach(section: &Section, bytes: &mut [u8]) -> Result<(), String> {
+fn detach(section: &Section, bytes: &mut [u8]) -> Result<(), crate::error::Error> {
     let short = || "a section header lies outside the image".to_string();
-    let attributes = read_u32(bytes, section.flags_at).ok_or_else(short)? & !SECTION_TYPE_MASK;
+    let attributes = read_u32(bytes, section.flags_at)
+        .ok_or_else(short)
+        .map_err(|e| crate::fail!(Native, e))?
+        & !SECTION_TYPE_MASK;
     let field = bytes
         .get_mut(section.flags_at..section.flags_at + 4)
-        .ok_or_else(short)?;
+        .ok_or_else(short)
+        .map_err(|e| crate::fail!(Native, e))?;
     field.copy_from_slice(&(S_REGULAR | attributes).to_le_bytes());
     Ok(())
 }
 
 /// The Mach-O half: the lists are sections the loader runs because of their type, so the read is a
 /// section walk and the suppression is that type ceasing to say so.
-fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
+fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, crate::error::Error> {
     let bad = |detail: String| format!("native `{}`: {detail}", path.display());
-    let image = macho::image(bytes).map_err(bad)?;
+    let image = macho::image(bytes).map_err(|e| crate::fail!(Native, bad(e.to_string())))?;
     let mut result = Layout::default();
     for segment in &image.segments {
         if segment.vmsize == 0 {
@@ -213,7 +274,8 @@ fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
         let end = segment
             .vmaddr
             .checked_add(segment.vmsize)
-            .ok_or_else(|| bad("segment range overflow".to_string()))?;
+            .ok_or_else(|| bad("segment range overflow".to_string()))
+            .map_err(|e| crate::fail!(Native, e))?;
         result.loads.push((segment.vmaddr, end));
         if segment.is_executable() {
             result.executable_loads.push((segment.vmaddr, end));
@@ -234,13 +296,19 @@ fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
             } else {
                 // A typed list under no name this format uses is one whose destructors or
                 // constructors mirvm would otherwise leave to the loader after patching nothing.
-                return Err(bad(format!(
-                    "section `{},{}` is a callable list this port does not recognise",
-                    section.segname, section.sectname
-                )));
+                return Err(crate::fail!(
+                    Native,
+                    bad(format!(
+                        "section `{},{}` is a callable list this port does not recognise",
+                        section.segname, section.sectname
+                    ))
+                ));
             };
             if array.replace((section.addr, section.size, form)).is_some() {
-                return Err(bad(format!("two `{}` sections", section.sectname)));
+                return Err(crate::fail!(
+                    Native,
+                    bad(format!("two `{}` sections", section.sectname))
+                ));
             }
             detach(section, bytes)?;
         }
@@ -252,11 +320,14 @@ fn pair_tags(
     address: Option<u64>,
     size: Option<u64>,
     what: &str,
-) -> Result<Option<(u64, u64)>, String> {
+) -> Result<Option<(u64, u64)>, crate::error::Error> {
     match (address, size) {
         (None, None) => Ok(None),
         (Some(address), Some(size)) => Ok(Some((address, size))),
-        _ => Err(format!("native has incomplete {what} metadata")),
+        _ => Err(crate::fail!(
+            Native,
+            format!("native has incomplete {what} metadata")
+        )),
     }
 }
 

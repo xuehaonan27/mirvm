@@ -582,7 +582,9 @@ fn a_linked_entry_unwinds_through_a_loaded_frame() {
     };
 
     let (Some(raiser_symbol), Some(caller_symbol)) = (raiser_symbol, caller_symbol) else {
-        eprintln!("this pair's call encoding is not one the linker applies yet; nothing to prove");
+        crate::diag::instrument(format_args!(
+            "this pair's call encoding is not one the linker applies yet; nothing to prove"
+        ));
         return;
     };
 

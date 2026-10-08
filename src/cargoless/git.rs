@@ -18,11 +18,19 @@ pub struct GitStore {
 }
 
 impl GitStore {
-    pub fn open(root: PathBuf, offline: bool) -> Result<Self, String> {
-        std::fs::create_dir_all(root.join("db"))
-            .map_err(|error| format!("failed to create Git store {}: {error}", root.display()))?;
-        std::fs::create_dir_all(root.join("checkouts"))
-            .map_err(|error| format!("failed to create Git store {}: {error}", root.display()))?;
+    pub fn open(root: PathBuf, offline: bool) -> Result<Self, crate::error::Error> {
+        std::fs::create_dir_all(root.join("db")).map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("failed to create Git store {}: {error}", root.display())
+            )
+        })?;
+        std::fs::create_dir_all(root.join("checkouts")).map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("failed to create Git store {}: {error}", root.display())
+            )
+        })?;
         Ok(Self { root, offline })
     }
 
@@ -31,7 +39,7 @@ impl GitStore {
         spec: &GitSpec,
         package: &str,
         locked_source: Option<&str>,
-    ) -> Result<PackageManifest, String> {
+    ) -> Result<PackageManifest, crate::error::Error> {
         let source_id = spec.source_id();
         let key = repo_key(&spec.url);
         let db = self.root.join("db").join(&key);
@@ -41,10 +49,13 @@ impl GitStore {
         };
         if locked_source.is_some() && !git_object_exists(&db, &precise)? {
             if self.offline {
-                return Err(crate::options::offline_error(format!(
-                    "locked commit {precise} of Git dependency {package} \
+                return Err(crate::fail!(
+                    Resolver,
+                    crate::options::offline_error(format!(
+                        "locked commit {precise} of Git dependency {package} \
                      is not in the local cache"
-                )));
+                    ))
+                ));
             }
             self.ensure_db(spec, &db)?;
             if !git_object_exists(&db, &precise)? {
@@ -58,7 +69,7 @@ impl GitStore {
                 "failed to resolve workspace of Git dependency {package} ({}#{precise}): {error}",
                 spec.url
             )
-        })?;
+        }).map_err(|e| crate::fail!(Resolver, e))?;
         let mut manifest = workspace
             .members
             .into_iter()
@@ -68,12 +79,16 @@ impl GitStore {
                     "found {package} in the Git repository but not in the \
                                     materialized workspace"
                 )
-            })?;
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         if !spec.version.matches(&manifest.version) {
-            return Err(format!(
-                "package.version={} of Git dependency {package} does not satisfy the \
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "package.version={} of Git dependency {package} does not satisfy the \
                  manifest version requirement {}",
-                manifest.version, spec.version
+                    manifest.version, spec.version
+                )
             ));
         }
         manifest.lock_source = Some(format!("{source_id}#{precise}"));
@@ -81,14 +96,17 @@ impl GitStore {
         Ok(manifest)
     }
 
-    fn resolve_fresh(&self, spec: &GitSpec, db: &Path) -> Result<String, String> {
+    fn resolve_fresh(&self, spec: &GitSpec, db: &Path) -> Result<String, crate::error::Error> {
         if !db.is_dir() {
             if self.offline {
-                return Err(crate::options::offline_error(format!(
-                    "no local cache for Git repository {} \
+                return Err(crate::fail!(
+                    Resolver,
+                    crate::options::offline_error(format!(
+                        "no local cache for Git repository {} \
                      (resolve it once online first)",
-                    spec.url
-                )));
+                        spec.url
+                    ))
+                ));
             }
             self.ensure_db(spec, db)?;
         } else {
@@ -111,7 +129,8 @@ impl GitStore {
                             "Git repository {} has no resolvable default branch",
                             spec.url
                         )
-                    })?
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?
                     .to_string()
             }
             GitReference::Branch(branch) => format!("refs/heads/{branch}"),
@@ -160,14 +179,15 @@ impl GitStore {
         rev_parse(db, &format!("{reference}^{{commit}}"))
     }
 
-    fn ensure_db(&self, spec: &GitSpec, db: &Path) -> Result<(), String> {
+    fn ensure_db(&self, spec: &GitSpec, db: &Path) -> Result<(), crate::error::Error> {
         if db.is_dir() {
             return validate_db_origin(db, &spec.url);
         }
-        let parent = db
-            .parent()
-            .ok_or_else(|| "Git db path has no parent directory".to_string())?;
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let parent = db.parent().ok_or_else(|| {
+            crate::fail!(Resolver, "Git db path has no parent directory".to_string())
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| crate::fail!(Resolver, error.to_string()))?;
         git_ok(
             Command::new("git")
                 .args(["clone", "--mirror", "--no-checkout", &spec.url])
@@ -177,16 +197,25 @@ impl GitStore {
         validate_db_origin(db, &spec.url)
     }
 
-    fn ensure_checkout(&self, db: &Path, key: &str, precise: &str) -> Result<PathBuf, String> {
+    fn ensure_checkout(
+        &self,
+        db: &Path,
+        key: &str,
+        precise: &str,
+    ) -> Result<PathBuf, crate::error::Error> {
         let dir = self.root.join("checkouts").join(key).join(precise);
         if dir.is_dir() {
             validate_checkout(&dir, precise)?;
             return Ok(dir);
         }
-        let parent = dir
-            .parent()
-            .ok_or_else(|| "Git checkout path has no parent directory".to_string())?;
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let parent = dir.parent().ok_or_else(|| {
+            crate::fail!(
+                Resolver,
+                "Git checkout path has no parent directory".to_string()
+            )
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| crate::fail!(Resolver, error.to_string()))?;
         let temp = crate::store::staging_path(&dir);
         let result = (|| {
             git_ok(
@@ -206,9 +235,11 @@ impl GitStore {
             update_submodules(&temp, self.offline)?;
             // A populated checkout exists only once it is complete: publish it by rename, so a
             // concurrent reader never sees a half-cloned tree at the final path.
-            crate::store::publish(&dir, &temp).map_err(|error| {
-                format!("failed to publish Git checkout {}: {error}", dir.display())
-            })?;
+            crate::store::publish(&dir, &temp)
+                .map_err(|error| {
+                    format!("failed to publish Git checkout {}: {error}", dir.display())
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?;
             validate_checkout(&dir, precise)
         })();
         if result.is_err() && temp.exists() {
@@ -235,7 +266,7 @@ fn repo_key(url: &str) -> String {
     )
 }
 
-fn parse_locked_source(source: &str, source_id: &str) -> Result<String, String> {
+fn parse_locked_source(source: &str, source_id: &str) -> Result<String, crate::error::Error> {
     let precise = source
         .strip_prefix(source_id)
         .and_then(|rest| rest.strip_prefix('#'))
@@ -244,14 +275,21 @@ fn parse_locked_source(source: &str, source_id: &str) -> Result<String, String> 
                 "Cargo.lock Git source does not match the manifest: \
                  expected {source_id}#<commit>, got {source}"
             )
-        })?;
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?;
     if precise.len() < 40 || !precise.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("invalid Cargo.lock Git commit: {precise}"));
+        return Err(crate::fail!(
+            Resolver,
+            format!("invalid Cargo.lock Git commit: {precise}")
+        ));
     }
     Ok(precise.to_ascii_lowercase())
 }
 
-fn resolve_cached_reference(db: &Path, reference: &GitReference) -> Result<String, String> {
+fn resolve_cached_reference(
+    db: &Path,
+    reference: &GitReference,
+) -> Result<String, crate::error::Error> {
     let rev = match reference {
         GitReference::DefaultBranch => "HEAD^{commit}".to_string(),
         GitReference::Branch(branch) => format!("refs/heads/{branch}^{{commit}}"),
@@ -259,11 +297,16 @@ fn resolve_cached_reference(db: &Path, reference: &GitReference) -> Result<Strin
         GitReference::Rev(rev) => format!("{rev}^{{commit}}"),
     };
     rev_parse(db, &rev).map_err(|error| {
-        crate::options::offline_error(format!("Git reference {rev} is not in the cache: {error}"))
+        crate::fail!(
+            Resolver,
+            crate::options::offline_error(format!(
+                "Git reference {rev} is not in the cache: {error}"
+            ))
+        )
     })
 }
 
-fn fetch_precise(db: &Path, url: &str, precise: &str) -> Result<(), String> {
+fn fetch_precise(db: &Path, url: &str, precise: &str) -> Result<(), crate::error::Error> {
     git_ok(
         Command::new("git")
             .arg("-C")
@@ -273,7 +316,7 @@ fn fetch_precise(db: &Path, url: &str, precise: &str) -> Result<(), String> {
     )
 }
 
-fn git_object_exists(db: &Path, precise: &str) -> Result<bool, String> {
+fn git_object_exists(db: &Path, precise: &str) -> Result<bool, crate::error::Error> {
     if !db.is_dir() {
         return Ok(false);
     }
@@ -283,11 +326,11 @@ fn git_object_exists(db: &Path, precise: &str) -> Result<bool, String> {
         .args(["cat-file", "-e", &format!("{precise}^{{commit}}")])
         .env("GIT_TERMINAL_PROMPT", "0")
         .status()
-        .map_err(|error| format!("failed to run git cat-file: {error}"))?
+        .map_err(|error| crate::fail!(Resolver, format!("failed to run git cat-file: {error}")))?
         .success())
 }
 
-fn validate_db_origin(db: &Path, expected: &str) -> Result<(), String> {
+fn validate_db_origin(db: &Path, expected: &str) -> Result<(), crate::error::Error> {
     let actual = git_output(
         Command::new("git")
             .arg("-C")
@@ -296,15 +339,18 @@ fn validate_db_origin(db: &Path, expected: &str) -> Result<(), String> {
         "read Git cache origin",
     )?;
     if actual != expected {
-        return Err(format!(
-            "Git cache identity mismatch {}: expected origin {expected}, got {actual}",
-            db.display()
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "Git cache identity mismatch {}: expected origin {expected}, got {actual}",
+                db.display()
+            )
         ));
     }
     Ok(())
 }
 
-fn update_submodules(checkout: &Path, offline: bool) -> Result<(), String> {
+fn update_submodules(checkout: &Path, offline: bool) -> Result<(), crate::error::Error> {
     if !checkout.join(".gitmodules").is_file() {
         return Ok(());
     }
@@ -324,12 +370,15 @@ fn update_submodules(checkout: &Path, offline: bool) -> Result<(), String> {
     git_ok(&mut command, &action)
 }
 
-fn validate_checkout(dir: &Path, precise: &str) -> Result<(), String> {
+fn validate_checkout(dir: &Path, precise: &str) -> Result<(), crate::error::Error> {
     let actual = rev_parse(dir, "HEAD^{commit}")?;
     if actual != precise {
-        return Err(format!(
-            "Git checkout identity corrupt {}: expected {precise}, got {actual}",
-            dir.display()
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "Git checkout identity corrupt {}: expected {precise}, got {actual}",
+                dir.display()
+            )
         ));
     }
     let status = git_output(
@@ -341,10 +390,13 @@ fn validate_checkout(dir: &Path, precise: &str) -> Result<(), String> {
         "check Git checkout integrity",
     )?;
     if !status.is_empty() {
-        return Err(format!(
-            "Git checkout content was modified {}:\n{}",
-            dir.display(),
-            status
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "Git checkout content was modified {}:\n{}",
+                dir.display(),
+                status
+            )
         ));
     }
     if dir.join(".gitmodules").is_file() {
@@ -359,16 +411,19 @@ fn validate_checkout(dir: &Path, precise: &str) -> Result<(), String> {
             .lines()
             .any(|line| line.starts_with(['-', '+', 'U']))
         {
-            return Err(format!(
-                "Git checkout has uninitialized or mismatched submodules {}:\n{submodules}",
-                dir.display()
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "Git checkout has uninitialized or mismatched submodules {}:\n{submodules}",
+                    dir.display()
+                )
             ));
         }
     }
     Ok(())
 }
 
-fn rev_parse(repo: &Path, rev: &str) -> Result<String, String> {
+fn rev_parse(repo: &Path, rev: &str) -> Result<String, crate::error::Error> {
     git_output(
         Command::new("git")
             .arg("-C")
@@ -378,48 +433,62 @@ fn rev_parse(repo: &Path, rev: &str) -> Result<String, String> {
     )
 }
 
-fn git_ok(command: &mut Command, action: &str) -> Result<(), String> {
+fn git_ok(command: &mut Command, action: &str) -> Result<(), crate::error::Error> {
     let output = command
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map_err(|error| format!("{action}: failed to start git: {error}"))?;
+        .map_err(|error| {
+            crate::fail!(Resolver, format!("{action}: failed to start git: {error}"))
+        })?;
     if output.status.success() {
         return Ok(());
     }
-    Err(format!(
-        "{action} failed (exit={}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
-}
-
-fn git_output(command: &mut Command, action: &str) -> Result<String, String> {
-    let output = command
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|error| format!("{action}: failed to start git: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
+    Err(crate::fail!(
+        Resolver,
+        format!(
             "{action} failed (exit={}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
+        )
+    ))
+}
+
+fn git_output(command: &mut Command, action: &str) -> Result<String, crate::error::Error> {
+    let output = command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|error| {
+            crate::fail!(Resolver, format!("{action}: failed to start git: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "{action} failed (exit={}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn find_package_dir(checkout: &Path, package: &str) -> Result<PathBuf, String> {
+fn find_package_dir(checkout: &Path, package: &str) -> Result<PathBuf, crate::error::Error> {
     let mut matches = Vec::new();
     let mut stack = vec![checkout.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|error| format!("failed to scan Git checkout {}: {error}", dir.display()))?;
+        let entries = std::fs::read_dir(&dir).map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("failed to scan Git checkout {}: {error}", dir.display())
+            )
+        })?;
         for entry in entries {
-            let entry = entry.map_err(|error| error.to_string())?;
+            let entry = entry.map_err(|error| crate::fail!(Resolver, error.to_string()))?;
             let path = entry.path();
             if entry
                 .file_type()
-                .map_err(|error| error.to_string())?
+                .map_err(|error| crate::fail!(Resolver, error.to_string()))?
                 .is_dir()
             {
                 if matches!(entry.file_name().to_str(), Some(".git" | "target")) {
@@ -431,10 +500,18 @@ fn find_package_dir(checkout: &Path, package: &str) -> Result<PathBuf, String> {
             if entry.file_name() != "Cargo.toml" {
                 continue;
             }
-            let text = std::fs::read_to_string(&path)
-                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-            let value: toml::Value = toml::from_str(&text)
-                .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+            let text = std::fs::read_to_string(&path).map_err(|error| {
+                crate::fail!(
+                    Resolver,
+                    format!("failed to read {}: {error}", path.display())
+                )
+            })?;
+            let value: toml::Value = toml::from_str(&text).map_err(|error| {
+                crate::fail!(
+                    Resolver,
+                    format!("failed to parse {}: {error}", path.display())
+                )
+            })?;
             if value
                 .get("package")
                 .and_then(|package| package.get("name"))
@@ -446,18 +523,25 @@ fn find_package_dir(checkout: &Path, package: &str) -> Result<PathBuf, String> {
         }
     }
     match matches.len() {
-        0 => Err(format!(
-            "package `{package}` not found in Git repository {}",
-            checkout.display()
+        0 => Err(crate::fail!(
+            Resolver,
+            format!(
+                "package `{package}` not found in Git repository {}",
+                checkout.display()
+            )
         )),
-        1 => std::fs::canonicalize(&matches[0]).map_err(|error| error.to_string()),
-        _ => Err(format!(
-            "multiple packages named `{package}` in the Git repository: {}",
-            matches
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+        1 => std::fs::canonicalize(&matches[0])
+            .map_err(|error| crate::fail!(Resolver, error.to_string())),
+        _ => Err(crate::fail!(
+            Resolver,
+            format!(
+                "multiple packages named `{package}` in the Git repository: {}",
+                matches
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         )),
     }
 }
@@ -598,7 +682,10 @@ mod tests {
         let error = cold
             .ensure_package(&branch, "git-core", Some(&locked_source))
             .unwrap_err();
-        assert!(error.contains("not in the local cache"), "{error}");
+        assert!(
+            error.to_string().contains("not in the local cache"),
+            "{error}"
+        );
 
         write(
             locked_manifest.root.join("src/lib.rs"),
@@ -607,7 +694,10 @@ mod tests {
         let error = store
             .ensure_package(&branch, "git-core", Some(&locked_source))
             .unwrap_err();
-        assert!(error.contains("content was modified"), "{error}");
+        assert!(
+            error.to_string().contains("content was modified"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

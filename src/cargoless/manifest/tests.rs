@@ -115,14 +115,14 @@ fn rejects_invalid_git_and_workspace_inherited_deps_loudly() {
             Path::new("/tmp/x"),
         )
         .unwrap_err();
-        assert!(err.contains(needle), "{dependency}: {err}");
+        assert!(err.to_string().contains(needle), "{dependency}: {err}");
     }
     let err = PackageManifest::parse(
         "[package]\nname=\"d\"\nversion=\"0.1.0\"\n[dependencies]\nfoo.workspace = true",
         Path::new("/tmp/x"),
     )
     .unwrap_err();
-    assert!(err.contains("workspace inheritance"), "{err}");
+    assert!(err.to_string().contains("workspace inheritance"), "{err}");
 }
 
 #[test]
@@ -199,7 +199,7 @@ fn rejects_invalid_lint_shapes_loudly() {
             Path::new("/tmp/x"),
         )
         .unwrap_err();
-        assert!(error.contains(want), "{error}");
+        assert!(error.to_string().contains(want), "{error}");
     }
 }
 
@@ -313,7 +313,7 @@ fn autodiscovers_lib_main_and_bin_dir() {
     // With several bins runnable_bin rejects loudly (resolve with an explicit --bin
     // or default-run); default-run pins one and resolves it
     let err = m.runnable_bin().unwrap_err();
-    assert!(err.contains("--bin"), "{err}");
+    assert!(err.to_string().contains("--bin"), "{err}");
     let m2 = PackageManifest::parse(
         "[package]\nname=\"d\"\nversion=\"0.1.0\"\ndefault-run=\"extra\"\n",
         &d,
@@ -324,7 +324,10 @@ fn autodiscovers_lib_main_and_bin_dir() {
     // available ones
     assert_eq!(m.runnable_bin_opt(Some("extra")).unwrap().0, "extra");
     let err = m.runnable_bin_opt(Some("nope")).unwrap_err();
-    assert!(err.contains("nope") && err.contains("extra"), "{err}");
+    assert!(
+        err.to_string().contains("nope") && err.to_string().contains("extra"),
+        "{err}"
+    );
     std::fs::remove_dir_all(&d).unwrap();
 }
 
@@ -582,7 +585,7 @@ fn resolver_and_rust_version_follow_cargo_manifest_rules() {
         &directory,
     )
     .unwrap_err();
-    assert!(error.contains("1.85.0"), "{error}");
+    assert!(error.to_string().contains("1.85.0"), "{error}");
     assert!(
         PackageManifest::parse(
             "[package]\nname='bad'\nversion='0.1.0'\nedition='2021'\nrust-version='>=1.70'\n",

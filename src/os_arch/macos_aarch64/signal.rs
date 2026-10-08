@@ -154,7 +154,11 @@ unsafe extern "C" fn segv_dump_handler(
         let mc = (*uc).mcontext;
         let pc = (*mc).ss.pc as usize;
         let addr = (*mc).es.far as usize;
-        eprintln!("mirvm-segv-dump: fault addr(FAR)={addr:#x} pc={pc:#x}");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Os,
+            "mirvm-segv-dump: fault addr(FAR)={addr:#x} pc={pc:#x}"
+        );
         std::process::exit(134);
     }
 }

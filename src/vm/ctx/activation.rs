@@ -109,7 +109,11 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         let p = crate::os::thread::tls_get(key);
         let contexts = if p.is_null() {
             if THREAD_CONTEXT_EXITING.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("mirvm[m4-engine]: Engine callback entered after pthread teardown");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "Engine callback entered after pthread teardown"
+                );
                 std::process::abort();
             }
             let contexts = Box::into_raw(Box::new(ThreadContexts::new()));
@@ -119,7 +123,11 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
             p as *mut ThreadContexts
         };
         if (*contexts).active_engines.try_reserve(1).is_err() {
-            eprintln!("mirvm[m4-engine]: failed to grow the Engine activation stack");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "failed to grow the Engine activation stack"
+            );
             std::process::abort();
         }
         // The handle is set once per pthread, from the inbox the line above made current: the
@@ -131,7 +139,11 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         let previous_len = (*contexts).active_engines.len();
         let activation = (*contexts).next_activation;
         if activation == 0 {
-            eprintln!("mirvm[m4-engine]: Engine activation counter exhausted");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "Engine activation counter exhausted"
+            );
             std::process::abort();
         }
         (*contexts).next_activation = activation.wrapping_add(1);

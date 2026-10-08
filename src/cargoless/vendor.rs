@@ -45,17 +45,24 @@ impl VendorDir {
     }
 
     /// One directory's manifest -> single-version IndexVersion (version read from manifest self-report).
-    pub(crate) fn entry_from_dir(dir: &Path, what: &str) -> Result<IndexVersion, String> {
-        let m = PackageManifest::read_dir(dir).map_err(|e| {
-            format!(
-                "vendor source {what} ({}) manifest parse failed: {e}",
-                dir.display()
-            )
-        })?;
+    pub(crate) fn entry_from_dir(
+        dir: &Path,
+        what: &str,
+    ) -> Result<IndexVersion, crate::error::Error> {
+        let m = PackageManifest::read_dir(dir)
+            .map_err(|e| {
+                format!(
+                    "vendor source {what} ({}) manifest parse failed: {e}",
+                    dir.display()
+                )
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         Self::entry_from_manifest(&m)
     }
 
-    pub(crate) fn entry_from_manifest(m: &PackageManifest) -> Result<IndexVersion, String> {
+    pub(crate) fn entry_from_manifest(
+        m: &PackageManifest,
+    ) -> Result<IndexVersion, crate::error::Error> {
         let mut deps = Vec::new();
         for d in &m.deps {
             let req = match &d.source {
@@ -109,21 +116,23 @@ impl VendorDir {
     /// Scan dirs for `<name>-<version>/` directories (strip the `{name}-` prefix and parse
     /// the rest as semver; prefix collisions like `r-efi` vs `r-efi-alloc-2.1.0` naturally
     /// fall through as parse failures). Versions are sorted by semver (deterministic).
-    fn scan_versions(&self, name: &str) -> Result<Vec<(Version, PathBuf)>, String> {
+    fn scan_versions(&self, name: &str) -> Result<Vec<(Version, PathBuf)>, crate::error::Error> {
         let prefix = format!("{name}-");
         let mut out = Vec::new();
         for dir in &self.dirs {
             let rd = match std::fs::read_dir(dir) {
                 Ok(rd) => rd,
                 Err(e) => {
-                    return Err(format!(
-                        "vendor directory read failed {}: {e}",
-                        dir.display()
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!("vendor directory read failed {}: {e}", dir.display())
                     ));
                 }
             };
             for ent in rd {
-                let ent = ent.map_err(|e| format!("vendor directory entry read failed: {e}"))?;
+                let ent = ent.map_err(|e| {
+                    crate::fail!(Resolver, format!("vendor directory entry read failed: {e}"))
+                })?;
                 let file_name = ent.file_name();
                 let Some(dir_name) = file_name.to_str() else {
                     continue;
@@ -143,11 +152,18 @@ impl VendorDir {
 }
 
 impl PkgSource for VendorDir {
-    fn registry_source(&mut self, _reference: &RegistryReference) -> Result<String, String> {
+    fn registry_source(
+        &mut self,
+        _reference: &RegistryReference,
+    ) -> Result<String, crate::error::Error> {
         Ok("registry+vendor".to_string())
     }
 
-    fn index_entry(&mut self, _source: &str, name: &str) -> Result<IndexEntry, String> {
+    fn index_entry(
+        &mut self,
+        _source: &str,
+        name: &str,
+    ) -> Result<IndexEntry, crate::error::Error> {
         if let Some(hit) = self.cache.get(name) {
             return Ok(hit.clone());
         }
@@ -165,18 +181,24 @@ impl PkgSource for VendorDir {
                 // should match, and if it does not we fail loudly — wrong version is much harder to debug
                 // than an error.
                 if iv.version != version {
-                    return Err(format!(
-                        "vendor directory {} manifest self-report version {} does not match directory name",
-                        dir.display(),
-                        iv.version
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "vendor directory {} manifest self-report version {} does not match directory name",
+                            dir.display(),
+                            iv.version
+                        )
                     ));
                 }
                 entries.push(iv);
             }
             if entries.is_empty() {
-                return Err(format!(
-                    "vendor source has no {name} (neither {:?} nor overrides)",
-                    self.dirs
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "vendor source has no {name} (neither {:?} nor overrides)",
+                        self.dirs
+                    )
                 ));
             }
             entries
@@ -192,7 +214,7 @@ impl PkgSource for VendorDir {
         name: &str,
         version: &Version,
         _cksum: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, crate::error::Error> {
         if let Some(dir) = self.overrides.get(name) {
             return Ok(dir.clone());
         }
@@ -203,9 +225,12 @@ impl PkgSource for VendorDir {
                 return Ok(hit);
             }
         }
-        Err(format!(
-            "vendor source has no {want} directory ({:?}) — lock-pinned version is out of sync with vendor tree",
-            self.dirs
+        Err(crate::fail!(
+            Resolver,
+            format!(
+                "vendor source has no {want} directory ({:?}) — lock-pinned version is out of sync with vendor tree",
+                self.dirs
+            )
         ))
     }
 }

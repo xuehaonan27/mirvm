@@ -72,7 +72,7 @@ impl Instance {
     ///
     /// State the artifact cannot describe the loader owns: asm-stub addresses, native and
     /// machine-code images, and entry-closure mappings start empty here.
-    pub fn materialize(module: &Module) -> Result<Self, String> {
+    pub fn materialize(module: &Module) -> Result<Self, crate::error::Error> {
         let frozen = match &module.frozen {
             Some(snapshot) => Some(FrozenArena::restore(snapshot.bytes(), snapshot.home())?),
             None => None,
@@ -83,7 +83,7 @@ impl Instance {
     /// The same as [`Instance::materialize`], except the frozen bytes get a fresh anonymous mapping so
     /// several instances of one artifact can run in one process. Absolute addresses the bytes embed are
     /// translated through the load map, so only relocatable artifacts (packages) may take this route.
-    pub fn materialize_dynamic(module: &Module) -> Result<Self, String> {
+    pub fn materialize_dynamic(module: &Module) -> Result<Self, crate::error::Error> {
         let frozen = match &module.frozen {
             Some(snapshot) => Some(FrozenArena::restore_dynamic(snapshot)?),
             None => None,
@@ -110,10 +110,10 @@ impl Instance {
             .unwrap_or_else(|| panic!("unmapped artifact address {:#x}", addr.0))
     }
 
-    pub fn try_resolve_link_addr(&self, addr: LinkAddr) -> Result<u64, String> {
+    pub fn try_resolve_link_addr(&self, addr: LinkAddr) -> Result<u64, crate::error::Error> {
         self.load_map
             .resolve_or_identity(addr)
-            .ok_or_else(|| format!("unmapped artifact address {:#x}", addr.0))
+            .ok_or_else(|| crate::fail!(Engine, format!("unmapped artifact address {:#x}", addr.0)))
     }
 
     pub fn is_executable_entry(&self, addr: u64) -> bool {
@@ -134,22 +134,28 @@ impl Instance {
     /// Write every frozen-domain pointer relocation the artifact carries. Both the cell to write and
     /// the value to write it are link addresses; the load map turns them into this instance's real
     /// addresses.
-    pub fn apply_frozen_relocs(&self, module: &Module) -> Result<(), String> {
+    pub fn apply_frozen_relocs(&self, module: &Module) -> Result<(), crate::error::Error> {
         use super::ir::FrozenRelocTarget;
         for (index, reloc) in module.frozen_relocs.iter().enumerate() {
-            let at = self
-                .load_map
-                .resolve(reloc.at)
-                .ok_or_else(|| format!("frozen relocation {index} write address is unmapped"))?;
+            let at = self.load_map.resolve(reloc.at).ok_or_else(|| {
+                crate::fail!(
+                    Engine,
+                    format!("frozen relocation {index} write address is unmapped")
+                )
+            })?;
             let target_link = match reloc.target {
                 FrozenRelocTarget::Frozen(addr) | FrozenRelocTarget::Entry(addr) => addr,
             };
-            let target = self.load_map.resolve(target_link).ok_or_else(|| {
-                format!(
-                    "frozen relocation {index} target address {:#x} ({:?}) is unmapped",
-                    target_link.0, reloc.target
-                )
-            })?;
+            let target = self
+                .load_map
+                .resolve(target_link)
+                .ok_or_else(|| {
+                    format!(
+                        "frozen relocation {index} target address {:#x} ({:?}) is unmapped",
+                        target_link.0, reloc.target
+                    )
+                })
+                .map_err(|e| crate::fail!(Engine, e))?;
             unsafe { (at as *mut u64).write_unaligned(target) };
         }
         Ok(())
@@ -182,14 +188,14 @@ impl Instance {
         &mut self,
         module: &mut Module,
         argv: &[String],
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::Error> {
         let Some(entry) = module.entry.as_mut() else {
             return Ok(());
         };
-        let frozen = self
-            .frozen
-            .as_mut()
-            .ok_or("executable module has no frozen memory for argv")?;
+        let frozen = self.frozen.as_mut().ok_or(crate::fail!(
+            Engine,
+            "executable module has no frozen memory for argv"
+        ))?;
         let mut ptrs: Vec<u64> = Vec::with_capacity(argv.len());
         for a in argv {
             let bytes = a.as_bytes();

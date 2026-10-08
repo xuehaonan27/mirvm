@@ -226,7 +226,11 @@ unsafe extern "C" fn segv_dump_handler(
         let uc = ctx as *mut libc::ucontext_t;
         let rip = (*uc).uc_mcontext.gregs[16] as usize; // RIP
         let addr = (*uc).uc_mcontext.gregs[22] as usize; // CR2 (the real fault address)
-        eprintln!("mirvm-segv-dump: fault addr(CR2)={addr:#x} rip={rip:#x}");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Os,
+            "mirvm-segv-dump: fault addr(CR2)={addr:#x} rip={rip:#x}"
+        );
         if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
             for line in maps.lines() {
                 let start =
@@ -242,14 +246,24 @@ unsafe extern "C" fn segv_dump_handler(
                 )
                 .unwrap_or(0);
                 if addr >= start && addr < end {
-                    eprintln!("mirvm-segv-dump: fault owner: {line}");
+                    crate::diag_direct_at!(
+                        crate::diag::Severity::Error,
+                        Os,
+                        "mirvm-segv-dump: fault owner: {line}"
+                    );
                 }
                 if rip >= start && rip < end {
-                    eprintln!("mirvm-segv-dump: rip owner: {line}");
+                    crate::diag_direct_at!(
+                        crate::diag::Severity::Error,
+                        Os,
+                        "mirvm-segv-dump: rip owner: {line}"
+                    );
                     if line.contains("xp") {
                         let bytes = std::slice::from_raw_parts(start as *const u8, end - start);
                         let _ = std::fs::write("/tmp/mirvm-jitdump.bin", bytes);
-                        eprintln!(
+                        crate::diag_direct_at!(
+                            crate::diag::Severity::Error,
+                            Os,
                             "mirvm-segv-dump: executable segment dumped to /tmp/mirvm-jitdump.bin (base {start:#x})"
                         );
                     }

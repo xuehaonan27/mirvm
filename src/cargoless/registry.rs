@@ -69,7 +69,7 @@ pub struct IndexDep {
     pub registry: Option<String>,
 }
 
-type RErr = String;
+type RErr = crate::error::Error;
 
 #[derive(Clone, Debug)]
 enum Backend {
@@ -111,7 +111,8 @@ impl Registry {
     /// Open own store (directories created on demand; offline taken from MIRVM_OFFLINE).
     #[cfg(test)]
     pub fn open() -> Result<Self, RErr> {
-        let current = std::env::current_dir().map_err(|error| error.to_string())?;
+        let current =
+            std::env::current_dir().map_err(|error| crate::fail!(Resolver, error.to_string()))?;
         Self::open_for_at(
             crate::store::REGISTRY.dir(),
             crate::options::offline(),
@@ -129,14 +130,19 @@ impl Registry {
 
     #[cfg(test)]
     pub fn open_at(root: PathBuf, offline: bool) -> Result<Self, RErr> {
-        let current = std::env::current_dir().map_err(|error| error.to_string())?;
+        let current =
+            std::env::current_dir().map_err(|error| crate::fail!(Resolver, error.to_string()))?;
         Self::open_for_at(root, offline, &current)
     }
 
     pub fn open_for_at(root: PathBuf, offline: bool, project: &Path) -> Result<Self, RErr> {
         for sub in ["index", "cache", "src"] {
-            std::fs::create_dir_all(root.join(sub))
-                .map_err(|e| format!("registry store creation failed {}: {e}", root.display()))?;
+            std::fs::create_dir_all(root.join(sub)).map_err(|e| {
+                crate::fail!(
+                    Resolver,
+                    format!("registry store creation failed {}: {e}", root.display())
+                )
+            })?;
         }
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(60)))
@@ -169,7 +175,7 @@ impl Registry {
         let n = name.to_ascii_lowercase();
         let bytes = n.as_bytes();
         let path = match bytes.len() {
-            0 => return Err("crate name is empty".into()),
+            0 => return Err(crate::fail!(Resolver, "crate name is empty")),
             1 => format!("1/{n}"),
             2 => format!("2/{n}"),
             3 => format!("3/{}/{n}", &n[..1]),
@@ -233,7 +239,12 @@ impl Registry {
             let index = source
                 .strip_prefix("registry+")
                 .or_else(|| source.strip_prefix("sparse+"))
-                .ok_or_else(|| format!("Cargo.lock registry source invalid: {source}"))?;
+                .ok_or_else(|| {
+                    crate::fail!(
+                        Resolver,
+                        format!("Cargo.lock registry source invalid: {source}")
+                    )
+                })?;
             let configured = self
                 .config
                 .registry_name_for_index(source)?
@@ -277,9 +288,12 @@ impl Registry {
             .and_then(|source| source.replace_with.clone())
         {
             if !seen.insert(current.clone()) || seen.contains(&replacement) {
-                return Err(format!(
-                    "Cargo source replacement cycle: {} -> {replacement}",
-                    seen.into_iter().collect::<Vec<_>>().join(" -> ")
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "Cargo source replacement cycle: {} -> {replacement}",
+                        seen.into_iter().collect::<Vec<_>>().join(" -> ")
+                    )
                 ));
             }
             current = replacement;
@@ -289,8 +303,11 @@ impl Registry {
                     registry = named_registry;
                     break;
                 } else {
-                    return Err(format!(
-                        "Cargo source `{logical_name}` replace-with points to undefined source/registry `{current}`"
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "Cargo source `{logical_name}` replace-with points to undefined source/registry `{current}`"
+                        )
                     ));
                 }
             }
@@ -338,13 +355,20 @@ impl Registry {
                 self.ensure_download_config(&mut endpoint)?;
                 let file = self.index_file(source, name)?;
                 if file.is_file() && (!refresh || self.offline) {
-                    std::fs::read_to_string(&file)
-                        .map_err(|e| format!("index cache read failed {}: {e}", file.display()))?
+                    std::fs::read_to_string(&file).map_err(|e| {
+                        crate::fail!(
+                            Resolver,
+                            format!("index cache read failed {}: {e}", file.display())
+                        )
+                    })?
                 } else {
                     if self.offline {
-                        return Err(crate::options::offline_error(format!(
-                            "{source} index has no local cache for {name}"
-                        )));
+                        return Err(crate::fail!(
+                            Resolver,
+                            crate::options::offline_error(format!(
+                                "{source} index has no local cache for {name}"
+                            ))
+                        ));
                     }
                     let url = format!(
                         "{}{}",
@@ -367,17 +391,24 @@ impl Registry {
             }
             Backend::GitIndex { url, checkout } => {
                 ensure_git_index(&checkout, &url, self.offline)?;
-                std::fs::read_to_string(checkout.join(Self::sparse_path(name)?)).map_err(|e| {
-                    format!(
-                        "Git registry index missing {name} ({}): {e}",
-                        checkout.display()
-                    )
-                })?
+                std::fs::read_to_string(checkout.join(Self::sparse_path(name)?))
+                    .map_err(|e| {
+                        format!(
+                            "Git registry index missing {name} ({}): {e}",
+                            checkout.display()
+                        )
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?
             }
             Backend::LocalRegistry { path } => std::fs::read_to_string(
                 path.join("index").join(Self::sparse_path(name)?),
             )
-            .map_err(|e| format!("local registry missing {name} ({}): {e}", path.display()))?,
+            .map_err(|e| {
+                crate::fail!(
+                    Resolver,
+                    format!("local registry missing {name} ({}): {e}", path.display())
+                )
+            })?,
             Backend::Directory { path } => {
                 let entries = directory_index_entry(&path, name)?;
                 self.index_cache
@@ -439,14 +470,21 @@ impl Registry {
             if found.is_empty() {
                 // ⑤ HTTP
                 if self.offline {
-                    return Err(crate::options::offline_error(format!(
-                        "{dir_name} has no local cache (neither own nor read-through)"
-                    )));
+                    return Err(crate::fail!(
+                        Resolver,
+                        crate::options::offline_error(format!(
+                            "{dir_name} has no local cache (neither own nor read-through)"
+                        ))
+                    ));
                 }
                 let bytes = match &endpoint.backend {
                     Backend::LocalRegistry { path } => {
-                        std::fs::read(path.join(format!("{dir_name}.crate")))
-                            .map_err(|e| format!("local registry crate missing {dir_name}: {e}"))?
+                        std::fs::read(path.join(format!("{dir_name}.crate"))).map_err(|e| {
+                            crate::fail!(
+                                Resolver,
+                                format!("local registry crate missing {dir_name}: {e}")
+                            )
+                        })?
                     }
                     Backend::Sparse { .. } | Backend::GitIndex { .. } => {
                         self.ensure_download_config(&mut endpoint)?;
@@ -455,22 +493,27 @@ impl Registry {
                     Backend::Directory { .. } => unreachable!(),
                 };
                 if let Some(parent) = own_crate.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("crate cache directory creation failed: {e}"))?;
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        crate::fail!(
+                            Resolver,
+                            format!("crate cache directory creation failed: {e}")
+                        )
+                    })?;
                 }
-                std::fs::write(&own_crate, &bytes).map_err(|e| {
-                    format!("crate cache write failed {}: {e}", own_crate.display())
-                })?;
+                std::fs::write(&own_crate, &bytes)
+                    .map_err(|e| format!("crate cache write failed {}: {e}", own_crate.display()))
+                    .map_err(|e| crate::fail!(Resolver, e))?;
                 found.push(own_crate.clone());
             }
             found.remove(0)
         };
         // Verify + unpack into own src
-        let bytes = std::fs::read(&crate_file).map_err(|e| format!("crate read failed: {e}"))?;
+        let bytes = std::fs::read(&crate_file)
+            .map_err(|e| crate::fail!(Resolver, format!("crate read failed: {e}")))?;
         verify_cksum(&bytes, cksum, &dir_name)?;
         unpack_crate(&bytes, &own, &dir_name)?;
         std::fs::write(own.join(".cargo-ok"), "ok\n")
-            .map_err(|e| format!("cargo-ok write failed: {e}"))?;
+            .map_err(|e| crate::fail!(Resolver, format!("cargo-ok write failed: {e}")))?;
         Ok(own)
     }
 
@@ -487,14 +530,18 @@ impl Registry {
                     .join(source_key(&endpoint.index_url))
                     .join("config.json");
                 if cache.is_file() {
-                    std::fs::read_to_string(&cache)
-                        .map_err(|e| format!("registry config read failed: {e}"))?
+                    std::fs::read_to_string(&cache).map_err(|e| {
+                        crate::fail!(Resolver, format!("registry config read failed: {e}"))
+                    })?
                 } else {
                     if self.offline {
-                        return Err(crate::options::offline_error(format!(
-                            "registry {} missing config.json cache,",
-                            endpoint.index_url
-                        )));
+                        return Err(crate::fail!(
+                            Resolver,
+                            crate::options::offline_error(format!(
+                                "registry {} missing config.json cache,",
+                                endpoint.index_url
+                            ))
+                        ));
                     }
                     let text = self.http_text(&url, endpoint_token(endpoint, &self.config)?)?;
                     write_cache(&cache, text.as_bytes(), "registry config")?;
@@ -503,25 +550,33 @@ impl Registry {
             }
             Backend::GitIndex { url, checkout } => {
                 ensure_git_index(checkout, url, self.offline)?;
-                std::fs::read_to_string(checkout.join("config.json")).map_err(|e| {
-                    format!(
-                        "Git registry {} missing config.json: {e}",
-                        endpoint.index_url
-                    )
-                })?
+                std::fs::read_to_string(checkout.join("config.json"))
+                    .map_err(|e| {
+                        format!(
+                            "Git registry {} missing config.json: {e}",
+                            endpoint.index_url
+                        )
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?
             }
             Backend::LocalRegistry { path } => {
-                std::fs::read_to_string(path.join("index/config.json")).map_err(|e| {
-                    format!(
-                        "local registry {} missing index/config.json: {e}",
-                        path.display()
-                    )
-                })?
+                std::fs::read_to_string(path.join("index/config.json"))
+                    .map_err(|e| {
+                        format!(
+                            "local registry {} missing index/config.json: {e}",
+                            path.display()
+                        )
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?
             }
             Backend::Directory { .. } => return Ok(()),
         };
-        let value: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| format!("registry {} config.json invalid: {e}", endpoint.index_url))?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            crate::fail!(
+                Resolver,
+                format!("registry {} config.json invalid: {e}", endpoint.index_url)
+            )
+        })?;
         let template = value
             .get("dl")
             .and_then(serde_json::Value::as_str)
@@ -530,7 +585,8 @@ impl Registry {
                     "registry {} config.json missing string dl",
                     endpoint.index_url
                 )
-            })?
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?
             .to_string();
         endpoint.download = Some(DownloadConfig {
             template,
@@ -554,11 +610,11 @@ impl Registry {
         }
         let mut response = request
             .call()
-            .map_err(|e| format!("HTTP fetch failed {url}: {e}"))?;
+            .map_err(|e| crate::fail!(Resolver, format!("HTTP fetch failed {url}: {e}")))?;
         response
             .body_mut()
             .read_to_string()
-            .map_err(|e| format!("HTTP response read failed {url}: {e}"))
+            .map_err(|e| crate::fail!(Resolver, format!("HTTP response read failed {url}: {e}")))
     }
 
     fn download_crate(
@@ -568,10 +624,10 @@ impl Registry {
         version: &Version,
         cksum: Option<&str>,
     ) -> Result<Vec<u8>, RErr> {
-        let download = endpoint
-            .download
-            .as_ref()
-            .ok_or("registry download config not loaded")?;
+        let download = endpoint.download.as_ref().ok_or(crate::fail!(
+            Resolver,
+            "registry download config not loaded"
+        ))?;
         let url = download_url(&download.template, name, version, cksum)?;
         let mut request = self.agent.get(&url);
         if download.auth_required {
@@ -580,17 +636,19 @@ impl Registry {
                     "registry {} requires authentication, but Cargo config/credentials has no usable credentials,",
                     endpoint.index_url
                 )
-            })?;
+            }).map_err(|e| crate::fail!(Resolver, e))?;
             request = request.header("Authorization", token);
         }
         let mut resp = request
             .call()
-            .map_err(|e| format!("crate download failed {url}: {e}"))?;
+            .map_err(|e| crate::fail!(Resolver, format!("crate download failed {url}: {e}")))?;
         let mut buf = Vec::new();
         resp.body_mut()
             .as_reader()
             .read_to_end(&mut buf)
-            .map_err(|e| format!("crate download read failed {url}: {e}"))?;
+            .map_err(|e| {
+                crate::fail!(Resolver, format!("crate download read failed {url}: {e}"))
+            })?;
         Ok(buf)
     }
 }
@@ -622,9 +680,12 @@ fn endpoint_from_config(
             (index, backend)
         }
         Some(source) if source.replace_with.is_none() => {
-            return Err(format!(
-                "Cargo source `{}` has no registry/local-registry/directory,",
-                endpoint_name.as_deref().unwrap_or("unknown")
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "Cargo source `{}` has no registry/local-registry/directory,",
+                    endpoint_name.as_deref().unwrap_or("unknown")
+                )
             ));
         }
         _ => {
@@ -676,20 +737,26 @@ fn ensure_trailing_slash(value: &str) -> String {
     }
 }
 
-fn write_cache(path: &Path, bytes: &[u8], what: &str) -> Result<(), String> {
+fn write_cache(path: &Path, bytes: &[u8], what: &str) -> Result<(), crate::error::Error> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "{what} cache directory creation failed {}: {error}",
-                parent.display()
-            )
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| {
+                format!(
+                    "{what} cache directory creation failed {}: {error}",
+                    parent.display()
+                )
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
     }
-    std::fs::write(path, bytes)
-        .map_err(|error| format!("{what} cache write failed {}: {error}", path.display()))
+    std::fs::write(path, bytes).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("{what} cache write failed {}: {error}", path.display())
+        )
+    })
 }
 
-fn ensure_git_index(checkout: &Path, url: &str, offline: bool) -> Result<(), String> {
+fn ensure_git_index(checkout: &Path, url: &str, offline: bool) -> Result<(), crate::error::Error> {
     if checkout.join(".git").is_dir() {
         let actual = command_output(
             Command::new("git").arg("-C").arg(checkout).args([
@@ -700,9 +767,12 @@ fn ensure_git_index(checkout: &Path, url: &str, offline: bool) -> Result<(), Str
             "read registry Git index origin",
         )?;
         if actual != url {
-            return Err(format!(
-                "registry Git index cache identity mismatch {}: expected {url}, got {actual}",
-                checkout.display()
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "registry Git index cache identity mismatch {}: expected {url}, got {actual}",
+                    checkout.display()
+                )
             ));
         }
         if !offline {
@@ -724,13 +794,18 @@ fn ensure_git_index(checkout: &Path, url: &str, offline: bool) -> Result<(), Str
         return Ok(());
     }
     if offline {
-        return Err(crate::options::offline_error(format!(
-            "registry Git index {url} has no local cache"
-        )));
+        return Err(crate::fail!(
+            Resolver,
+            crate::options::offline_error(format!("registry Git index {url} has no local cache"))
+        ));
     }
     if let Some(parent) = checkout.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("registry Git index directory creation failed: {error}"))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("registry Git index directory creation failed: {error}")
+            )
+        })?;
     }
     command_ok(
         Command::new("git")
@@ -740,46 +815,60 @@ fn ensure_git_index(checkout: &Path, url: &str, offline: bool) -> Result<(), Str
     )
 }
 
-fn command_ok(command: &mut Command, what: &str) -> Result<(), String> {
+fn command_ok(command: &mut Command, what: &str) -> Result<(), crate::error::Error> {
     let output = command
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map_err(|error| format!("{what} launch failed: {error}"))?;
+        .map_err(|error| crate::fail!(Resolver, format!("{what} launch failed: {error}")))?;
     if output.status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "{what} failed (exit {:?}): {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
+        Err(crate::fail!(
+            Resolver,
+            format!(
+                "{what} failed (exit {:?}): {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         ))
     }
 }
 
-fn command_output(command: &mut Command, what: &str) -> Result<String, String> {
+fn command_output(command: &mut Command, what: &str) -> Result<String, crate::error::Error> {
     let output = command
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map_err(|error| format!("{what} launch failed: {error}"))?;
+        .map_err(|error| crate::fail!(Resolver, format!("{what} launch failed: {error}")))?;
     if !output.status.success() {
-        return Err(format!(
-            "{what} failed (exit {:?}): {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).trim()
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "{what} failed (exit {:?}): {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn directory_index_entry(root: &Path, name: &str) -> Result<IndexEntry, String> {
+fn directory_index_entry(root: &Path, name: &str) -> Result<IndexEntry, crate::error::Error> {
     let mut entries = Vec::new();
-    for item in std::fs::read_dir(root).map_err(|error| {
-        format!(
-            "read Cargo directory source {} failed: {error}",
-            root.display()
-        )
-    })? {
-        let item = item.map_err(|error| format!("read directory source entry failed: {error}"))?;
+    for item in std::fs::read_dir(root)
+        .map_err(|error| {
+            format!(
+                "read Cargo directory source {} failed: {error}",
+                root.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?
+    {
+        let item = item.map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("read directory source entry failed: {error}")
+            )
+        })?;
         if !item.path().is_dir() || !item.path().join("Cargo.toml").is_file() {
             continue;
         }
@@ -789,10 +878,19 @@ fn directory_index_entry(root: &Path, name: &str) -> Result<IndexEntry, String> 
             continue;
         }
         let checksum_file = item.path().join(".cargo-checksum.json");
-        let checksum_text = std::fs::read_to_string(&checksum_file)
-            .map_err(|error| format!("read {} failed: {error}", checksum_file.display()))?;
-        let checksum: serde_json::Value = serde_json::from_str(&checksum_text)
-            .map_err(|error| format!("{} invalid: {error}", checksum_file.display()))?;
+        let checksum_text = std::fs::read_to_string(&checksum_file).map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("read {} failed: {error}", checksum_file.display())
+            )
+        })?;
+        let checksum: serde_json::Value =
+            serde_json::from_str(&checksum_text).map_err(|error| {
+                crate::fail!(
+                    Resolver,
+                    format!("{} invalid: {error}", checksum_file.display())
+                )
+            })?;
         entry.cksum = checksum
             .get("package")
             .and_then(serde_json::Value::as_str)
@@ -802,9 +900,12 @@ fn directory_index_entry(root: &Path, name: &str) -> Result<IndexEntry, String> 
     }
     entries.sort_by(|left, right| left.version.cmp(&right.version));
     if entries.is_empty() {
-        return Err(format!(
-            "Cargo directory source {} has no package {name}",
-            root.display()
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "Cargo directory source {} has no package {name}",
+                root.display()
+            )
         ));
     }
     Ok(entries.into())
@@ -815,73 +916,119 @@ fn ensure_directory_source(
     name: &str,
     version: &Version,
     expected_package_checksum: Option<&str>,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, crate::error::Error> {
     let directory = find_directory_package(root, name, version)?;
     let checksum_file = directory.join(".cargo-checksum.json");
-    let text = std::fs::read_to_string(&checksum_file)
-        .map_err(|error| format!("read {} failed: {error}", checksum_file.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| format!("{} is invalid: {error}", checksum_file.display()))?;
+    let text = std::fs::read_to_string(&checksum_file).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("read {} failed: {error}", checksum_file.display())
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("{} is invalid: {error}", checksum_file.display())
+        )
+    })?;
     if let (Some(expected), Some(actual)) = (
         expected_package_checksum,
         value.get("package").and_then(serde_json::Value::as_str),
     ) && expected != actual
     {
-        return Err(format!(
-            "directory source {name}-{version} package checksum mismatch: lock={expected} vendor={actual}"
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "directory source {name}-{version} package checksum mismatch: lock={expected} vendor={actual}"
+            )
         ));
     }
     let files = value
         .get("files")
         .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| format!("{} missing files checksum table", checksum_file.display()))?;
-    for (relative, checksum) in files {
-        let checksum = checksum.as_str().ok_or_else(|| {
-            format!(
-                "{} files.{relative} checksum is not a string,",
-                checksum_file.display()
+        .ok_or_else(|| {
+            crate::fail!(
+                Resolver,
+                format!("{} missing files checksum table", checksum_file.display())
             )
         })?;
-        let bytes = std::fs::read(directory.join(relative))
-            .map_err(|error| format!("directory source file missing {relative}: {error}"))?;
+    for (relative, checksum) in files {
+        let checksum = checksum
+            .as_str()
+            .ok_or_else(|| {
+                format!(
+                    "{} files.{relative} checksum is not a string,",
+                    checksum_file.display()
+                )
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
+        let bytes = std::fs::read(directory.join(relative)).map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("directory source file missing {relative}: {error}")
+            )
+        })?;
         let actual = sha256_hex(&bytes);
         if actual != checksum.to_ascii_lowercase() {
-            return Err(format!(
-                "directory source file {relative} sha256 verification failed (want {checksum} got {actual})"
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "directory source file {relative} sha256 verification failed (want {checksum} got {actual})"
+                )
             ));
         }
     }
     Ok(directory)
 }
 
-fn find_directory_package(root: &Path, name: &str, version: &Version) -> Result<PathBuf, String> {
-    for item in std::fs::read_dir(root).map_err(|error| {
-        format!(
-            "read Cargo directory source {} failed: {error}",
-            root.display()
-        )
-    })? {
-        let item = item.map_err(|error| format!("read directory source entry failed: {error}"))?;
+fn find_directory_package(
+    root: &Path,
+    name: &str,
+    version: &Version,
+) -> Result<PathBuf, crate::error::Error> {
+    for item in std::fs::read_dir(root)
+        .map_err(|error| {
+            format!(
+                "read Cargo directory source {} failed: {error}",
+                root.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?
+    {
+        let item = item.map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("read directory source entry failed: {error}")
+            )
+        })?;
         if !item.path().is_dir() || !item.path().join("Cargo.toml").is_file() {
             continue;
         }
-        let manifest = PackageManifest::read_dir(&item.path()).map_err(|error| {
-            format!(
-                "parse directory source {} failed: {error}",
-                item.path().display()
-            )
-        })?;
+        let manifest = PackageManifest::read_dir(&item.path())
+            .map_err(|error| {
+                format!(
+                    "parse directory source {} failed: {error}",
+                    item.path().display()
+                )
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         if manifest.name == name && manifest.version == *version {
             return Ok(item.path());
         }
     }
-    Err(format!(
-        "Cargo directory source {} is missing package {name} {version}",
-        root.display()
+    Err(crate::fail!(
+        Resolver,
+        format!(
+            "Cargo directory source {} is missing package {name} {version}",
+            root.display()
+        )
     ))
 }
 
-fn endpoint_token(endpoint: &Endpoint, config: &CargoConfig) -> Result<Option<String>, String> {
+fn endpoint_token(
+    endpoint: &Endpoint,
+    config: &CargoConfig,
+) -> Result<Option<String>, crate::error::Error> {
     let mut providers = if let Some(provider) = &endpoint.credential_provider {
         vec![provider.clone()]
     } else {
@@ -892,7 +1039,10 @@ fn endpoint_token(endpoint: &Endpoint, config: &CargoConfig) -> Result<Option<St
         let provider = config.credential_provider(&provider)?;
         let parts = command_parts(&provider)?;
         let Some((program, configured_args)) = parts.split_first() else {
-            return Err("Cargo credential provider command is empty".into());
+            return Err(crate::fail!(
+                Resolver,
+                "Cargo credential provider command is empty"
+            ));
         };
         if program == "cargo:token" {
             if endpoint.token.is_some() {
@@ -902,7 +1052,10 @@ fn endpoint_token(endpoint: &Endpoint, config: &CargoConfig) -> Result<Option<St
         }
         if program == "cargo:token-from-stdout" {
             let Some((command, args)) = configured_args.split_first() else {
-                return Err("cargo:token-from-stdout missing command".into());
+                return Err(crate::fail!(
+                    Resolver,
+                    "cargo:token-from-stdout missing command"
+                ));
             };
             let token = command_output(
                 Command::new(command).args(args),
@@ -914,8 +1067,11 @@ fn endpoint_token(endpoint: &Endpoint, config: &CargoConfig) -> Result<Option<St
             continue;
         }
         if program.starts_with("cargo:") {
-            return Err(format!(
-                "Cargo built-in credential provider `{provider}` cannot be called outside the mirvm process; configure the corresponding cargo-credential-* executable for this provider"
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "Cargo built-in credential provider `{provider}` cannot be called outside the mirvm process; configure the corresponding cargo-credential-* executable for this provider"
+                )
             ));
         }
         if let Some(token) = external_credential(program, configured_args, endpoint)? {
@@ -929,27 +1085,42 @@ fn external_credential(
     program: &str,
     configured_args: &[String],
     endpoint: &Endpoint,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::error::Error> {
     let mut child = Command::new(program)
         .arg("--cargo-plugin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("launch Cargo credential provider `{program}` failed: {error}"))?;
+        .map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("launch Cargo credential provider `{program}` failed: {error}")
+            )
+        })?;
     let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
     let mut hello = String::new();
-    stdout
-        .read_line(&mut hello)
-        .map_err(|error| format!("read credential provider hello failed: {error}"))?;
-    let hello_value: serde_json::Value = serde_json::from_str(hello.trim())
-        .map_err(|error| format!("credential provider hello invalid: {error}"))?;
+    stdout.read_line(&mut hello).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("read credential provider hello failed: {error}")
+        )
+    })?;
+    let hello_value: serde_json::Value = serde_json::from_str(hello.trim()).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("credential provider hello invalid: {error}")
+        )
+    })?;
     if !hello_value
         .get("v")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|versions| versions.iter().any(|version| version.as_u64() == Some(1)))
     {
-        return Err("credential provider does not support protocol v1".into());
+        return Err(crate::fail!(
+            Resolver,
+            "credential provider does not support protocol v1"
+        ));
     }
     let request = serde_json::json!({
         "v": 1,
@@ -961,23 +1132,40 @@ fn external_credential(
         },
         "args": configured_args,
     });
-    writeln!(child.stdin.take().unwrap(), "{request}")
-        .map_err(|error| format!("write credential provider request failed: {error}"))?;
+    writeln!(child.stdin.take().unwrap(), "{request}").map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("write credential provider request failed: {error}")
+        )
+    })?;
     let mut response = String::new();
-    stdout
-        .read_line(&mut response)
-        .map_err(|error| format!("read credential provider response failed: {error}"))?;
-    let status = child
-        .wait()
-        .map_err(|error| format!("wait for credential provider failed: {error}"))?;
+    stdout.read_line(&mut response).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("read credential provider response failed: {error}")
+        )
+    })?;
+    let status = child.wait().map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("wait for credential provider failed: {error}")
+        )
+    })?;
     if !status.success() {
-        return Err(format!(
-            "credential provider `{program}` failed (exit {:?})",
-            status.code()
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "credential provider `{program}` failed (exit {:?})",
+                status.code()
+            )
         ));
     }
-    let value: serde_json::Value = serde_json::from_str(response.trim())
-        .map_err(|error| format!("credential provider response invalid: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(response.trim()).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("credential provider response invalid: {error}")
+        )
+    })?;
     let ok = value.get("Ok").unwrap_or(&value);
     if let Some(token) = ok.get("token").and_then(serde_json::Value::as_str) {
         return Ok(Some(token.to_string()));
@@ -985,10 +1173,13 @@ fn external_credential(
     if value.get("Err").is_some() {
         return Ok(None);
     }
-    Err("credential provider response has neither token nor Err".into())
+    Err(crate::fail!(
+        Resolver,
+        "credential provider response has neither token nor Err"
+    ))
 }
 
-fn command_parts(command: &str) -> Result<Vec<String>, String> {
+fn command_parts(command: &str) -> Result<Vec<String>, crate::error::Error> {
     if command.contains('\u{1f}') {
         return Ok(command.split('\u{1f}').map(str::to_string).collect());
     }
@@ -1015,8 +1206,9 @@ fn command_parts(command: &str) -> Result<Vec<String>, String> {
         }
     }
     if escaped || quote.is_some() {
-        return Err(format!(
-            "Cargo credential provider command quoting/escaping incomplete: {command}"
+        return Err(crate::fail!(
+            Resolver,
+            format!("Cargo credential provider command quoting/escaping incomplete: {command}")
         ));
     }
     if !current.is_empty() {
@@ -1030,7 +1222,7 @@ fn download_url(
     name: &str,
     version: &Version,
     checksum: Option<&str>,
-) -> Result<String, String> {
+) -> Result<String, crate::error::Error> {
     let lower = name.to_ascii_lowercase();
     let prefix = match lower.len() {
         1 => "1".to_string(),
@@ -1049,9 +1241,10 @@ fn download_url(
     .any(|marker| template.contains(marker));
     let checksum = checksum.unwrap_or("");
     if template.contains("{sha256-checksum}") && checksum.is_empty() {
-        return Err(
-            "registry dl template requires {sha256-checksum} but index has no checksum".into(),
-        );
+        return Err(crate::fail!(
+            Resolver,
+            "registry dl template requires {sha256-checksum} but index has no checksum"
+        ));
     }
     let mut url = template
         .replace("{crate}", name)
@@ -1074,19 +1267,30 @@ fn parse_index_lines(text: &str) -> Result<Vec<IndexVersion>, RErr> {
         if line.is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| format!("index JSON line {} parse failed: {e}", ln + 1))?;
-        out.push(parse_index_version(&v).map_err(|e| format!("index line {}: {e}", ln + 1))?);
+        let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            crate::fail!(
+                Resolver,
+                format!("index JSON line {} parse failed: {e}", ln + 1)
+            )
+        })?;
+        out.push(
+            parse_index_version(&v)
+                .map_err(|e| crate::fail!(Resolver, format!("index line {}: {e}", ln + 1)))?,
+        );
     }
     Ok(out)
 }
 
 fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
     let get_str = |k: &str| v.get(k).and_then(|x| x.as_str());
-    let name = get_str("name").ok_or("missing name")?.to_string();
-    let version = Version::parse(get_str("vers").ok_or("missing vers")?)
-        .map_err(|e| format!("vers invalid: {e}"))?;
-    let cksum = get_str("cksum").ok_or("missing cksum")?.to_string();
+    let name = get_str("name")
+        .ok_or(crate::fail!(Resolver, "missing name"))?
+        .to_string();
+    let version = Version::parse(get_str("vers").ok_or(crate::fail!(Resolver, "missing vers"))?)
+        .map_err(|e| crate::fail!(Resolver, format!("vers invalid: {e}")))?;
+    let cksum = get_str("cksum")
+        .ok_or(crate::fail!(Resolver, "missing cksum"))?
+        .to_string();
     let yanked = v.get("yanked").and_then(|x| x.as_bool()).unwrap_or(false);
     let links = get_str("links").map(str::to_string);
     let rust_version = get_str("rust_version")
@@ -1137,13 +1341,13 @@ fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
         let dname = d
             .get("name")
             .and_then(|x| x.as_str())
-            .ok_or("dep missing name")?;
+            .ok_or(crate::fail!(Resolver, "dep missing name"))?;
         let req = VersionReq::parse(
             d.get("req")
                 .and_then(|x| x.as_str())
-                .ok_or("dep missing req")?,
+                .ok_or(crate::fail!(Resolver, "dep missing req"))?,
         )
-        .map_err(|e| format!("dep {dname} req invalid: {e}"))?;
+        .map_err(|e| crate::fail!(Resolver, format!("dep {dname} req invalid: {e}")))?;
         let features = d
             .get("features")
             .and_then(|x| x.as_array())
@@ -1193,14 +1397,18 @@ fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
 fn verify_cksum(bytes: &[u8], cksum: Option<&str>, dir_name: &str) -> Result<(), RErr> {
     let Some(want) = cksum else { return Ok(()) };
     if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!(
-            "{dir_name} cksum format invalid (not 64 hex sha256)"
+        return Err(crate::fail!(
+            Resolver,
+            format!("{dir_name} cksum format invalid (not 64 hex sha256)")
         ));
     }
     let got = sha256_hex(bytes);
     if got != want.to_ascii_lowercase() {
-        return Err(format!(
-            "{dir_name} sha256 verification failed (want {want} got {got}) — refusing to unpack"
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "{dir_name} sha256 verification failed (want {want} got {got}) — refusing to unpack"
+            )
         ));
     }
     Ok(())
@@ -1331,17 +1539,20 @@ fn unpack_crate(bytes: &[u8], dest: &Path, dir_name: &str) -> Result<(), RErr> {
     let gz = flate2::read::GzDecoder::new(bytes);
     let mut ar = tar::Archive::new(gz);
     if dest.exists() {
-        std::fs::remove_dir_all(dest).map_err(|e| format!("unpack target cleanup failed: {e}"))?;
+        std::fs::remove_dir_all(dest)
+            .map_err(|e| crate::fail!(Resolver, format!("unpack target cleanup failed: {e}")))?;
     }
-    std::fs::create_dir_all(dest).map_err(|e| format!("unpack target creation failed: {e}"))?;
+    std::fs::create_dir_all(dest)
+        .map_err(|e| crate::fail!(Resolver, format!("unpack target creation failed: {e}")))?;
     for entry in ar
         .entries()
-        .map_err(|e| format!("crate tar read failed: {e}"))?
+        .map_err(|e| crate::fail!(Resolver, format!("crate tar read failed: {e}")))?
     {
-        let mut entry = entry.map_err(|e| format!("crate tar entry read failed: {e}"))?;
+        let mut entry = entry
+            .map_err(|e| crate::fail!(Resolver, format!("crate tar entry read failed: {e}")))?;
         let path = entry
             .path()
-            .map_err(|e| format!("crate tar path read failed: {e}"))?
+            .map_err(|e| crate::fail!(Resolver, format!("crate tar path read failed: {e}")))?
             .into_owned();
         let mut comps = path.components();
         let top = comps
@@ -1349,8 +1560,9 @@ fn unpack_crate(bytes: &[u8], dest: &Path, dir_name: &str) -> Result<(), RErr> {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .unwrap_or_default();
         if top != dir_name {
-            return Err(format!(
-                "crate top directory {top} does not match {dir_name} — refusing to unpack"
+            return Err(crate::fail!(
+                Resolver,
+                format!("crate top directory {top} does not match {dir_name} — refusing to unpack")
             ));
         }
         let rel: PathBuf = comps.collect();
@@ -1364,21 +1576,29 @@ fn unpack_crate(bytes: &[u8], dest: &Path, dir_name: &str) -> Result<(), RErr> {
                 std::path::Component::ParentDir | std::path::Component::RootDir
             )
         }) {
-            return Err(format!(
-                "crate contains traversal path {} — refusing to unpack",
-                rel.display()
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "crate contains traversal path {} — refusing to unpack",
+                    rel.display()
+                )
             ));
         }
         let target = dest.join(&rel);
         if entry.header().entry_type().is_dir() {
-            std::fs::create_dir_all(&target).map_err(|e| format!("unpack mkdir failed: {e}"))?;
+            std::fs::create_dir_all(&target)
+                .map_err(|e| crate::fail!(Resolver, format!("unpack mkdir failed: {e}")))?;
         } else {
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("unpack mkdir failed: {e}"))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| crate::fail!(Resolver, format!("unpack mkdir failed: {e}")))?;
             }
-            entry
-                .unpack(&target)
-                .map_err(|e| format!("unpack write file failed {}: {e}", target.display()))?;
+            entry.unpack(&target).map_err(|e| {
+                crate::fail!(
+                    Resolver,
+                    format!("unpack write file failed {}: {e}", target.display())
+                )
+            })?;
         }
     }
     Ok(())

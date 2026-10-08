@@ -129,7 +129,7 @@ fn ensure_registry_node(
     name: &str,
     version: &Version,
     class: UnitClass,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     if tables.contains_key(&(name.to_string(), version.clone(), class)) {
         return Ok(());
     }
@@ -179,7 +179,9 @@ fn ensure_registry_node(
         deps,
     );
     if crate::options::debug_unify() {
-        eprintln!("DBG-UNIFY register {name} {class:?} v{version}");
+        crate::diag::instrument(format_args!(
+            "DBG-UNIFY register {name} {class:?} v{version}"
+        ));
     }
     Ok(())
 }
@@ -210,7 +212,7 @@ pub(super) fn unify_features(
     include_weak: bool,
     include_root_dev: bool,
     workspace_features: &FeatureOverrides,
-) -> Result<Unified, String> {
+) -> Result<Unified, crate::error::Error> {
     let mut tables: NodeTables = BTreeMap::new();
     let mut nodes: BTreeMap<NodeKey, FeatNode> = BTreeMap::new();
 
@@ -311,7 +313,7 @@ pub(super) fn unify_features(
             }
             // Edge propagation
             if crate::options::debug_unify() {
-                eprintln!(
+                crate::diag::instrument(format_args!(
                     "DBG-UNIFY expand {}@{} {:?} features={:?} activated={:?} deps={:?}",
                     key.0,
                     key.1,
@@ -319,7 +321,7 @@ pub(super) fn unify_features(
                     features,
                     activated,
                     deps.iter().map(|d| d.key.clone()).collect::<Vec<_>>()
-                );
+                ));
             }
             for dep in &deps {
                 if dep.optional
@@ -338,9 +340,12 @@ pub(super) fn unify_features(
                     if dep.optional {
                         continue;
                     }
-                    return Err(format!(
-                        "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
-                        dep.key, key.0, key.1
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                            dep.key, key.0, key.1
+                        )
                     ));
                 };
                 let child_key = (child_name.clone(), child_version.clone(), dep.class);
@@ -413,7 +418,10 @@ pub(super) fn unify_features(
             return Ok((nodes, activated_parents));
         }
     }
-    Err("feature unification did not converge in 64 rounds (abnormal graph)".to_string())
+    Err(crate::fail!(
+        Resolver,
+        "feature unification did not converge in 64 rounds (abnormal graph)".to_string()
+    ))
 }
 
 /// Resolver 1 unifies features across dependency uses. Compiled artifacts are still kept
@@ -444,21 +452,21 @@ fn unify_resolver_one_classes(nodes: &mut BTreeMap<NodeKey, FeatNode>) -> bool {
 
 pub(super) fn decls_to_featdeps(
     decls: &[crate::cargoless::manifest::DepDecl],
-) -> Result<Vec<FeatDep>, String> {
+) -> Result<Vec<FeatDep>, crate::error::Error> {
     featdeps(decls, false)
 }
 
 pub(super) fn root_featdeps(
     decls: &[crate::cargoless::manifest::DepDecl],
     include_dev: bool,
-) -> Result<Vec<FeatDep>, String> {
+) -> Result<Vec<FeatDep>, crate::error::Error> {
     featdeps(decls, include_dev)
 }
 
 fn featdeps(
     decls: &[crate::cargoless::manifest::DepDecl],
     include_dev: bool,
-) -> Result<Vec<FeatDep>, String> {
+) -> Result<Vec<FeatDep>, crate::error::Error> {
     Ok(decls
         .iter()
         .filter(|d| d.kind != DepKind::Dev || include_dev)
@@ -503,7 +511,7 @@ fn expand_node(
     table: &BTreeMap<String, Vec<FeatureValue>>,
     deps: &[FeatDep],
     node: &FeatNode,
-) -> Result<Expanded, String> {
+) -> Result<Expanded, crate::error::Error> {
     // Implicit feature rule: an optional dependency key named by any dep: no longer
     // produces an implicit feature
     let hidden: BTreeSet<String> = table
@@ -525,8 +533,9 @@ fn expand_node(
         .iter()
         .find(|feature| !table.contains_key(*feature) && !optional_keys.contains(*feature))
     {
-        return Err(format!(
-            "requested a feature that does not exist: `{feature}`"
+        return Err(crate::fail!(
+            Resolver,
+            format!("requested a feature that does not exist: `{feature}`")
         ));
     }
     if let Some(feature) = node.features.iter().find(|feature| {
@@ -534,8 +543,11 @@ fn expand_node(
             && optional_keys.contains(*feature)
             && hidden.contains(*feature)
     }) {
-        return Err(format!(
-            "feature `{feature}` is hidden by dep:{feature} and cannot be enabled as an implicit feature"
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "feature `{feature}` is hidden by dep:{feature} and cannot be enabled as an implicit feature"
+            )
         ));
     }
 
@@ -571,8 +583,11 @@ fn expand_node(
                         } else {
                             // Same semantics as cargo: a feature reference must point at
                             // another feature or an optional dependency
-                            return Err(format!(
-                                "feature reference {g} is neither a feature nor an optional dependency (invalid manifest/index data)"
+                            return Err(crate::fail!(
+                                Resolver,
+                                format!(
+                                    "feature reference {g} is neither a feature nor an optional dependency (invalid manifest/index data)"
+                                )
                             ));
                         }
                     }

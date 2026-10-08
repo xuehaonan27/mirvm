@@ -207,7 +207,11 @@ unsafe extern "C" fn trampoline_c(
     let lease = match lease {
         Ok(lease) => lease,
         Err(_) => {
-            eprintln!("mirvm[m4-engine]: plain C thunk called after its Engine was closed");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "plain C thunk called after its Engine was closed"
+            );
             std::process::abort()
         }
     };
@@ -669,7 +673,7 @@ fn materialize_domain(
     control: &Arc<super::ctx::EngineControl>,
     sites: &[super::ir::EntryStubSite],
     closures: &mut EntryClosures,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     for site in sites {
         let cif = Cif::new(
             site.sig.args.iter().map(crate::vm::ffi::ffi_type),
@@ -704,7 +708,7 @@ pub(crate) fn materialize_all_entry_stubs(
     module: &mut super::ir::Module,
     instance: &mut super::instance::Instance,
     control: &Arc<super::ctx::EngineControl>,
-) -> Result<EntryClosures, String> {
+) -> Result<EntryClosures, crate::error::Error> {
     let mut closures = EntryClosures {
         pending: Vec::new(),
     };

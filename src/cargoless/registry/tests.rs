@@ -67,7 +67,7 @@ fn cksum_verify_rejects_tampered_bytes() {
     let good = sha256_hex(b"payload");
     verify_cksum(b"payload", Some(&good), "x-1.0.0").unwrap();
     let err = verify_cksum(b"tampered", Some(&good), "x-1.0.0").unwrap_err();
-    assert!(err.contains("verification failed"), "{err}");
+    assert!(err.to_string().contains("verification failed"), "{err}");
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn unpacks_crate_and_rejects_traversal() {
 
     // Top directory name mismatch → rejected
     let err = unpack_crate(&crate_bytes, &d.join("other"), "other-9.9.9").unwrap_err();
-    assert!(err.contains("top directory"), "{err}");
+    assert!(err.to_string().contains("top directory"), "{err}");
 
     // Traversal path → loudly rejected (tar crate rejects at path() read or our guard rejects,
     // either defense line prevents unpacking; evil file must not reach disk)
@@ -139,7 +139,8 @@ fn offline_mode_refuses_http_loudly() {
         .index_entry(CRATES_IO_LOCK_SOURCE, "no-such-crate-mirvm-test")
         .unwrap_err();
     assert!(
-        err.contains(crate::options::env_var_name("offline")),
+        err.to_string()
+            .contains(crate::options::env_var_name("offline")),
         "{err}"
     );
     let err = reg
@@ -151,7 +152,8 @@ fn offline_mode_refuses_http_loudly() {
         )
         .unwrap_err();
     assert!(
-        err.contains(crate::options::env_var_name("offline")),
+        err.to_string()
+            .contains(crate::options::env_var_name("offline")),
         "{err}"
     );
     std::fs::remove_dir_all(&d).unwrap();

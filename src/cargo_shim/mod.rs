@@ -112,8 +112,8 @@ pub(super) fn arg_flag_value(args: &[String], flag: &str) -> Option<String> {
 
 fn exec(mut cmd: Command) -> ! {
     let status = cmd.status().unwrap_or_else(|e| {
-        eprintln!("mirvm: cannot execute {cmd:?}: {e}");
-        exit(1);
+        crate::diag_error!(Runner, "cannot execute {cmd:?}: {e}");
+        exit(crate::diag::exit::FAILURE.into());
     });
     exit(status.code().unwrap_or(1));
 }
@@ -318,8 +318,11 @@ pub fn phase_cargo(
     ignore_rust_version: bool,
 ) -> ! {
     let guest_cwd = std::env::current_dir().unwrap_or_else(|error| {
-        eprintln!("mirvm: cannot read the caller's current directory: {error}");
-        exit(1);
+        crate::diag_error!(
+            Runner,
+            "cannot read the caller's current directory: {error}"
+        );
+        exit(crate::diag::exit::FAILURE.into());
     });
     // Absolutize: a relative project_dir plus current_dir plus join(target/mirvm) nests the
     // target dir as project/project/target, and makes one project's rlib paths drift with the
@@ -329,8 +332,8 @@ pub fn phase_cargo(
     let sysroot = match crate::sysroot::ensure_sysroot() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("mirvm: building the sysroot failed: {e}");
-            exit(1);
+            crate::diag_error!(Runner, "building the sysroot failed: {e}");
+            exit(crate::diag::exit::FAILURE.into());
         }
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
@@ -374,16 +377,16 @@ pub fn phase_cargo_test(
     let sysroot = match crate::sysroot::ensure_sysroot() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("mirvm: building the sysroot failed: {e}");
-            exit(1);
+            crate::diag_error!(Runner, "building the sysroot failed: {e}");
+            exit(crate::diag::exit::FAILURE.into());
         }
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
     let locked = crate::options::cargo_locked();
     let (rustdoc, doctest_builder) = ensure_cargo_doctest_tools(project_dir, &self_exe)
         .unwrap_or_else(|error| {
-            eprintln!("mirvm: {error}");
-            exit(1);
+            crate::diag_error!(Runner, "{error}");
+            exit(crate::diag::exit::FAILURE.into());
         });
     let mut cmd = cargo_project_command(
         project_dir,
@@ -528,7 +531,7 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
             env: std::env::vars().collect(),
         };
         fake::write_fake_outputs(&rustc, &args, &info);
-        exit(0);
+        exit(crate::diag::exit::SUCCESS.into());
     }
 
     // Target dependency: inject the MIR sysroot (guaranteeing the same std as the interpreting

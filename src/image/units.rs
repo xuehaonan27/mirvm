@@ -263,7 +263,9 @@ fn load_one(
 ) -> Option<super::BaseImage> {
     let reason = |why: &str| {
         if crate::options::a2_debug() {
-            eprintln!("[a2-debug] unit {unit_key} manifest {digest} unusable: {why}");
+            crate::diag::instrument(format_args!(
+                "[a2-debug] unit {unit_key} manifest {digest} unusable: {why}"
+            ));
         }
     };
     let Some(data) = std::fs::read(path).ok() else {
@@ -310,7 +312,7 @@ fn load_one(
     // a layer with a hole in its region — and they must land where the manifest's baked link
     // addresses point.
     if let Err(error) = manifest::restore_frozen(&mut f) {
-        reason(&error);
+        reason(&error.to_string());
         return None;
     }
     if !entry::frozen_at(
@@ -363,7 +365,7 @@ fn load_one(
     // module is verified against the stack it is about to join.
     let symbols = manifest::Symbols::of(stack.layers());
     if let Err(error) = manifest::rehydrate_module(&mut f.module, &f.funcs, &unit_view, &symbols) {
-        reason(&error);
+        reason(&error.to_string());
         return None;
     }
     // The layer must be the one its records describe: re-projecting a body has to reproduce the
@@ -382,7 +384,7 @@ fn load_one(
                     return None;
                 }
                 Err(error) => {
-                    reason(&error);
+                    reason(&error.to_string());
                     return None;
                 }
             }
@@ -391,31 +393,33 @@ fn load_one(
     let tls_by_sym = match f.tables.restore(&mut f.module, &unit_view, &symbols) {
         Ok((_, tls)) => tls,
         Err(error) => {
-            reason(&error);
+            reason(&error.to_string());
             return None;
         }
     };
     if crate::options::a2_debug() {
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "[a2-debug] unit {unit_key}: {} records, {} module funcs, {} names, home {}",
             f.funcs.len(),
             f.module.funcs.len(),
             f.module.function_names.len(),
             f.home
-        );
+        ));
     }
     let mut instance = match Instance::materialize(&f.module) {
         Ok(instance) => instance,
         Err(error) => {
             if crate::options::a2_debug() {
-                eprintln!("[a2-debug] unit {unit_key} rejected: {error}");
+                crate::diag::instrument(format_args!(
+                    "[a2-debug] unit {unit_key} rejected: {error}"
+                ));
             }
             return None;
         }
     };
     if let Err(error) = crate::vm::verify::module_below(&f.module, &instance, stack.below()) {
         if crate::options::a2_debug() {
-            eprintln!("[a2-debug] unit {unit_key} rejected: {error}");
+            crate::diag::instrument(format_args!("[a2-debug] unit {unit_key} rejected: {error}"));
         }
         return None;
     }
@@ -461,11 +465,11 @@ pub(crate) fn store(
         return super::deps::degraded(bi);
     };
     if crate::options::a2_debug() {
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "[a2-debug] store index {index} unit {unit_key} counts {:?} below {:?}",
             layer_counts(&bi),
             stack.layers().iter().map(layer_counts).collect::<Vec<_>>()
-        );
+        ));
     }
     let below = stack.below();
     // The writer applies the loader's predicate against the same stack. The frozen area must sit at a
@@ -499,7 +503,7 @@ pub(crate) fn store(
         && crate::vm::verify::module_below(&bi.module, &bi.instance, below).is_ok();
     if !cacheable {
         if crate::options::a2_debug() {
-            eprintln!(
+            crate::diag::instrument(format_args!(
                 "[a2-debug] unit {unit_key} not stored: {}",
                 if !publishable {
                     "snapshot is not in its spline slot"
@@ -508,7 +512,7 @@ pub(crate) fn store(
                 } else {
                     "verification against the stack below failed"
                 }
-            );
+            ));
         }
         return super::deps::degraded(bi);
     }
@@ -537,7 +541,9 @@ pub(crate) fn store(
         Ok(records) => records,
         Err(error) => {
             if crate::options::a2_debug() {
-                eprintln!("[a2-debug] unit {unit_key} not stored: {error}");
+                crate::diag::instrument(format_args!(
+                    "[a2-debug] unit {unit_key} not stored: {error}"
+                ));
             }
             return super::deps::degraded(bi);
         }
@@ -561,7 +567,9 @@ pub(crate) fn store(
             Ok(tables) => tables,
             Err(error) => {
                 if crate::options::a2_debug() {
-                    eprintln!("[a2-debug] unit {unit_key} not stored: {error}");
+                    crate::diag::instrument(format_args!(
+                        "[a2-debug] unit {unit_key} not stored: {error}"
+                    ));
                 }
                 return super::deps::degraded(bi);
             }

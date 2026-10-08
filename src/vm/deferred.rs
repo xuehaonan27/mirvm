@@ -133,7 +133,11 @@ impl TsdRegistration {
                 state.deleting || state.deleted
             });
             if keys.contains_key(&slot) && !replaceable {
-                eprintln!("mirvm[m4-engine]: duplicate live pthread TSD key registration");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "duplicate live pthread TSD key registration"
+                );
                 std::process::abort();
             }
             keys.insert(slot, Arc::clone(self));
@@ -274,7 +278,11 @@ impl TsdRegistration {
             .get(&thread)
             .is_some_and(|rounds| !rounds.is_empty())
         {
-            eprintln!("mirvm[m4-engine]: pthread exited inside a managed TSD callback");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "pthread exited inside a managed TSD callback"
+            );
             std::process::abort();
         }
         let key = state.key?;
@@ -559,8 +567,10 @@ impl ThreadExitTsdCallback {
     pub(crate) fn invoke(self) {
         let error = unsafe { tls_set(self.key, std::ptr::null()) };
         if error != 0 && error != TLS_KEY_GONE {
-            eprintln!(
-                "mirvm[m4-engine]: failed to clear managed TSD before pthread exit callback: {error}"
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "failed to clear managed TSD before pthread exit callback: {error}"
             );
             std::process::abort();
         }
@@ -609,8 +619,10 @@ pub(crate) fn abandon_current_thread_tsd_for_exit() {
         if let Some(key) = registration.abandon_current_value_for_exit() {
             let error = unsafe { tls_set(key, std::ptr::null()) };
             if error != 0 && error != TLS_KEY_GONE {
-                eprintln!(
-                    "mirvm[m4-engine]: failed to abandon managed TSD at pthread exit: {error}"
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "failed to abandon managed TSD at pthread exit: {error}"
                 );
                 std::process::abort();
             }
@@ -678,7 +690,11 @@ pub(crate) fn finish_engine_close(shared: &Shared) {
         .keys()
         .any(|(engine, _)| *engine == shared.id);
     if stale {
-        eprintln!("mirvm[m4-engine]: Engine finalized with live pthread TSD registrations");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "Engine finalized with live pthread TSD registrations"
+        );
         std::process::abort();
     }
 }

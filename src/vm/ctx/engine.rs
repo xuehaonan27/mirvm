@@ -174,7 +174,11 @@ impl EngineControl {
                 return false;
             }
             if state & COUNT_MASK == COUNT_MASK {
-                eprintln!("mirvm[m4-engine]: Engine execution lease count overflowed");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "Engine execution lease count overflowed"
+                );
                 std::process::abort();
             }
             if self
@@ -201,7 +205,11 @@ impl EngineControl {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             == usize::MAX
         {
-            eprintln!("mirvm[m4-engine]: Engine active execution count overflowed");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "Engine active execution count overflowed"
+            );
             std::process::abort();
         }
         if self.begin_execution(allow_closing_reentry) {
@@ -233,7 +241,11 @@ impl EngineControl {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
             == usize::MAX
         {
-            eprintln!("mirvm[m4-engine]: Engine active execution count overflowed");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "Engine active execution count overflowed"
+            );
             std::process::abort();
         }
         if self
@@ -317,7 +329,11 @@ impl EngineControl {
             let state = self.lifecycle.load(std::sync::atomic::Ordering::Acquire);
             let count = state & COUNT_MASK;
             if count == 0 {
-                eprintln!("mirvm[m4-engine]: Engine execution lease count underflowed");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "Engine execution lease count underflowed"
+                );
                 std::process::abort();
             }
             let next = state - 1;
@@ -380,7 +396,11 @@ impl EngineControl {
     fn shared_after_lease(&self) -> Arc<Shared> {
         let shared = self.shared.load(std::sync::atomic::Ordering::Acquire);
         if shared.is_null() {
-            eprintln!("mirvm[m4-engine]: active Engine lease lost its Shared state");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "active Engine lease lost its Shared state"
+            );
             std::process::abort();
         }
         // SAFETY: `install_owner` published this pointer from a live `Arc<Shared>` before the first
@@ -440,13 +460,15 @@ impl Engine {
             .unwrap_or_else(|error| panic!("Engine initialization failed: {error}"))
     }
 
-    pub(crate) fn try_new(mut shared: Shared) -> Result<Self, String> {
+    pub(crate) fn try_new(mut shared: Shared) -> Result<Self, crate::error::Error> {
         super::super::native_instance::isolate_required_libraries(&mut shared.module, shared.id)?;
         let mut shared = Arc::new(shared);
         let control = Arc::clone(shared.control());
         let entry_closures = {
-            let shared =
-                Arc::get_mut(&mut shared).ok_or("new Engine Shared unexpectedly aliased")?;
+            let shared = Arc::get_mut(&mut shared).ok_or(crate::fail!(
+                Engine,
+                "new Engine Shared unexpectedly aliased"
+            ))?;
             let closures = super::super::thunks::materialize_all_entry_stubs(
                 &mut shared.module,
                 &mut shared.instance,
@@ -475,8 +497,12 @@ impl Engine {
             Error(String),
             Resume(super::super::unwind::CaughtException),
         }
-        let startup = ExecutionLease::acquire(Arc::clone(&shared), false)
-            .map_err(|_| "Engine closed before native constructors started".to_string())?;
+        let startup = ExecutionLease::acquire(Arc::clone(&shared), false).map_err(|_| {
+            crate::fail!(
+                Engine,
+                "Engine closed before native constructors started".to_string()
+            )
+        })?;
         let startup_failure = {
             let activation = activate(startup.shared());
             let failure = match super::super::unwind::catch_raw(|| {
@@ -486,7 +512,7 @@ impl Engine {
                 Ok(Ok(())) => Some(StartupFailure::Error(
                     "native constructor closed its Engine".to_string(),
                 )),
-                Ok(Err(error)) => Some(StartupFailure::Error(error)),
+                Ok(Err(error)) => Some(StartupFailure::Error(error.to_string())),
                 Err(exception) => Some(match exception.take_mirvm(&shared) {
                     Ok(super::super::unwind::MirvmPayload::Guest(payload)) => {
                         super::super::unwind::dispose_guest_panic_during_startup(&shared, payload);
@@ -525,7 +551,7 @@ impl Engine {
             close_shared(&shared);
             shared.control.wait_closed();
             return match failure {
-                StartupFailure::Error(error) => Err(error),
+                StartupFailure::Error(error) => Err(crate::fail!(Engine, error)),
                 StartupFailure::Resume(exception) => exception.resume_or_rethrow(),
             };
         }
@@ -541,7 +567,7 @@ impl Engine {
     /// The caller must guarantee that every embedded native address, memory
     /// operand and ABI description is valid for this process. Bytecode shape
     /// verification alone cannot prove those host-pointer obligations.
-    pub unsafe fn from_module_unchecked(module: Module) -> Result<Self, String> {
+    pub unsafe fn from_module_unchecked(module: Module) -> Result<Self, crate::error::Error> {
         let instance = super::super::instance::Instance::materialize(&module)?;
         unsafe { Self::from_artifact_unchecked(module, instance) }
     }
@@ -555,7 +581,7 @@ impl Engine {
     pub(crate) unsafe fn from_artifact_unchecked(
         module: Module,
         instance: super::super::instance::Instance,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, crate::error::Error> {
         // Structural verification is still mandatory. `unsafe` covers only
         // facts it cannot prove: validity/lifetime of embedded host pointers
         // and agreement of native ABI descriptions with their real callees.
@@ -771,7 +797,11 @@ fn close_shared(shared: &Arc<Shared>) {
 pub(super) fn start_finalizer(shared: Arc<Shared>) {
     let physical_mask =
         crate::os::signal::Sigaction::current_standard_mask_bits().unwrap_or_else(|error| {
-            eprintln!("mirvm[m4-engine]: failed to query finalizer caller signal mask: {error}");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "failed to query finalizer caller signal mask: {error}"
+            );
             std::process::abort();
         });
     // Running inline would make close callbacks execute on a host thread that
@@ -800,7 +830,11 @@ pub(super) fn start_finalizer(shared: Arc<Shared>) {
             finalize_shared(&shared);
         })
     {
-        eprintln!("mirvm[m4-engine]: failed to start Engine finalizer: {error}");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "failed to start Engine finalizer: {error}"
+        );
         std::process::abort();
     }
 }
@@ -847,8 +881,10 @@ fn finalize_shared(shared: &Shared) {
         super::super::unwind::guard_native_teardown(|| {
             loop {
                 super::super::signal::deactivate_engine(shared.control()).unwrap_or_else(|error| {
-                    eprintln!(
-                        "mirvm[m4-engine]: failed to close guest signal disposition: {error}"
+                    crate::diag_direct_at!(
+                        crate::diag::Severity::Error,
+                        Engine,
+                        "failed to close guest signal disposition: {error}"
                     );
                     std::process::abort();
                 });

@@ -33,18 +33,26 @@ pub(super) struct Dynamic {
 
 impl Dynamic {
     /// Read the table the `PT_DYNAMIC` program header points at, stopping at `DT_NULL`.
-    pub(super) fn read(mapping: &Mapping) -> Result<Self, String> {
+    pub(super) fn read(mapping: &Mapping) -> Result<Self, crate::error::Error> {
         let Some((vaddr, size)) = mapping.dynamic() else {
             return Ok(Self::default());
         };
         if !size.is_multiple_of(elf::DYN_ENTRY_SIZE as u64) || !mapping.contains(vaddr, size) {
-            return Err("MC PT_DYNAMIC lies outside a loadable segment".into());
+            return Err(crate::fail!(
+                Native,
+                "MC PT_DYNAMIC lies outside a loadable segment"
+            ));
         }
         let mut dynamic = Self::default();
         let mut entry = mapping.address(vaddr, "PT_DYNAMIC")?;
         let end = entry
-            .checked_add(usize::try_from(size).map_err(|_| bad())?)
-            .ok_or_else(bad)?;
+            .checked_add(
+                usize::try_from(size)
+                    .map_err(|_| bad())
+                    .map_err(|e| crate::fail!(Native, e))?,
+            )
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
         while entry < end {
             let tag = i64::from_le_bytes(unsafe {
                 std::ptr::read((entry + elf::dynamic::TAG) as *const [u8; 8])
@@ -88,7 +96,7 @@ impl Dynamic {
 pub(super) fn lifecycle(
     mapping: &Mapping,
     dynamic: &Dynamic,
-) -> Result<(Vec<usize>, Vec<usize>), String> {
+) -> Result<(Vec<usize>, Vec<usize>), crate::error::Error> {
     let mut initializers = Vec::new();
     if let Some(address) = dynamic.init {
         initializers.push(mapping.address(address, "DT_INIT")?);
@@ -118,21 +126,30 @@ fn read_array(
     address: Option<u64>,
     size: u64,
     what: &str,
-) -> Result<Vec<usize>, String> {
+) -> Result<Vec<usize>, crate::error::Error> {
     let Some(address) = address else {
         if size == 0 {
             return Ok(Vec::new());
         }
-        return Err(format!("MC {what} has size but no address"));
+        return Err(crate::fail!(
+            Native,
+            format!("MC {what} has size but no address")
+        ));
     };
     if !size.is_multiple_of(8) || size > 1 << 20 {
-        return Err(format!("MC {what} has invalid size {size}"));
+        return Err(crate::fail!(
+            Native,
+            format!("MC {what} has invalid size {size}")
+        ));
     }
     address
         .checked_add(size)
-        .ok_or_else(|| format!("MC {what} range overflow"))?;
+        .ok_or_else(|| crate::fail!(Native, format!("MC {what} range overflow")))?;
     if !mapping.contains(address, size) {
-        return Err(format!("MC {what} lies outside a loadable segment"));
+        return Err(crate::fail!(
+            Native,
+            format!("MC {what} lies outside a loadable segment")
+        ));
     }
     let start = mapping.address(address, what)?;
     let mut functions = Vec::with_capacity((size / 8) as usize);

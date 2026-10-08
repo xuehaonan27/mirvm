@@ -32,11 +32,11 @@ pub struct AuditReport {
     /// uses the informational one (time drift, not a failure).
     pub lock_check: Option<(String, Vec<String>)>,
     /// Script acceptance: whether cargo `--locked --offline` accepts the generated lock.
-    pub acceptance: Option<Result<(), String>>,
+    pub acceptance: Option<Result<(), crate::error::Error>>,
 }
 
 /// Audit a project directory (containing Cargo.toml).
-pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
+pub fn audit_project(dir: &Path) -> Result<AuditReport, crate::error::Error> {
     let manifest = PackageManifest::read_dir(dir)?;
     let mut registry = Registry::open_for(&manifest.lock_root)?;
     let plan = resolve(&manifest, &mut registry)?;
@@ -65,16 +65,25 @@ pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
 /// time drift is not a fork).
 /// Tied to `tests/manifest`: an entry carrying `needs=` whose
 /// path is absent is recorded as SKIP (same criterion as the gate, not a failure).
-pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
-    let text = std::fs::read_to_string(file)
-        .map_err(|e| format!("failed to read script {}: {e}", file.display()))?;
+pub fn audit_script(file: &Path) -> Result<AuditReport, crate::error::Error> {
+    let text = std::fs::read_to_string(file).map_err(|e| {
+        crate::fail!(
+            Build,
+            format!("failed to read script {}: {e}", file.display())
+        )
+    })?;
     let stem_owned;
     let stem = match file.file_stem().and_then(|s| s.to_str()) {
         Some(s) => {
             stem_owned = s.to_string();
             stem_owned.as_str()
         }
-        None => return Err(format!("{} has no valid file name", file.display())),
+        None => {
+            return Err(crate::fail!(
+                Build,
+                format!("{} has no valid file name", file.display())
+            ));
+        }
     };
     // needs=/env= linkage (tests/manifest is the single source of truth)
     let (needs, manifest_env) = manifest_fields(stem);
@@ -132,7 +141,7 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
         units: plan.units.len(),
         plan,
         lock_check,
-        acceptance: Some(acceptance),
+        acceptance: Some(acceptance.map_err(|e| crate::fail!(Build, e))),
     })
 }
 
@@ -144,7 +153,7 @@ fn cargo_accepts_lock(
     body: &str,
     lock: &Lockfile,
     manifest_env: Option<&str>,
-) -> Result<Result<(), String>, String> {
+) -> Result<Result<(), String>, crate::error::Error> {
     let dir = std::env::temp_dir().join(format!(
         "mirvm-deps-audit-{}-{}",
         manifest.name,
@@ -152,7 +161,7 @@ fn cargo_accepts_lock(
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src"))
-        .map_err(|e| format!("failed to create audit dir: {e}"))?;
+        .map_err(|e| crate::fail!(Build, format!("failed to create audit dir: {e}")))?;
     let cargo_toml = format!(
         "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
          [[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n{manifest_text}",
@@ -184,21 +193,25 @@ fn cargo_accepts_lock(
         cmd.output()
     };
     // (1) fetch --locked (fetches online; verifies lock integrity and availability)
-    let fetch =
-        run(&["fetch", "--locked"]).map_err(|e| format!("failed to run cargo fetch: {e}"))?;
+    let fetch = run(&["fetch", "--locked"])
+        .map_err(|e| crate::fail!(Build, format!("failed to run cargo fetch: {e}")))?;
     if !fetch.status.success() {
         let tail = String::from_utf8_lossy(&fetch.stderr);
         let tail = tail.lines().last().unwrap_or("").to_string();
         if crate::options::deps_audit_keep() {
-            eprintln!("audit scratch dir kept: {}", dir.display());
+            crate::diag_warn!(Build, "audit scratch dir kept: {}", dir.display());
         } else {
             let _ = std::fs::remove_dir_all(&dir);
         }
-        return Ok(Err(format!("cargo fetch --locked rejected: {tail}")));
+        return Ok(Err(crate::fail!(
+            Build,
+            format!("cargo fetch --locked rejected: {tail}")
+        )
+        .to_string()));
     }
     // (2) build --locked --offline (verifies offline reproducibility)
     let build = run(&["build", "--locked", "--offline"])
-        .map_err(|e| format!("failed to run cargo build: {e}"))?;
+        .map_err(|e| crate::fail!(Build, format!("failed to run cargo build: {e}")))?;
     let ok = build.status.success();
     let diag = if ok {
         String::new()
@@ -210,7 +223,7 @@ fn cargo_accepts_lock(
         )
     };
     if crate::options::deps_audit_keep() {
-        eprintln!("audit scratch dir kept: {}", dir.display());
+        crate::diag_warn!(Build, "audit scratch dir kept: {}", dir.display());
     } else {
         let _ = std::fs::remove_dir_all(&dir);
     }

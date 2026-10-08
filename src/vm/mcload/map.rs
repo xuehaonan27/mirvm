@@ -47,7 +47,7 @@ impl Mapping {
     /// Map a span covering every `PT_LOAD` segment and copy the segment bytes into it. Refuses a
     /// `PT_INTERP` (a self-produced shared object has no interpreter) and an image with no
     /// loadable segment.
-    pub(super) fn map(bytes: &[u8], image: &Image<'_>) -> Result<Self, String> {
+    pub(super) fn map(bytes: &[u8], image: &Image<'_>) -> Result<Self, crate::error::Error> {
         let mut lo = usize::MAX;
         let mut hi = 0usize;
         let mut loads = Vec::new();
@@ -59,7 +59,7 @@ impl Mapping {
                     let filesz = header.filesz as usize;
                     let memsz = header.memsz as usize;
                     if memsz < filesz || header.offset as usize + filesz > bytes.len() {
-                        return Err(bad());
+                        return Err(crate::fail!(Native, bad()));
                     }
                     loads.push(Load {
                         offset: header.offset,
@@ -73,18 +73,24 @@ impl Mapping {
                 }
                 elf::PT_DYNAMIC => dynamic = Some((header.vaddr, header.memsz)),
                 elf::PT_INTERP => {
-                    return Err("MC image has PT_INTERP (not a self-produced shared object)".into());
+                    return Err(crate::fail!(
+                        Native,
+                        "MC image has PT_INTERP (not a self-produced shared object)"
+                    ));
                 }
                 _ => {}
             }
         }
         if loads.is_empty() || lo >= hi {
-            return Err("MC image has no PT_LOAD".into());
+            return Err(crate::fail!(Native, "MC image has no PT_LOAD"));
         }
         let size = hi - lo;
         let raw = crate::os::mem::map_anon(size, crate::os::mem::Prot::RW, false);
         if raw.is_null() {
-            return Err(format!("MC image mapping failed ({size:#x} bytes)"));
+            return Err(crate::fail!(
+                Native,
+                format!("MC image mapping failed ({size:#x} bytes)")
+            ));
         }
         let mut mapping = Self {
             raw,
@@ -94,9 +100,10 @@ impl Mapping {
             dynamic,
             armed: true,
         };
-        mapping.load_bias = (raw as usize)
-            .checked_sub(lo)
-            .ok_or("MC image mapping lies below its first ELF virtual address")?;
+        mapping.load_bias = (raw as usize).checked_sub(lo).ok_or(crate::fail!(
+            Native,
+            "MC image mapping lies below its first ELF virtual address"
+        ))?;
         for load in &mapping.loads {
             let destination = mapping.address(load.vaddr as u64, "PT_LOAD")?;
             unsafe {
@@ -124,23 +131,29 @@ impl Mapping {
 
     /// The real address of ELF virtual address `vaddr`, with `what` naming the caller's structure
     /// in the error.
-    pub(super) fn address(&self, vaddr: u64, what: &str) -> Result<usize, String> {
+    pub(super) fn address(&self, vaddr: u64, what: &str) -> Result<usize, crate::error::Error> {
         self.load_bias
-            .checked_add(
-                usize::try_from(vaddr)
-                    .map_err(|_| format!("MC {what} virtual address does not fit usize"))?,
-            )
-            .ok_or_else(|| format!("MC {what} virtual address overflow"))
+            .checked_add(usize::try_from(vaddr).map_err(|_| {
+                crate::fail!(
+                    Native,
+                    format!("MC {what} virtual address does not fit usize")
+                )
+            })?)
+            .ok_or_else(|| crate::fail!(Native, format!("MC {what} virtual address overflow")))
     }
 
     /// The real address of a signed relocation value.
-    pub(super) fn signed_address(&self, value: i64, what: &str) -> Result<u64, String> {
+    pub(super) fn signed_address(
+        &self,
+        value: i64,
+        what: &str,
+    ) -> Result<u64, crate::error::Error> {
         let address = if value >= 0 {
             self.load_bias.checked_add(value as usize)
         } else {
             self.load_bias.checked_sub(value.unsigned_abs() as usize)
         }
-        .ok_or_else(|| format!("MC {what} signed address overflow"))?;
+        .ok_or_else(|| crate::fail!(Native, format!("MC {what} signed address overflow")))?;
         Ok(address as u64)
     }
 
@@ -159,29 +172,33 @@ impl Mapping {
 
     /// Apply the final segment protections and refuse a segment that is both writable and
     /// executable, a shape the self-produced family never has.
-    pub(super) fn protect(&self) -> Result<(), String> {
+    pub(super) fn protect(&self) -> Result<(), crate::error::Error> {
         for load in &self.loads {
             if load.flags & (elf::PF_X | elf::PF_W) == (elf::PF_X | elf::PF_W) {
-                return Err("MC image contains a writable executable PT_LOAD segment".into());
+                return Err(crate::fail!(
+                    Native,
+                    "MC image contains a writable executable PT_LOAD segment"
+                ));
             }
             let start = self.address(load.vaddr as u64, "PT_LOAD protection")? & !(PAGE - 1);
             let segment_end = self
                 .address(load.vaddr as u64, "PT_LOAD protection")?
                 .checked_add(load.memsz)
-                .ok_or("MC PT_LOAD protection range overflow")?;
-            let end = segment_end
-                .checked_add(PAGE - 1)
-                .ok_or("MC PT_LOAD protection alignment overflow")?
-                & !(PAGE - 1);
-            crate::os::mem::protect(start as *mut u8, end - start, seg_prot(load.flags))
-                .map_err(|e| format!("MC image segment protection failed: {e}"))?;
+                .ok_or(crate::fail!(Native, "MC PT_LOAD protection range overflow"))?;
+            let end = segment_end.checked_add(PAGE - 1).ok_or(crate::fail!(
+                Native,
+                "MC PT_LOAD protection alignment overflow"
+            ))? & !(PAGE - 1);
+            crate::os::mem::protect(start as *mut u8, end - start, seg_prot(load.flags)).map_err(
+                |e| crate::fail!(Native, format!("MC image segment protection failed: {e}")),
+            )?;
         }
         Ok(())
     }
 
     /// The real `[start, end)` of every executable segment, the ranges a guest code pointer must
     /// lie in.
-    pub(super) fn executable_ranges(&self) -> Result<Box<[(usize, usize)]>, String> {
+    pub(super) fn executable_ranges(&self) -> Result<Box<[(usize, usize)]>, crate::error::Error> {
         self.loads
             .iter()
             .filter(|load| load.flags & elf::PF_X != 0)
@@ -189,10 +206,10 @@ impl Mapping {
                 let start = self.address(load.vaddr as u64, "executable PT_LOAD")?;
                 let end = start
                     .checked_add(load.memsz)
-                    .ok_or("MC executable PT_LOAD range overflow")?;
+                    .ok_or(crate::fail!(Native, "MC executable PT_LOAD range overflow"))?;
                 Ok((start, end))
             })
-            .collect::<Result<Vec<_>, String>>()
+            .collect::<Result<Vec<_>, crate::error::Error>>()
             .map(Vec::into_boxed_slice)
     }
 

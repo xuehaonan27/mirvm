@@ -4,23 +4,29 @@
 use super::*;
 
 impl<'a> Verifier<'a> {
-    pub(super) fn body(&self, body: &FuncBody) -> Result<(), String> {
+    pub(super) fn body(&self, body: &FuncBody) -> Result<(), crate::error::Error> {
         if body.frame_align == 0 || !body.frame_align.is_power_of_two() {
-            return Err(format!("invalid frame alignment {}", body.frame_align));
+            return Err(crate::fail!(
+                Engine,
+                format!("invalid frame alignment {}", body.frame_align)
+            ));
         }
         if u64::from(body.frame_size) > REGION_CAP || u64::from(body.frame_align) > REGION_CAP {
-            return Err(format!(
-                "frame size/alignment ({}/{}) exceeds the 1 GiB operand region",
-                body.frame_size, body.frame_align
+            return Err(crate::fail!(
+                Engine,
+                format!(
+                    "frame size/alignment ({}/{}) exceeds the 1 GiB operand region",
+                    body.frame_size, body.frame_align
+                )
             ));
         }
         if body.blocks.is_empty() {
-            return Err("has no basic blocks".into());
+            return Err(crate::fail!(Engine, "has no basic blocks"));
         }
         self.ret_abi(body, &body.ret)?;
         for (i, param) in body.params.iter().enumerate() {
             self.param_abi(body, param)
-                .map_err(|e| format!("parameter {i}: {e}"))?;
+                .map_err(|e| crate::fail!(Engine, format!("parameter {i}: {e}")))?;
         }
         if let Some(off) = body.caller_loc_off {
             self.span(body, off, 8, "track_caller slot")?;
@@ -28,15 +34,19 @@ impl<'a> Verifier<'a> {
         for (bb, block) in body.blocks.iter().enumerate() {
             for (si, stmt) in block.stmts.iter().enumerate() {
                 self.stmt(body, stmt)
-                    .map_err(|e| format!("bb{bb} statement {si}: {e}"))?;
+                    .map_err(|e| crate::fail!(Engine, format!("bb{bb} statement {si}: {e}")))?;
             }
             self.term(body, &block.term)
-                .map_err(|e| format!("bb{bb} terminator: {e}"))?;
+                .map_err(|e| crate::fail!(Engine, format!("bb{bb} terminator: {e}")))?;
         }
         Ok(())
     }
 
-    pub(super) fn param_abi(&self, body: &FuncBody, abi: &ParamAbi) -> Result<(), String> {
+    pub(super) fn param_abi(
+        &self,
+        body: &FuncBody,
+        abi: &ParamAbi,
+    ) -> Result<(), crate::error::Error> {
         match abi {
             ParamAbi::Zst => Ok(()),
             ParamAbi::Scalar(slot) => self.slot(body, *slot),
@@ -48,7 +58,7 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    pub(super) fn ret_abi(&self, body: &FuncBody, abi: &RetAbi) -> Result<(), String> {
+    pub(super) fn ret_abi(&self, body: &FuncBody, abi: &RetAbi) -> Result<(), crate::error::Error> {
         match abi {
             RetAbi::Zst => Ok(()),
             RetAbi::Scalar(slot) => self.slot(body, *slot),
@@ -67,7 +77,7 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    pub(super) fn stmt(&self, body: &FuncBody, stmt: &Stmt) -> Result<(), String> {
+    pub(super) fn stmt(&self, body: &FuncBody, stmt: &Stmt) -> Result<(), crate::error::Error> {
         match stmt {
             Stmt::Assign { dst, rv } => {
                 self.scalar_place(body, dst)?;
@@ -280,7 +290,7 @@ impl<'a> Verifier<'a> {
                 ..
             } => {
                 if *lanes == 0 {
-                    return Err("SIMD lane count is zero".into());
+                    return Err(crate::fail!(Engine, "SIMD lane count is zero"));
                 }
                 self.places(body, [ptrs, offsets, dst])
             }
@@ -339,7 +349,7 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    pub(super) fn rvalue(&self, body: &FuncBody, rv: &Rvalue) -> Result<(), String> {
+    pub(super) fn rvalue(&self, body: &FuncBody, rv: &Rvalue) -> Result<(), crate::error::Error> {
         match rv {
             Rvalue::Use(a)
             | Rvalue::NotBits(a)
@@ -395,7 +405,11 @@ impl<'a> Verifier<'a> {
         }
     }
 
-    pub(super) fn term(&self, body: &FuncBody, term: &Terminator) -> Result<(), String> {
+    pub(super) fn term(
+        &self,
+        body: &FuncBody,
+        term: &Terminator,
+    ) -> Result<(), crate::error::Error> {
         match term {
             Terminator::Goto(bb) => self.bb(body, *bb),
             Terminator::SwitchInt {
@@ -425,7 +439,10 @@ impl<'a> Verifier<'a> {
                 if matches!(role, crate::vm::ir::CallRole::MainPanicBoundary)
                     && !matches!(unwind, UnwindAction::Continue)
                 {
-                    return Err("main panic boundary call must use Continue unwind action".into());
+                    return Err(crate::fail!(
+                        Engine,
+                        "main panic boundary call must use Continue unwind action"
+                    ));
                 }
                 Ok(())
             }
@@ -458,11 +475,11 @@ impl<'a> Verifier<'a> {
                         || !args.iter().all(|arg| arg.width() == Width::W64)
                         || !byte_ret
                     {
-                        return Err(
+                        return Err(crate::fail!(
+                            Engine,
                             "main panic catcher must be CatchUnwind with three pointer-width \
                              arguments, a byte scalar return, and Continue unwind action"
-                                .into(),
-                        );
+                        ));
                     }
                 }
                 Ok(())
@@ -518,7 +535,8 @@ impl<'a> Verifier<'a> {
                             *n
                         }
                     };
-                    buffer_span(*buf_size, *off, width).map_err(|e| format!("input {i}: {e}"))?;
+                    buffer_span(*buf_size, *off, width)
+                        .map_err(|e| crate::fail!(Engine, format!("input {i}: {e}")))?;
                 }
                 for (i, (off, dst)) in outs.iter().enumerate() {
                     let width = match dst {
@@ -531,7 +549,8 @@ impl<'a> Verifier<'a> {
                             *n
                         }
                     };
-                    buffer_span(*buf_size, *off, width).map_err(|e| format!("output {i}: {e}"))?;
+                    buffer_span(*buf_size, *off, width)
+                        .map_err(|e| crate::fail!(Engine, format!("output {i}: {e}")))?;
                 }
                 self.bb(body, *target)
             }

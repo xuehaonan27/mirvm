@@ -85,13 +85,18 @@ pub(crate) struct Image {
 }
 
 /// The image's `LC_SEGMENT_64` commands, in the order the header lists them.
-pub(crate) fn image(bytes: &[u8]) -> Result<Image, String> {
+pub(crate) fn image(bytes: &[u8]) -> Result<Image, crate::error::Error> {
     let (ncmds, sizeofcmds) = header(bytes)?;
     let commands_end = HEADER_SIZE
         .checked_add(sizeofcmds as usize)
-        .ok_or_else(|| "the image's load commands are too long".to_string())?;
+        .ok_or_else(|| {
+            crate::fail!(Native, "the image's load commands are too long".to_string())
+        })?;
     if commands_end > bytes.len() {
-        return Err("the image ends inside its load commands".to_string());
+        return Err(crate::fail!(
+            Native,
+            "the image ends inside its load commands".to_string()
+        ));
     }
     let mut segments = Vec::new();
     let mut routines_init = None;
@@ -102,13 +107,19 @@ pub(crate) fn image(bytes: &[u8]) -> Result<Image, String> {
         // Every command is at least its own header and the header's count and total size are the
         // only bounds on the run.
         if size < 8 || cursor + size > commands_end {
-            return Err("a load command has an implausible size".to_string());
+            return Err(crate::fail!(
+                Native,
+                "a load command has an implausible size".to_string()
+            ));
         }
         if command == LC_SEGMENT_64 {
             segments.push(segment(bytes, cursor, size)?);
         } else if command == LC_ROUTINES_64 {
             if size < 16 {
-                return Err("an LC_ROUTINES_64 is truncated".to_string());
+                return Err(crate::fail!(
+                    Native,
+                    "an LC_ROUTINES_64 is truncated".to_string()
+                ));
             }
             routines_init = read_u64(bytes, cursor + 8);
         }
@@ -120,21 +131,29 @@ pub(crate) fn image(bytes: &[u8]) -> Result<Image, String> {
     })
 }
 
-fn segment(bytes: &[u8], cursor: usize, cmdsize: usize) -> Result<Segment, String> {
+fn segment(bytes: &[u8], cursor: usize, cmdsize: usize) -> Result<Segment, crate::error::Error> {
     let short = || "a segment command is truncated".to_string();
     if cmdsize < SEGMENT_COMMAND_SIZE {
-        return Err(short());
+        return Err(crate::fail!(Native, short()));
     }
-    let vmaddr = read_u64(bytes, cursor + 24).ok_or_else(short)?;
-    let vmsize = read_u64(bytes, cursor + 32).ok_or_else(short)?;
-    let initprot = read_u32(bytes, cursor + 60).ok_or_else(short)?;
-    let nsects = read_u32(bytes, cursor + 64).ok_or_else(short)? as usize;
+    let vmaddr = read_u64(bytes, cursor + 24)
+        .ok_or_else(short)
+        .map_err(|e| crate::fail!(Native, e))?;
+    let vmsize = read_u64(bytes, cursor + 32)
+        .ok_or_else(short)
+        .map_err(|e| crate::fail!(Native, e))?;
+    let initprot = read_u32(bytes, cursor + 60)
+        .ok_or_else(short)
+        .map_err(|e| crate::fail!(Native, e))?;
+    let nsects = read_u32(bytes, cursor + 64)
+        .ok_or_else(short)
+        .map_err(|e| crate::fail!(Native, e))? as usize;
     let sections_start = cursor + SEGMENT_COMMAND_SIZE;
     let sections_size = nsects
         .checked_mul(SECTION_SIZE)
-        .ok_or_else(|| "a segment declares too many sections".to_string())?;
+        .ok_or_else(|| crate::fail!(Native, "a segment declares too many sections".to_string()))?;
     if sections_start + sections_size > cursor + cmdsize {
-        return Err(short());
+        return Err(crate::fail!(Native, short()));
     }
     let mut sections = Vec::with_capacity(nsects);
     for index in 0..nsects {
@@ -148,14 +167,25 @@ fn segment(bytes: &[u8], cursor: usize, cmdsize: usize) -> Result<Segment, Strin
     })
 }
 
-fn section(bytes: &[u8], at: usize) -> Result<Section, String> {
+fn section(bytes: &[u8], at: usize) -> Result<Section, crate::error::Error> {
     let short = || "a section header is truncated".to_string();
     Ok(Section {
-        sectname: fixed_name(bytes, at).ok_or_else(short)?,
-        segname: fixed_name(bytes, at + 16).ok_or_else(short)?,
-        addr: read_u64(bytes, at + 32).ok_or_else(short)?,
-        size: read_u64(bytes, at + 40).ok_or_else(short)?,
-        section_type: read_u32(bytes, at + 64).ok_or_else(short)? & SECTION_TYPE_MASK,
+        sectname: fixed_name(bytes, at)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
+        segname: fixed_name(bytes, at + 16)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
+        addr: read_u64(bytes, at + 32)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
+        size: read_u64(bytes, at + 40)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
+        section_type: read_u32(bytes, at + 64)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?
+            & SECTION_TYPE_MASK,
         flags_at: at + 64,
     })
 }
@@ -177,23 +207,36 @@ pub(crate) fn is_image(bytes: &[u8]) -> bool {
 }
 
 /// The image's `ncmds` and `sizeofcmds`.
-pub(crate) fn header(bytes: &[u8]) -> Result<(u32, u32), String> {
+pub(crate) fn header(bytes: &[u8]) -> Result<(u32, u32), crate::error::Error> {
     match read_u32(bytes, 0) {
         Some(MH_MAGIC_64) => {}
-        _ => return Err("not a 64-bit Mach-O image".to_string()),
+        _ => {
+            return Err(crate::fail!(
+                Native,
+                "not a 64-bit Mach-O image".to_string()
+            ));
+        }
     }
     let short = || "the image ends inside its header".to_string();
     Ok((
-        read_u32(bytes, 16).ok_or_else(short)?,
-        read_u32(bytes, 20).ok_or_else(short)?,
+        read_u32(bytes, 16)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
+        read_u32(bytes, 20)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
     ))
 }
 
 /// A load command's `cmd` and `cmdsize`.
-pub(crate) fn load_command(bytes: &[u8], cursor: usize) -> Result<(u32, u32), String> {
+pub(crate) fn load_command(bytes: &[u8], cursor: usize) -> Result<(u32, u32), crate::error::Error> {
     let short = || "the image ends inside a load command".to_string();
     Ok((
-        read_u32(bytes, cursor).ok_or_else(short)?,
-        read_u32(bytes, cursor + 4).ok_or_else(short)?,
+        read_u32(bytes, cursor)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
+        read_u32(bytes, cursor + 4)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))?,
     ))
 }

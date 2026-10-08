@@ -118,19 +118,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   4/16/64 KiB pages, 24/32B Exit, return gap, drop, guest cycles, RSS and writer CPU, then implement
   4→64 KiB auto-scaling and rule on batch/checksum. The pool is fixed at 4 KiB and 16/64 KiB are
   accepted wire values only (`src/telemetry/capture.rs`, `src/telemetry/format/`). No pre-filled numbers.
-- **T13** `APPROVED`: one output grammar and one error vocabulary. `src/diag` is the vocabulary
-  (component, severity, the `diag_codes!` register, two sinks, `src/diag/table.rs` as the one report
-  renderer, `MIRVM_OUTPUT=text|json`), `src/error.rs` is the failure root that composes module enums
-  and turns one into the process status, `src/sysroot.rs` and `src/options.rs` are typed, and the CLI
-  and entry layer speak the grammar with named exit codes; `mirvm_log!` and the `log`/`anyhow`
-  dependencies are gone, and the front end now follows the mode as well: every session that renders
-  diagnostics asks rustc for its JSON rendering when `MIRVM_OUTPUT=json`, so the one prose line in a
-  JSONL stream is gone and the `diagnostics` case asserts it. Remaining: the `Result<_, String>` tail
-  (vm, cargoless, native, image, plus `src/os_arch/bridge.rs` and one cli site) and the raw print
-  sites that go with it — the engine's own `mirvm[m4-engine]:` lines are still prose in machine mode —
-  and the repo-quality gates not yet written (no `Result<_, String>`, no bare exit code, no raw print,
-  no duplicated prose). The `#![allow(dead_code)]` in `src/diag/mod.rs` is deleted by the last print
-  conversion.
 
 ## Engine and architecture debt
 
@@ -477,7 +464,7 @@ Each item is a condition and what it reopens.
   scheme still wins after charging zeroing, stack probing, unwinding and checked costs → alloca
   frame-local storage candidate.
 - The pinned rustc changes the summary structure or ships a formal diagnostic protocol → the runner
-  diagnostic hook moves to a guard/formal interface (→T13).
+  diagnostic hook moves to a guard/formal interface.
 - The pinned toolchain is upgraded → re-measure the load phase and the emit-pruning assumptions behind
   the base image.
 - A "single run, huge delta, cannot pre-lower" workload shape is measured (REPL/macro-expansion style)

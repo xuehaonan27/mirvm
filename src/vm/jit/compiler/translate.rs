@@ -713,10 +713,10 @@ impl<'a> Compiler<'a> {
             if crate::options::jit_debug_dump() {
                 // A dump payload, not a diagnostic: `MIRVM_JIT_DEBUG_DUMP` owns the exact shape and
                 // the general verbosity threshold must not silently drop it.
-                eprintln!(
+                crate::diag::instrument(format_args!(
                     "mirvm-jit-debug: CLIF dump of failed function f{func}:\n{}",
                     cctx.func.display()
-                );
+                ));
             }
             return None;
         }

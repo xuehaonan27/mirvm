@@ -40,6 +40,18 @@ pub enum Error {
     Owned(Box<dyn Owned>),
 }
 
+/// A failure authored in place: `fail!(Engine, "…")`.
+///
+/// The component names the subsystem that detected it and the class is the ordinary failure class.
+/// A module whose failures fall into classes a caller acts on declares an enum instead (see the
+/// module note); this is the spelling for the rest, which is most of the tree.
+#[macro_export]
+macro_rules! fail {
+    ($component:ident, $message:expr $(,)?) => {
+        $crate::error::Error::failure($crate::diag::Component::$component, $message)
+    };
+}
+
 impl Error {
     /// A rejected command line, environment value or input spelling.
     pub fn usage(component: Component, message: impl Into<String>) -> Self {

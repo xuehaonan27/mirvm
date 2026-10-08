@@ -73,14 +73,17 @@ impl StubArena {
     /// Strict load (warm/image replay): Err if the fixed base is occupied — the caller
     /// treats this as a cache miss (bytecode baked this region's stub addresses, wrong
     /// base replay = cliff).
-    pub fn map_fixed(home: usize) -> Result<Self, String> {
+    pub fn map_fixed(home: usize) -> Result<Self, crate::error::Error> {
         assert!(
             is_valid_code_home(home),
             "StubArena restore region invalid: {home:#x}"
         );
         let Some(p) = crate::os::mem::map_fixed_preferred(home, CODE_CAP, crate::os::mem::Prot::RW)
         else {
-            return Err(format!("stub code region fixed base {home:#x} occupied"));
+            return Err(crate::fail!(
+                Engine,
+                format!("stub code region fixed base {home:#x} occupied")
+            ));
         };
         Ok(StubArena {
             base: p,

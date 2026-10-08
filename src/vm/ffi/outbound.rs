@@ -71,7 +71,7 @@ impl FfiState {
         required_libs: &[Box<str>],
         native_images: &[crate::vm::native_instance::NativeImage],
         mc_images: &[crate::vm::mcload::McImage],
-    ) -> Result<Option<usize>, String> {
+    ) -> Result<Option<usize>, crate::error::Error> {
         if let Some(&p) = self.syms.get(name) {
             return Ok((p != 0).then_some(p));
         }
@@ -143,14 +143,14 @@ impl FfiState {
         optional_libs: &[Box<str>],
         required_libs: &[Box<str>],
         native_images: &[crate::vm::native_instance::NativeImage],
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::error::Error> {
         if self.libs_loaded {
             return Ok(());
         }
 
         if !native_images.is_empty() {
             if native_images.len() != required_libs.len() {
-                return Err("native image/path count mismatch".into());
+                return Err(crate::fail!(Native, "native image/path count mismatch"));
             }
             for image in native_images {
                 self.required_handles.push(image.handle());
@@ -161,12 +161,17 @@ impl FfiState {
             // Direct FfiState probes may still supply raw paths. Product Engine
             // startup always prepares staged NativeImage objects before this point.
             for cand in required_libs {
-                let cpath = CString::new(&**cand)
-                    .map_err(|_| format!("[native library path must contains NUL]: `{cand}`"))?;
-                let h =
-                    crate::os::dll::open(&cpath, crate::os::dll::Mode::Now).map_err(|detail| {
+                let cpath = CString::new(&**cand).map_err(|_| {
+                    crate::fail!(
+                        Native,
+                        format!("[native library path must contains NUL]: `{cand}`")
+                    )
+                })?;
+                let h = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now)
+                    .map_err(|detail| {
                         format!("[dlopen needs native library] `{cand}` failure: {detail}")
-                    })?;
+                    })
+                    .map_err(|e| crate::fail!(Native, e))?;
                 self.required_handles.push(h);
                 if let Some(bias) = crate::os::dll::load_bias(h, &cpath)
                     && let Ok(syms) = crate::native::symbol::symtab::hidden_symtab_values(
@@ -201,7 +206,7 @@ impl FfiState {
 pub(crate) fn resolve_got_fixups(
     module: &crate::vm::ir::Module,
     instance: &crate::vm::instance::Instance,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     if module.got_fixups.is_empty() {
         return Ok(());
     }
@@ -226,10 +231,13 @@ pub(crate) fn resolve_got_fixups(
             (Some(p), _) => resolved.push(p as u64),
             (None, true) => resolved.push(0),
             (None, false) => {
-                return Err(format!(
-                    "foreign symbol `{}` unresolved at startup GOT refill \
+                return Err(crate::fail!(
+                    Native,
+                    format!(
+                        "foreign symbol `{}` unresolved at startup GOT refill \
                      (absent from the archive fallback tables and the global dlsym scope)",
-                    s.name
+                        s.name
+                    )
                 ));
             }
         }
@@ -852,15 +860,15 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            error.contains(&*missing),
+            error.to_string().contains(&*missing),
             "required path missing from diagnostic: {error}"
         );
         assert!(
-            error.contains("[dlopen needs native library]"),
+            error.to_string().contains("[dlopen needs native library]"),
             "unexpected diagnostic: {error}"
         );
         assert!(
-            !error.contains("[dlerror without value]"),
+            !error.to_string().contains("[dlerror without value]"),
             "dlerror detail was lost: {error}"
         );
     }

@@ -273,8 +273,11 @@ fn apply_profile(
             toml::Value::String(v) if v == "s" => OptLevel::Os,
             toml::Value::String(v) if v == "z" => OptLevel::Oz,
             other => {
-                return Err(format!(
-                    "profile.{name}.opt-level is not a Cargo-supported value (only 0/1/2/3/\"s\"/\"z\"): {other}"
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "profile.{name}.opt-level is not a Cargo-supported value (only 0/1/2/3/\"s\"/\"z\"): {other}"
+                    )
                 ));
             }
         };

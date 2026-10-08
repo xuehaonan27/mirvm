@@ -48,7 +48,11 @@ impl SignalRegistration {
     ) -> &'static Self {
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         if generation == 0 {
-            eprintln!("mirvm[m4-engine]: signal registration generation exhausted");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "signal registration generation exhausted"
+            );
             std::process::abort();
         }
         let registration = Box::leak(Box::new(Self {
@@ -453,7 +457,11 @@ impl ThreadInboxHandle {
         inbox.deactivate();
         inbox.wait_for_deliveries();
         if inbox.has_pending() {
-            eprintln!("mirvm[m4-engine]: target pthread exited with a pending signal");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "target pthread exited with a pending signal"
+            );
             std::process::abort();
         }
     }
@@ -481,13 +489,21 @@ fn take_delivery_from(
             let current = unsafe { &*cell };
             let registration = current.registration.load(Ordering::Relaxed);
             if registration.is_null() {
-                eprintln!("mirvm[m4-engine]: target-pthread signal cell is corrupt");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "target-pthread signal cell is corrupt"
+                );
                 std::process::abort();
             }
             let registration = unsafe { &*registration };
             let signum = registration.signum() as usize;
             if signum >= SIGNAL_SLOTS {
-                eprintln!("mirvm[m4-engine]: target-pthread signal cell has an invalid signal");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "target-pthread signal cell has an invalid signal"
+                );
                 std::process::abort();
             }
             if blocked & (1u64 << signum) == 0
@@ -507,7 +523,11 @@ fn take_delivery_from(
         let Ok(hold) = super::super::deferred::DeferredHold::acquire(registration.control(), true)
         else {
             if cell.pending.load(Ordering::Acquire) {
-                eprintln!("mirvm[m4-engine]: target-pthread signal outlived its Engine");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "target-pthread signal outlived its Engine"
+                );
                 std::process::abort();
             }
             continue;
@@ -522,7 +542,11 @@ fn take_delivery_from(
             .is_ok()
         {
             if registration.thread_pending.fetch_sub(1, Ordering::AcqRel) == 0 {
-                eprintln!("mirvm[m4-engine]: target-pthread signal count underflowed");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "target-pthread signal count underflowed"
+                );
                 std::process::abort();
             }
             return Some((delivery, registration.signum()));
@@ -540,7 +564,11 @@ pub(crate) fn current_thread_has_pending_for_engine(owner: u64) -> bool {
         let current = unsafe { &*cell };
         let registration = current.registration.load(Ordering::Relaxed);
         if registration.is_null() {
-            eprintln!("mirvm[m4-engine]: target-pthread signal cell is corrupt");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "target-pthread signal cell is corrupt"
+            );
             std::process::abort();
         }
         if current.pending.load(Ordering::Acquire)
@@ -628,7 +656,11 @@ impl SignalInbox {
                 // A still-pending bit, however, is lifecycle-visible and must
                 // have prevented that transition.
                 if pending.load(Ordering::Acquire) {
-                    eprintln!("mirvm[m4-engine]: accepted signal outlived its Engine");
+                    crate::diag_direct_at!(
+                        crate::diag::Severity::Error,
+                        Engine,
+                        "accepted signal outlived its Engine"
+                    );
                     std::process::abort();
                 }
                 continue;

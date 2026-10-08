@@ -17,7 +17,7 @@ pub(super) fn fill_unused_patches(
     manifests: &BTreeMap<String, PackageManifest>,
     src: &mut impl PkgSource,
     overrides: &SourceOverrides,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     for ((_logical, version), selected) in &overrides.patches {
         let (name, source, checksum) = if let Some(manifest) = manifests.get(selected) {
             (manifest.name.clone(), manifest.lock_source.clone(), None)
@@ -61,7 +61,7 @@ pub(super) fn fill_lock_dependency_lines(
     nodes: &BTreeMap<NodeKey, FeatNode>,
     src: &mut impl PkgSource,
     overrides: &SourceOverrides,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     // The optional gate is judged per (parent package, parent version, dependency key):
     // a global set would misattribute a dependency activated by package A to package B
     // (cipher/zeroize vs generic-array). A weak reference (?/) is admitted as well (cargo
@@ -87,7 +87,7 @@ pub(super) fn fill_lock_dependency_lines(
                     req: Option<&VersionReq>,
                     source_id: Option<String>,
                     class: UnitClass|
-     -> Result<LockedDep, String> {
+     -> Result<LockedDep, crate::error::Error> {
         let dep = FeatDep {
             key: key.to_string(),
             package: pkg_name.to_string(),
@@ -110,7 +110,8 @@ pub(super) fn fill_lock_dependency_lines(
                     "{}@{} has no exact lock edge for dependency {key}",
                     parent.0, parent.1
                 )
-            })?;
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         let replacement_original =
             overrides
                 .replacements
@@ -168,7 +169,8 @@ pub(super) fn fill_lock_dependency_lines(
                     "the path package {} {} in the lock has no source to disambiguate by",
                     child_name, child_version
                 )
-            })?;
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         Ok(LockedDep {
             name: child_name,
             version: Some(child_version.clone()),
@@ -182,7 +184,7 @@ pub(super) fn fill_lock_dependency_lines(
             .filter(|d| {
                 !d.optional || activated_keys(&root.name, &root.version).contains(&d.key.as_str())
             })
-            .map(|d| -> Result<LockedDep, String> {
+            .map(|d| -> Result<LockedDep, crate::error::Error> {
                 let class = dep_unit_class(d.kind);
                 let req = match &d.source {
                     DepSource::Registry(r, _) => Some(r),
@@ -207,7 +209,7 @@ pub(super) fn fill_lock_dependency_lines(
                 .filter(|d| {
                     !d.optional || activated_keys(identity, &m.version).contains(&d.key.as_str())
                 })
-                .map(|d| -> Result<LockedDep, String> {
+                .map(|d| -> Result<LockedDep, crate::error::Error> {
                     let class = dep_unit_class(d.kind);
                     let req = match &d.source {
                         DepSource::Registry(r, _) => Some(r),
@@ -257,7 +259,7 @@ pub(super) fn fill_lock_dependency_lines(
                 .filter(|d| {
                     !d.optional || activated_keys(&identity, &version).contains(&d.name.as_str())
                 })
-                .map(|d| -> Result<LockedDep, String> {
+                .map(|d| -> Result<LockedDep, crate::error::Error> {
                     let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
                     let class = if d.kind.as_deref() == Some("build") {
                         UnitClass::Build

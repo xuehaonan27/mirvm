@@ -19,11 +19,6 @@
 //!
 //! This module is compiled source-for-source into the TSan harness, so it must stay pure `std`.
 
-// The vocabulary is one contract, declared whole: a component, severity or failure class that no
-// call site constructs yet is a spelling the conversions still to come must not invent locally.
-// The allow is deleted in the change that converts the last raw `eprintln!` call site.
-#![allow(dead_code)]
-
 pub mod exit;
 pub(crate) mod json;
 pub(crate) mod table;
@@ -324,6 +319,36 @@ pub fn emit_direct(diagnostic: &dyn Diagnostic) {
     {
         let _ = std::io::stderr().write_all(usage.as_bytes());
     }
+}
+
+/// Write one raw line to fd 2: no grammar, no threshold, no tee, no lock.
+///
+/// The two callers below are the only writers that must not go through [`emit`], and both say why
+/// at their own definition.
+fn write_raw(arguments: fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let mut line = String::new();
+    let _ = line.write_fmt(arguments);
+    line.push('\n');
+    let _ = std::io::stderr().write_all(line.as_bytes());
+}
+
+/// One development-instrument line: an `MIRVM_*_DEBUG` channel's own tracing (`[a2-debug]`,
+/// `[frag]`, `[jit-…]`, a `MIRVM_JIT_DEBUG_DUMP` payload).
+///
+/// Not a diagnostic: the call site owns the flag that selects these, they carry no component or
+/// severity, and they must not enter a capture or a machine stream, so they keep the shape and the
+/// destination the raw `eprintln!` they replace had.
+pub fn instrument(arguments: fmt::Arguments<'_>) {
+    write_raw(arguments);
+}
+
+/// One line mirvm mirrors from another tool's vocabulary, byte for byte.
+///
+/// Cargo's own warnings are part of the cargo-compatible track's frozen surface, so the grammar
+/// must not touch them; like [`instrument`], this writes fd 2 alone.
+pub fn mirror(arguments: fmt::Arguments<'_>) {
+    write_raw(arguments);
 }
 
 /// Render one diagnostic exactly as [`emit`] would, without writing it.

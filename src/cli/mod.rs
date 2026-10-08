@@ -306,10 +306,10 @@ fn options_main(args: impl Iterator<Item = String>) -> Result<ExitCode, crate::e
         }
     }
     if crate::options::output_format()? == crate::options::OutputFormat::Json {
-        println!("{}", crate::options::render_json());
+        crate::out::line(crate::options::render_json());
     } else {
-        println!("{}", crate::options::version());
-        print!("{}", crate::options::render());
+        crate::out::line(crate::options::version());
+        crate::out::text(crate::options::render());
     }
     Ok(ExitCode::SUCCESS)
 }

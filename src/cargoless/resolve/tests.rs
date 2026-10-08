@@ -47,7 +47,10 @@ impl FakeSource {
 }
 
 impl PkgSource for FakeSource {
-    fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String> {
+    fn registry_source(
+        &mut self,
+        reference: &RegistryReference,
+    ) -> Result<String, crate::error::Error> {
         Ok(match reference {
             RegistryReference::CratesIo => CRATES_IO_LOCK_SOURCE.to_string(),
             RegistryReference::Named(name) => format!("registry+test://{name}"),
@@ -61,10 +64,18 @@ impl PkgSource for FakeSource {
         })
     }
 
-    fn index_entry(&mut self, _source: &str, name: &str) -> Result<IndexEntry, String> {
+    fn index_entry(
+        &mut self,
+        _source: &str,
+        name: &str,
+    ) -> Result<IndexEntry, crate::error::Error> {
         Ok(self.index.get(name).cloned().unwrap_or_default().into())
     }
-    fn refresh_index_entry(&mut self, _source: &str, name: &str) -> Result<IndexEntry, String> {
+    fn refresh_index_entry(
+        &mut self,
+        _source: &str,
+        name: &str,
+    ) -> Result<IndexEntry, crate::error::Error> {
         if let Some(versions) = self.refresh_only.get(name).cloned() {
             self.index.insert(name.to_string(), versions.clone());
         }
@@ -76,7 +87,7 @@ impl PkgSource for FakeSource {
         name: &str,
         version: &Version,
         _cksum: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, crate::error::Error> {
         let dir = self.root.join(format!("{name}-{version}"));
         std::fs::create_dir_all(&dir).unwrap();
         let lib_section = match self.lib_names.get(name) {
@@ -96,12 +107,17 @@ impl PkgSource for FakeSource {
         spec: &GitSpec,
         package: &str,
         locked_source: Option<&str>,
-    ) -> Result<PackageManifest, String> {
+    ) -> Result<PackageManifest, crate::error::Error> {
         let mut manifest = self
             .git
             .get(&(spec.source_id(), package.to_string()))
             .cloned()
-            .ok_or_else(|| format!("test Git package does not exist: {package}"))?;
+            .ok_or_else(|| {
+                crate::fail!(
+                    Resolver,
+                    format!("test Git package does not exist: {package}")
+                )
+            })?;
         manifest.lock_source = Some(
             locked_source
                 .map(str::to_string)
@@ -362,8 +378,11 @@ fn compiler_rust_version_rejection_can_be_explicitly_ignored() {
     let mut source = FakeSource::new(directory.join("srcstore"));
     source.add("a", vec![future]);
     let error = resolve(&root, &mut source).unwrap_err();
-    assert!(error.contains("a@1.0.0"), "{error}");
-    assert!(error.contains("--ignore-rust-version"), "{error}");
+    assert!(error.to_string().contains("a@1.0.0"), "{error}");
+    assert!(
+        error.to_string().contains("--ignore-rust-version"),
+        "{error}"
+    );
 
     root.ignore_rust_version = true;
     assert!(resolve(&root, &mut source).is_ok());
@@ -427,7 +446,7 @@ fn lock_mode_rejects_stale_lock_loudly() {
     let mut src = FakeSource::new(d.join("srcstore"));
     src.add("a", vec![iv("a", "1.0.0"), iv("a", "2.0.0")]);
     let err = resolve(&root, &mut src).unwrap_err();
-    assert!(err.contains("stale Cargo.lock"), "{err}");
+    assert!(err.to_string().contains("stale Cargo.lock"), "{err}");
     std::fs::remove_dir_all(&d).unwrap();
 }
 
@@ -562,7 +581,9 @@ fn a_locked_version_newer_than_the_cached_index_is_revalidated_rather_than_refus
     std::fs::write(d.join("Cargo.lock"), carried.replace("0.2.190", "0.2.191")).unwrap();
     let error = resolve(&root, &mut src).unwrap_err();
     assert!(
-        error.contains("libc 0.2.191 is not in the index"),
+        error
+            .to_string()
+            .contains("libc 0.2.191 is not in the index"),
         "unexpected error: {error}"
     );
     std::fs::remove_dir_all(&d).unwrap();
@@ -922,7 +943,9 @@ fn git_rust_version_comes_from_checkout_manifest() {
     src.add_git("git+https://example.invalid/repo", git_core);
     let error = resolve(&root, &mut src).unwrap_err();
     assert!(
-        error.contains("git-core@1.2.3 requires rustc 999.0"),
+        error
+            .to_string()
+            .contains("git-core@1.2.3 requires rustc 999.0"),
         "{error}"
     );
     std::fs::remove_dir_all(&d).unwrap();

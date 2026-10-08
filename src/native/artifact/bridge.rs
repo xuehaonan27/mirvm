@@ -23,7 +23,11 @@ const ARTIFACT_VERSION: &[u8] = b"mirvm-bridge-v1";
 ///
 /// `cc_identity` is the compiler's own identity as the archive converter computes it, so two
 /// toolchains that produce different objects do not share one cached bridge.
-pub(crate) fn artifact(dir: &Path, cc: &Path, cc_identity: &[u8]) -> Result<PathBuf, String> {
+pub(crate) fn artifact(
+    dir: &Path,
+    cc: &Path,
+    cc_identity: &[u8],
+) -> Result<PathBuf, crate::error::Error> {
     let asm = crate::os_arch::bridge::bridge_asm()?;
     let hash = crate::utils::content::fnv1a(
         &[
@@ -41,18 +45,24 @@ pub(crate) fn artifact(dir: &Path, cc: &Path, cc_identity: &[u8]) -> Result<Path
     if object.exists() {
         return Ok(object);
     }
-    std::fs::create_dir_all(dir)
-        .map_err(|error| format!("cannot create the bridge cache directory: {error}"))?;
+    std::fs::create_dir_all(dir).map_err(|error| {
+        crate::fail!(
+            Native,
+            format!("cannot create the bridge cache directory: {error}")
+        )
+    })?;
     let temporary = crate::store::staging_path(&object);
     let mut source = temporary.clone().into_os_string();
     source.push(".s");
     let source = PathBuf::from(source);
-    std::fs::write(&source, &asm).map_err(|error| {
-        format!(
-            "cannot write the bridge assembly `{}`: {error}",
-            source.display()
-        )
-    })?;
+    std::fs::write(&source, &asm)
+        .map_err(|error| {
+            format!(
+                "cannot write the bridge assembly `{}`: {error}",
+                source.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Native, e))?;
     let mut command = Command::new(cc);
     command.args(linker::BRIDGE_ARTIFACT);
     if let Some(flag) = linker::BRIDGE_INSTALL_NAME {
@@ -63,18 +73,30 @@ pub(crate) fn artifact(dir: &Path, cc: &Path, cc_identity: &[u8]) -> Result<Path
         .arg("-o")
         .arg(&temporary)
         .output()
-        .map_err(|error| format!("cannot launch cc to build the bridge: {error}"))?;
+        .map_err(|error| {
+            crate::fail!(
+                Native,
+                format!("cannot launch cc to build the bridge: {error}")
+            )
+        })?;
     let _ = std::fs::remove_file(&source);
     if !output.status.success() {
         let _ = std::fs::remove_file(&temporary);
-        return Err(format!(
-            "cc could not build the runtime bridge:\n{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        return Err(crate::fail!(
+            Native,
+            format!(
+                "cc could not build the runtime bridge:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
         ));
     }
-    crate::store::publish(&object, &temporary)
-        .map_err(|error| format!("cannot publish the runtime bridge: {error}"))?;
+    crate::store::publish(&object, &temporary).map_err(|error| {
+        crate::fail!(
+            Native,
+            format!("cannot publish the runtime bridge: {error}")
+        )
+    })?;
     Ok(object)
 }
 

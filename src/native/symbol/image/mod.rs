@@ -16,7 +16,7 @@ pub(crate) mod macho;
 pub fn build(
     format: crate::native::object::ObjectFormat,
     names: &[Box<str>],
-) -> Result<(Vec<u8>, usize), String> {
+) -> Result<(Vec<u8>, usize), crate::error::Error> {
     match format {
         crate::native::object::ObjectFormat::Elf => elf::build_elf(names),
         crate::native::object::ObjectFormat::MachO => macho::build(names),

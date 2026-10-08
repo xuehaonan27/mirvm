@@ -56,8 +56,8 @@ pub fn run_project(
     let mut manifest = match PackageManifest::read_dir(dir) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("mirvm: failed to read project {}: {e}", dir.display());
-            std::process::exit(1);
+            crate::diag_error!(Build, "failed to read project {}: {e}", dir.display());
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     manifest.ignore_rust_version = ignore_rust_version;
@@ -71,8 +71,8 @@ pub fn pack_project(dir: &Path, out: &Path) -> ExitCode {
     let manifest = match PackageManifest::read_dir(dir) {
         Ok(manifest) => manifest,
         Err(error) => {
-            eprintln!("mirvm: failed to read project {}: {error}", dir.display());
-            std::process::exit(1);
+            crate::diag_error!(Build, "failed to read project {}: {error}", dir.display());
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     drive(&manifest, &[], None, Some(out))
@@ -88,11 +88,12 @@ struct RootRunRecipe {
     argv0: String,
 }
 
-fn write_lock_atomic(path: &Path, lock: &Lockfile) -> Result<(), String> {
+fn write_lock_atomic(path: &Path, lock: &Lockfile) -> Result<(), crate::error::Error> {
     let tmp = path.with_extension(format!("lock.mirvm-{}", std::process::id()));
     std::fs::write(&tmp, lock.serialize())
-        .map_err(|e| format!("write {} failed: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("publish {} failed: {e}", path.display()))
+        .map_err(|e| crate::fail!(Build, format!("write {} failed: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| crate::fail!(Build, format!("publish {} failed: {e}", path.display())))
 }
 
 fn launcher_recipe_path(launcher: &Path) -> PathBuf {
@@ -157,29 +158,30 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
             Ok(status) if status.success() => ExitCode::SUCCESS,
             Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
             Err(error) => {
-                eprintln!("mirvm doctest builder: failed to start rustc: {error}");
-                ExitCode::from(1)
+                crate::diag_error!(Doctest, "failed to start rustc: {error}");
+                ExitCode::from(crate::diag::exit::FAILURE)
             }
         };
     }
     if crate_type != "bin" {
-        eprintln!("mirvm doctest builder: unsupported crate type `{crate_type}`");
-        return ExitCode::from(1);
+        crate::diag_error!(Doctest, "unsupported crate type `{crate_type}`");
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     let Some(output) = arg_value(&args, "-o").map(PathBuf::from) else {
-        eprintln!("mirvm doctest builder: bin compilation is missing -o");
-        return ExitCode::from(1);
+        crate::diag_error!(Doctest, "bin compilation is missing -o");
+        return ExitCode::from(crate::diag::exit::FAILURE);
     };
     let check_dir = output
         .parent()
         .unwrap_or(Path::new("."))
         .join("mirvm-check");
     if let Err(error) = std::fs::create_dir_all(&check_dir) {
-        eprintln!(
-            "mirvm doctest builder: failed to create check directory {}: {error}",
+        crate::diag_error!(
+            Doctest,
+            "failed to create check directory {}: {error}",
             check_dir.display()
         );
-        return ExitCode::from(1);
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     let check_args = remove_output_arg(&args);
     let status = std::process::Command::new(&rustc)
@@ -194,8 +196,8 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         Ok(status) if status.success() => {}
         Ok(status) => return ExitCode::from(status.code().unwrap_or(1) as u8),
         Err(error) => {
-            eprintln!("mirvm doctest builder: failed to start rustc check: {error}");
-            return ExitCode::from(1);
+            crate::diag_error!(Doctest, "failed to start rustc check: {error}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     }
 
@@ -214,41 +216,44 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
     let bytes = match serde_json::to_vec(&recipe) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("mirvm doctest builder: recipe serialization failed: {error}");
-            return ExitCode::from(1);
+            crate::diag_error!(Doctest, "recipe serialization failed: {error}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     };
     if let Err(error) = crate::store::publish_bytes(&recipe_path, &bytes) {
-        eprintln!(
-            "mirvm doctest builder: failed to publish recipe {}: {error}",
+        crate::diag_error!(
+            Doctest,
+            "failed to publish recipe {}: {error}",
             recipe_path.display()
         );
-        return ExitCode::from(1);
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     match std::fs::remove_file(&output) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            eprintln!(
-                "mirvm doctest builder: failed to replace output {}: {error}",
+            crate::diag_error!(
+                Doctest,
+                "failed to replace output {}: {error}",
                 output.display()
             );
-            return ExitCode::from(1);
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     }
     let self_exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("mirvm doctest builder: current_exe failed: {error}");
-            return ExitCode::from(1);
+            crate::diag_error!(Doctest, "current_exe failed: {error}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     };
     if let Err(error) = crate::os::fs::symlink(self_exe, &output) {
-        eprintln!(
-            "mirvm doctest builder: failed to create launcher {}: {error}",
+        crate::diag_error!(
+            Doctest,
+            "failed to create launcher {}: {error}",
             output.display()
         );
-        return ExitCode::from(1);
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     ExitCode::SUCCESS
 }
@@ -272,13 +277,16 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut argv = argv.peekable();
     match crate::cli::take_internal_capture_directory(&mut argv) {
         Err(()) => {
-            eprintln!("mirvm capture: __cless-run-root missing capture directory");
-            return ExitCode::from(2);
+            crate::diag_error!(Capture, "__cless-run-root missing capture directory");
+            return ExitCode::from(crate::diag::exit::USAGE);
         }
         Ok(Some(directory)) => {
             if crate::cli::set_forwarded_capture_directory(directory).is_err() {
-                eprintln!("mirvm capture: __cless-run-root received duplicate capture request");
-                return ExitCode::from(2);
+                crate::diag_error!(
+                    Capture,
+                    "__cless-run-root received duplicate capture request"
+                );
+                return ExitCode::from(crate::diag::exit::USAGE);
             }
         }
         Ok(None) => {}
@@ -289,42 +297,35 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
     ) {
         Ok(router) => router,
         Err(error) => {
-            crate::cli::diagnostics::control(format_args!(
-                "mirvm capture: cannot start diagnostics stream: {error}"
-            ));
-            return ExitCode::from(70);
+            crate::diag_error!(Capture, "cannot start diagnostics stream: {error}");
+            return ExitCode::from(crate::diag::exit::SOFTWARE);
         }
     };
     let Some(path) = argv.next() else {
-        crate::cli::diagnostics::control(format_args!(
-            "mirvm: __cless-run-root missing recipe path"
-        ));
-        return ExitCode::from(2);
+        crate::diag_error!(Test, "__cless-run-root missing recipe path");
+        return ExitCode::from(crate::diag::exit::USAGE);
     };
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::cli::diagnostics::control(format_args!(
-                "mirvm: failed to read test recipe {path}: {e}"
-            ));
-            return ExitCode::from(1);
+            crate::diag_error!(Test, "failed to read test recipe {path}: {e}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     };
     let recipe: RootRunRecipe = match serde_json::from_slice(&data) {
         Ok(r) => r,
         Err(e) => {
-            crate::cli::diagnostics::control(format_args!(
-                "mirvm: test recipe {path} corrupted: {e}"
-            ));
-            return ExitCode::from(1);
+            crate::diag_error!(Test, "test recipe {path} corrupted: {e}");
+            return ExitCode::from(crate::diag::exit::FAILURE);
         }
     };
     if let Err(e) = std::env::set_current_dir(&recipe.cwd) {
-        crate::cli::diagnostics::control(format_args!(
-            "mirvm: test working directory {} is not accessible: {e}",
+        crate::diag_error!(
+            Test,
+            "test working directory {} is not accessible: {e}",
             recipe.cwd.display()
-        ));
-        return ExitCode::from(1);
+        );
+        return ExitCode::from(crate::diag::exit::FAILURE);
     }
     for (key, value) in recipe.env {
         // SAFETY: independent child startup phase; rustc/guest threads have not been created.
@@ -361,18 +362,19 @@ fn script_manifest(file: &Path) -> PackageManifest {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("mirvm: failed to read script {}: {e}", file.display());
-            std::process::exit(1);
+            crate::diag_error!(Build, "failed to read script {}: {e}", file.display());
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     let Some((manifest_text, body)) = crate::cli::parse_frontmatter_pub(&text) else {
         // The router (cli.rs run_main) only enters here when frontmatter is present; a bare single
         // file is the single-file fast path and never reaches this.
-        eprintln!(
-            "mirvm: {} has no frontmatter (internal routing error)",
+        crate::diag_error!(
+            Build,
+            "{} has no frontmatter (internal routing error)",
             file.display()
         );
-        std::process::exit(2);
+        std::process::exit(crate::diag::exit::USAGE.into());
     };
     let stem = file
         .file_stem()
@@ -381,11 +383,12 @@ fn script_manifest(file: &Path) -> PackageManifest {
     let cache = crate::cli::script_cache_dir(file);
     let src_dir = cache.join("src");
     if let Err(e) = std::fs::create_dir_all(&src_dir) {
-        eprintln!(
-            "mirvm: failed to create script cache directory {}: {e}",
+        crate::diag_error!(
+            Build,
+            "failed to create script cache directory {}: {e}",
             src_dir.display()
         );
-        std::process::exit(1);
+        std::process::exit(crate::diag::exit::FAILURE.into());
     }
     // Layout is isomorphic to cargo-leg materialized projects (cli.rs materialize_script: body in
     // <cache>/src/main.rs) — after file!()/panic Location remap it is byte-identical to the cargo leg's
@@ -399,17 +402,18 @@ fn script_manifest(file: &Path) -> PackageManifest {
         .is_none_or(|old| old != body.as_bytes())
         && let Err(e) = std::fs::write(&main_rs, &body)
     {
-        eprintln!("mirvm: write {} failed: {e}", main_rs.display());
-        std::process::exit(1);
+        crate::diag_error!(Build, "write {} failed: {e}", main_rs.display());
+        std::process::exit(crate::diag::exit::FAILURE.into());
     }
     match PackageManifest::from_frontmatter_at(stem, &manifest_text, &cache, &main_rs) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!(
-                "mirvm: failed to parse frontmatter of {}: {e}",
+            crate::diag_error!(
+                Build,
+                "failed to parse frontmatter of {}: {e}",
                 file.display()
             );
-            std::process::exit(1);
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     }
 }
@@ -424,31 +428,31 @@ fn drive(
     let mut registry = match Registry::open_for(&manifest.lock_root) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("mirvm: failed to open registry: {e}");
-            std::process::exit(1);
+            crate::diag_error!(Build, "failed to open registry: {e}");
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     let plan = match resolve(manifest, &mut registry) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("mirvm: dependency resolution failed: {e}");
-            std::process::exit(1);
+            crate::diag_error!(Build, "dependency resolution failed: {e}");
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     let lock_path = manifest.lock_root.join("Cargo.lock");
     if !lock_path.is_file()
         && let Err(error) = write_lock_atomic(&lock_path, &plan.lock)
     {
-        eprintln!("mirvm: write {} failed: {error}", lock_path.display());
-        std::process::exit(1);
+        crate::diag_error!(Build, "write {} failed: {error}", lock_path.display());
+        std::process::exit(crate::diag::exit::FAILURE.into());
     }
 
     // 2. links mutex (same as cargo: at most one package per links value; root package also checked)
     if let Err(e) =
         buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
     {
-        eprintln!("mirvm: {e}");
-        std::process::exit(1);
+        crate::diag_error!(Build, "{e}");
+        std::process::exit(crate::diag::exit::FAILURE.into());
     }
 
     // 3. sysroot: the option takes priority, otherwise self-built (same measure as the CLI run path)
@@ -457,8 +461,8 @@ fn drive(
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("mirvm: failed to build sysroot: {e}");
-                std::process::exit(1);
+                crate::diag_error!(Build, "failed to build sysroot: {e}");
+                std::process::exit(crate::diag::exit::FAILURE.into());
             }
         },
     };
@@ -477,8 +481,8 @@ fn drive(
     let rustflags = match super::rustflags::from_env_and_disk(&manifest.root) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("mirvm: failed to parse rustflags: {e}");
-            std::process::exit(1);
+            crate::diag_error!(Build, "failed to parse rustflags: {e}");
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     let compiled = match compile_plan(
@@ -495,8 +499,8 @@ fn drive(
         Ok(t) => t,
         // first compile error (worker returns original text) — exit after loudly naming, same shape as serial
         Err(e) => {
-            eprintln!("mirvm: {e}");
-            std::process::exit(1);
+            crate::diag_error!(Build, "{e}");
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     let UnitTables { outputs, re_ran } = compiled.tables;
@@ -530,8 +534,8 @@ fn drive(
         ) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("mirvm: root package fingerprint computation failed: {e}");
-                std::process::exit(1);
+                crate::diag_error!(Build, "root package fingerprint computation failed: {e}");
+                std::process::exit(crate::diag::exit::FAILURE.into());
             }
         };
         root_fp = Some(fp);
@@ -551,11 +555,12 @@ fn drive(
         if *lib_pm {
             // proc-macro root lib + bin combination (cargo compiles dylib then --extern) not wired in v1
             // — loudly reject and record, do not silently miscompile
-            eprintln!(
-                "mirvm: root package {} is a proc-macro lib and has a bin, combination not wired (P5 boundary)",
+            crate::diag_error!(
+                Build,
+                "root package {} is a proc-macro lib and has a bin, combination not wired (P5 boundary)",
                 manifest.name
             );
-            std::process::exit(1);
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
         let fp = root_fp
             .as_ref()
@@ -597,19 +602,23 @@ fn drive(
             let status = match cmd.status() {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!(
-                        "mirvm: lib compilation child process failed to start (root package {} {}): {e}",
-                        manifest.name, manifest.version
+                    crate::diag_error!(
+                        Build,
+                        "lib compilation child process failed to start (root package {} {}): {e}",
+                        manifest.name,
+                        manifest.version
                     );
-                    std::process::exit(1);
+                    std::process::exit(crate::diag::exit::FAILURE.into());
                 }
             };
             if !status.success() {
-                eprintln!(
-                    "mirvm: lib compilation failed: root package {} {}",
-                    manifest.name, manifest.version
+                crate::diag_error!(
+                    Build,
+                    "lib compilation failed: root package {} {}",
+                    manifest.name,
+                    manifest.version
                 );
-                std::process::exit(1);
+                std::process::exit(crate::diag::exit::FAILURE.into());
             }
         }
     }
@@ -618,8 +627,8 @@ fn drive(
     let (bin_name, bin_path) = match manifest.runnable_bin_opt(bin_sel) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("mirvm: {e}");
-            std::process::exit(1);
+            crate::diag_error!(Build, "{e}");
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
     // SAFETY: single-threaded startup phase (rustc session not started, engine not running), env writes have no concurrent readers.
@@ -715,7 +724,10 @@ fn install_unit_table(plan: &ResolvePlan, fps: &[String], layout: &Layout) {
         .collect();
     if !units.is_empty() {
         if crate::options::a2_debug() {
-            eprintln!("[a2-debug] unit table: {} target units", units.len());
+            crate::diag::instrument(format_args!(
+                "[a2-debug] unit table: {} target units",
+                units.len()
+            ));
         }
         crate::image::units::install(crate::image::units::UnitTable::new(units));
     }

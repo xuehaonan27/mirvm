@@ -171,7 +171,7 @@ pub(super) fn cache_main(
             // record is live exactly when a current-generation manifest names it.
             let live = crate::image::collect::live(&root);
             let report = crate::store::report::status(&root, Some(&live));
-            print!("{}", if json { report.json() } else { report.text() });
+            crate::out::text(if json { report.json() } else { report.text() });
             Ok(ExitCode::SUCCESS)
         }
         Some("purge") => {
@@ -207,7 +207,7 @@ pub(super) fn cache_main(
                     ));
                 }
             };
-            print!("{}", if json { report.json() } else { report.text() });
+            crate::out::text(if json { report.json() } else { report.text() });
             Ok(ExitCode::SUCCESS)
         }
         _ => Err(crate::error::Error::usage_with(
@@ -315,7 +315,7 @@ pub(super) fn deps_main(
                 if let Some(acc) = &report.acceptance
                     && let Err(diag) = acc
                 {
-                    fail = Some(diag.clone());
+                    fail = Some(diag.to_string());
                 }
                 if fail.is_none() {
                     if let Some((lock_desc, found)) = &report.lock_check {
@@ -350,13 +350,13 @@ pub(super) fn deps_main(
             }
             Err(e) => {
                 // P5 loud rejections are an upfront-stated boundary and not ordinary resolution failures.
-                if e.contains("P5") {
+                if e.to_string().contains("P5") {
                     AuditRow {
                         verdict: Verdict::Boundary,
                         target: t.clone(),
                         head: String::new(),
                         notes: Vec::new(),
-                        detail: Some(e),
+                        detail: Some(e.to_string()),
                         mismatches: Vec::new(),
                     }
                 } else {
@@ -366,7 +366,7 @@ pub(super) fn deps_main(
                         target: t.clone(),
                         head: String::new(),
                         notes: Vec::new(),
-                        detail: Some(e),
+                        detail: Some(e.to_string()),
                         mismatches: Vec::new(),
                     }
                 }
@@ -374,14 +374,11 @@ pub(super) fn deps_main(
         };
         summary.rows.push(row);
     }
-    print!(
-        "{}",
-        if json_output {
-            summary.json()
-        } else {
-            summary.text()
-        }
-    );
+    crate::out::text(if json_output {
+        summary.json()
+    } else {
+        summary.text()
+    });
     if summary.failures == 0 {
         Ok(ExitCode::SUCCESS)
     } else {

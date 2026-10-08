@@ -261,19 +261,23 @@ impl Entry {
     }
 
     /// The entry's bytes: one version byte, then the canonical form.
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, crate::error::Error> {
         let mut bytes = vec![VERSION];
-        bytes.extend_from_slice(&postcard::to_stdvec(self).map_err(|e| e.to_string())?);
+        bytes.extend_from_slice(
+            &postcard::to_stdvec(self).map_err(|e| crate::fail!(Jit, e.to_string()))?,
+        );
         Ok(bytes)
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Entry, String> {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Entry, crate::error::Error> {
         match bytes.split_first() {
-            Some((&VERSION, rest)) => {
-                postcard::from_bytes(rest).map_err(|e| format!("entry decode failed: {e}"))
-            }
-            Some((&other, _)) => Err(format!("entry encoding version {other} is not {VERSION}")),
-            None => Err("entry is empty".into()),
+            Some((&VERSION, rest)) => postcard::from_bytes(rest)
+                .map_err(|e| crate::fail!(Jit, format!("entry decode failed: {e}"))),
+            Some((&other, _)) => Err(crate::fail!(
+                Jit,
+                format!("entry encoding version {other} is not {VERSION}")
+            )),
+            None => Err(crate::fail!(Jit, "entry is empty")),
         }
     }
 }
@@ -318,10 +322,10 @@ pub(crate) fn capture(input: Captured<'_>) -> Option<Symbol> {
                 if crate::options::jit_debug_dump() {
                     // A dump payload, not a diagnostic: `MIRVM_JIT_DEBUG_DUMP` owns the exact shape
                     // and the general verbosity threshold must not silently drop it.
-                    eprintln!(
+                    crate::diag::instrument(format_args!(
                         "mirvm-jit-debug: {name} carries reloc {:?}, which this engine does not apply",
                         reloc.kind
-                    );
+                    ));
                 }
                 return None;
             }
@@ -420,25 +424,28 @@ pub(crate) fn link(
     entry: &Entry,
     roles: &[JitSymbolRole],
     mut resolve: impl FnMut(&Target) -> Option<u64>,
-) -> Result<Linked, String> {
+) -> Result<Linked, crate::error::Error> {
     let wanted: Vec<&Symbol> = roles
         .iter()
         .filter_map(|role| entry.symbol(*role))
         .collect();
     if wanted.len() != roles.len() {
-        return Err("entry does not hold every requested symbol".into());
+        return Err(crate::fail!(
+            Jit,
+            "entry does not hold every requested symbol"
+        ));
     }
     // One region, symbols laid out in request order: an intra-entry reference is then a fixed offset
     // from the region's base, and the entry addresses all come from one mapping.
     let total: usize = wanted.iter().map(|symbol| symbol.code.len()).sum();
     if total == 0 {
-        return Err("entry holds no code".into());
+        return Err(crate::fail!(Jit, "entry holds no code"));
     }
     let page = crate::os::mem::page_size();
     let len = total.next_multiple_of(page);
     let base = crate::os::mem::map_anon(len, crate::os::mem::Prot::RW, false);
     if base.is_null() {
-        return Err(format!("cannot map {len} bytes of code"));
+        return Err(crate::fail!(Jit, format!("cannot map {len} bytes of code")));
     }
     let mut placed: Vec<(JitSymbolRole, &Symbol, u64)> = Vec::new();
     let mut offset = 0u64;
@@ -463,27 +470,28 @@ pub(crate) fn link(
                     .find(|(_, own, _)| own.name.as_ref() == name.as_ref())
                     .map(|(_, _, addr)| *addr)
                     .or_else(|| resolve(&reloc.target))
-                    .ok_or_else(|| format!("unresolved symbol `{name}`"))?,
+                    .ok_or_else(|| crate::fail!(Jit, format!("unresolved symbol `{name}`")))?,
                 // Everything else is a reference of the fragment, an interior of the body it belongs
                 // to, or this entry's own id: the caller answers those from the body it links for.
-                _ => {
-                    resolve(&reloc.target).ok_or_else(|| format!("unresolved target {reloc:?}"))?
-                }
+                _ => resolve(&reloc.target)
+                    .ok_or_else(|| crate::fail!(Jit, format!("unresolved target {reloc:?}")))?,
             };
             let what = (value as i64).wrapping_add(reloc.addend) as u64;
             let at = *at + u64::from(reloc.offset);
             unsafe {
                 match reloc.kind {
                     Kind::Abs32 => {
-                        let value = u32::try_from(what)
-                            .map_err(|_| format!("{what:#x} does not fit an Abs32 field"))?;
+                        let value = u32::try_from(what).map_err(|_| {
+                            crate::fail!(Jit, format!("{what:#x} does not fit an Abs32 field"))
+                        })?;
                         std::ptr::write_unaligned(at as *mut u32, value);
                     }
                     Kind::Abs64 => std::ptr::write_unaligned(at as *mut u64, what),
                     Kind::PcRel32 => {
                         let delta = (what as i64).wrapping_sub(at as i64);
-                        let value = i32::try_from(delta)
-                            .map_err(|_| format!("{delta} does not fit a PcRel32 field"))?;
+                        let value = i32::try_from(delta).map_err(|_| {
+                            crate::fail!(Jit, format!("{delta} does not fit a PcRel32 field"))
+                        })?;
                         std::ptr::write_unaligned(at as *mut i32, value);
                     }
                 }
@@ -492,7 +500,7 @@ pub(crate) fn link(
     }
     // W^X: the region is only executable once every value is in place.
     crate::os::mem::protect(base, len, crate::os::mem::Prot::RX)
-        .map_err(|error| format!("cannot protect linked code: {error}"))?;
+        .map_err(|error| crate::fail!(Jit, format!("cannot protect linked code: {error}")))?;
     Ok(Linked {
         base,
         len,

@@ -43,26 +43,46 @@ impl<'a> Symbols<'a> {
         image: &Image<'a>,
         tables: &Tables,
         dynamic: &Dynamic,
-    ) -> Result<Self, String> {
-        let symtab = tables.symtab.ok_or("MC image lacks .symtab")?;
-        let strtab = tables.strtab.ok_or("MC image lacks .strtab")?;
-        let dynsym = tables.dynsym.ok_or("MC image lacks .dynsym")?;
-        let dynstr = image.section_at(dynsym.link as usize).ok_or_else(bad)?;
+    ) -> Result<Self, crate::error::Error> {
+        let symtab = tables
+            .symtab
+            .ok_or(crate::fail!(Native, "MC image lacks .symtab"))?;
+        let strtab = tables
+            .strtab
+            .ok_or(crate::fail!(Native, "MC image lacks .strtab"))?;
+        let dynsym = tables
+            .dynsym
+            .ok_or(crate::fail!(Native, "MC image lacks .dynsym"))?;
+        let dynstr = image
+            .section_at(dynsym.link as usize)
+            .ok_or_else(bad)
+            .map_err(|e| crate::fail!(Native, e))?;
         if dynstr.ty != elf::SHT_STRTAB {
-            return Err("MC .dynsym does not link to a string table".into());
+            return Err(crate::fail!(
+                Native,
+                "MC .dynsym does not link to a string table"
+            ));
         }
         if dynamic.syment != Some(elf::SYM_ENTRY_SIZE as u64)
             || dynsym.entsize != elf::SYM_ENTRY_SIZE as u64
         {
-            return Err("MC DT_SYMENT/.dynsym entry size is not 24".into());
+            return Err(crate::fail!(
+                Native,
+                "MC DT_SYMENT/.dynsym entry size is not 24"
+            ));
         }
         if dynamic.symtab != Some(dynsym.addr) || dynamic.strtab != Some(dynstr.addr) {
-            return Err(
-                "MC dynamic symbol/string table tags disagree with section metadata".into(),
-            );
+            return Err(crate::fail!(
+                Native,
+                "MC dynamic symbol/string table tags disagree with section metadata"
+            ));
         }
-        let dynsym_entry = usize::try_from(dynsym.entsize).map_err(|_| bad())?;
-        let dynsym_count = usize::try_from(dynsym.size / dynsym.entsize).map_err(|_| bad())?;
+        let dynsym_entry = usize::try_from(dynsym.entsize)
+            .map_err(|_| bad())
+            .map_err(|e| crate::fail!(Native, e))?;
+        let dynsym_count = usize::try_from(dynsym.size / dynsym.entsize)
+            .map_err(|_| bad())
+            .map_err(|e| crate::fail!(Native, e))?;
         Ok(Self {
             bytes: image.bytes,
             symtab,
@@ -78,12 +98,15 @@ impl<'a> Symbols<'a> {
     /// resolve both turn into a real one by adding the load bias. The runtime-bridge slots are
     /// kept whatever their binding: the Engine writes them after load as part of the per-Engine
     /// startup protocol, so a linker that localized them must not hide them.
-    pub(super) fn registration_map(&self) -> Result<HashMap<Box<str>, u64>, String> {
+    pub(super) fn registration_map(&self) -> Result<HashMap<Box<str>, u64>, crate::error::Error> {
         let entry_size = self.symtab.entsize.max(elf::SYM_ENTRY_SIZE as u64) as usize;
         let count = (self.symtab.size as usize) / entry_size;
         let mut symbols = HashMap::new();
         for index in 0..count {
-            let symbol = self.static_symbol(index, entry_size).ok_or_else(bad)?;
+            let symbol = self
+                .static_symbol(index, entry_size)
+                .ok_or_else(bad)
+                .map_err(|e| crate::fail!(Native, e))?;
             let bind = elf::sym_bind(symbol.info);
             if symbol.name == 0
                 || symbol.shndx == elf::SHN_UNDEF
@@ -123,19 +146,19 @@ impl<'a> Symbols<'a> {
     }
 
     /// The NUL-terminated name at `offset` in the string table `.dynsym` links to.
-    pub(super) fn dynamic_name(&self, offset: u32) -> Result<String, String> {
+    pub(super) fn dynamic_name(&self, offset: u32) -> Result<String, crate::error::Error> {
         let start = (self.dynstr.offset + u64::from(offset)) as usize;
         let limit = (self.dynstr.offset + self.dynstr.size) as usize;
         let end = self
             .bytes
             .get(start..limit.min(self.bytes.len()))
-            .ok_or("MC image dynstr is out of bounds")?
+            .ok_or(crate::fail!(Native, "MC image dynstr is out of bounds"))?
             .iter()
             .position(|&c| c == 0)
             .map(|position| start + position)
-            .ok_or("MC image dynstr is out of bounds")?;
+            .ok_or(crate::fail!(Native, "MC image dynstr is out of bounds"))?;
         Ok(std::str::from_utf8(&self.bytes[start..end])
-            .map_err(|_| "MC image dynamic symbol name is not UTF-8")?
+            .map_err(|_| crate::fail!(Native, "MC image dynamic symbol name is not UTF-8"))?
             .to_string())
     }
 
@@ -150,19 +173,19 @@ impl<'a> Symbols<'a> {
     }
 
     /// The NUL-terminated name at `offset` in `.strtab`.
-    fn static_name(&self, offset: u32) -> Result<String, String> {
+    fn static_name(&self, offset: u32) -> Result<String, crate::error::Error> {
         let start = (self.strtab.offset + u64::from(offset)) as usize;
         let limit = (self.strtab.offset + self.strtab.size) as usize;
         let end = self
             .bytes
             .get(start..limit.min(self.bytes.len()))
-            .ok_or("MC image strtab out of bounds")?
+            .ok_or(crate::fail!(Native, "MC image strtab out of bounds"))?
             .iter()
             .position(|&c| c == 0)
             .map(|position| start + position)
-            .ok_or("MC image strtab out of bounds")?;
+            .ok_or(crate::fail!(Native, "MC image strtab out of bounds"))?;
         Ok(std::str::from_utf8(&self.bytes[start..end])
-            .map_err(|_| "MC image symbol name is not UTF-8")?
+            .map_err(|_| crate::fail!(Native, "MC image symbol name is not UTF-8"))?
             .to_string())
     }
 }

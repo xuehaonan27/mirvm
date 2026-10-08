@@ -130,11 +130,12 @@ pub(super) fn write_fake_outputs(rustc: &Path, args: &[String], info: &CrateRunI
     for f in out_files {
         let info_path = fake_info_path(&f);
         std::fs::write(&info_path, &json).unwrap_or_else(|e| {
-            eprintln!(
-                "mirvm: failed to write the fake binary recipe {}: {e}",
+            crate::diag_error!(
+                Runner,
+                "failed to write the fake binary recipe {}: {e}",
                 info_path.display()
             );
-            exit(1);
+            exit(crate::diag::exit::FAILURE.into());
         });
         let self_exe = std::env::current_exe().expect("current_exe failed");
         let quote =
@@ -146,18 +147,20 @@ pub(super) fn write_fake_outputs(rustc: &Path, args: &[String], info: &CrateRunI
             quote(&f)
         );
         std::fs::write(&f, script).unwrap_or_else(|e| {
-            eprintln!(
-                "mirvm: failed to write the fake binary launcher {}: {e}",
+            crate::diag_error!(
+                Runner,
+                "failed to write the fake binary launcher {}: {e}",
                 f.display()
             );
-            exit(1);
+            exit(crate::diag::exit::FAILURE.into());
         });
         crate::os::fs::set_mode(&f, 0o755).unwrap_or_else(|e| {
-            eprintln!(
-                "mirvm: failed to set fake binary permissions {}: {e}",
+            crate::diag_error!(
+                Runner,
+                "failed to set fake binary permissions {}: {e}",
                 f.display()
             );
-            exit(1);
+            exit(crate::diag::exit::FAILURE.into());
         });
     }
 }
@@ -192,24 +195,21 @@ pub fn parse_runner_invocation(
     mut argv: impl Iterator<Item = String>,
 ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let fake_bin = argv.next().unwrap_or_else(|| {
-        crate::cli::diagnostics::control(format_args!(
-            "mirvm runner: missing binary path argument"
-        ));
-        exit(2);
+        crate::diag_error!(Runner, "missing binary path argument");
+        exit(crate::diag::exit::USAGE.into());
     });
     let program_args: Vec<String> = argv.collect();
 
     let data = read_fake_info(Path::new(&fake_bin)).unwrap_or_else(|e| {
-        crate::cli::diagnostics::control(format_args!(
-            "mirvm runner: failed to read {fake_bin}: {e}"
-        ));
-        exit(1);
+        crate::diag_error!(Runner, "failed to read {fake_bin}: {e}");
+        exit(crate::diag::exit::FAILURE.into());
     });
     let info: CrateRunInfo = serde_json::from_str(&data).unwrap_or_else(|_| {
-        crate::cli::diagnostics::control(format_args!(
-            "mirvm runner: {fake_bin} is not a mirvm fake binary (try deleting target/mirvm and rerunning)"
-        ));
-        exit(1);
+        crate::diag_error!(
+            Runner,
+            "{fake_bin} is not a mirvm fake binary (try deleting target/mirvm and rerunning)"
+        );
+        exit(crate::diag::exit::FAILURE.into());
     });
 
     // Assemble the interpreting session's arguments: argv[0] placeholder + cargo's original
@@ -227,10 +227,11 @@ pub fn parse_runner_invocation(
             })
         })
         .unwrap_or_else(|| {
-            crate::cli::diagnostics::control(format_args!(
-                "mirvm runner: the launcher recipe lacks MIRVM_SYSROOT (clean the matching target and rebuild)"
-            ));
-            exit(1);
+            crate::diag_error!(
+                Runner,
+                "the launcher recipe lacks MIRVM_SYSROOT (clean the matching target and rebuild)"
+            );
+            exit(crate::diag::exit::FAILURE.into());
         });
     let mut rustc_args = vec!["mirvm".to_string()];
     let mut it = info.args.iter().peekable();

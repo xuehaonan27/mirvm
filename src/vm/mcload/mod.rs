@@ -60,7 +60,7 @@ pub fn resolve(images: &[McImage], name: &str) -> Option<usize> {
 }
 
 /// Load an ELF64 DYN image (raw bytes of a self-produced global_asm/dep_asm family .so).
-pub fn load(bytes: &[u8]) -> Result<McImage, String> {
+pub fn load(bytes: &[u8]) -> Result<McImage, crate::error::Error> {
     let image = parse::Image::parse(bytes)?;
     let mapping = map::Mapping::map(bytes, &image)?;
     let names = image.section_names()?;
@@ -281,7 +281,7 @@ target_value:
         );
         let error = load(&no_section_names).unwrap_err();
         assert!(
-            error.starts_with("MC image lacks "),
+            error.to_string().starts_with("MC image lacks "),
             "a nameless section table must fail as an unsupported image, got: {error}"
         );
 
@@ -296,7 +296,7 @@ target_value:
             u64::MAX / 2,
         );
         let error = load(&bad_symbol_names).unwrap_err();
-        assert_eq!(error, "MC image strtab out of bounds");
+        assert_eq!(error.to_string(), "MC image strtab out of bounds");
     }
 
     #[test]

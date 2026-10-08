@@ -49,13 +49,25 @@ extern "C" fn cleanup(_: i32, exception: *mut RawException) {
 
     match payload {
         StoredPayload::GuestPanic { .. } => {
-            eprintln!("mirvm[m4-engine]: guest panic was caught but not rethrown")
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "guest panic was caught but not rethrown"
+            );
         }
         StoredPayload::EngineFault { .. } => {
-            eprintln!("mirvm[m4-engine]: EngineFault was caught but not consumed by its owner")
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "EngineFault was caught but not consumed by its owner"
+            );
         }
         StoredPayload::EngineClosed => {
-            eprintln!("mirvm[m4-engine]: EngineClosed was caught but not consumed")
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "EngineClosed was caught but not consumed"
+            );
         }
         StoredPayload::Empty => unreachable!(),
     }
@@ -82,18 +94,30 @@ fn raise_payload(
     });
     let exception = Box::into_raw(exception);
     let reason = unsafe { crate::os::unwind::raise(&raw mut (*exception).header) };
-    eprintln!("mirvm[m4-engine]: {description} reached the end of the host stack ({reason})");
+    crate::diag_direct_at!(
+        crate::diag::Severity::Error,
+        Engine,
+        "{description} reached the end of the host stack ({reason})"
+    );
     std::process::abort()
 }
 
 pub fn raise_guest(shared: Arc<super::ctx::Shared>, inner: u64) -> ! {
     if inner == 0 {
-        eprintln!("mirvm[m4-engine]: attempted to raise a null guest panic exception");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "attempted to raise a null guest panic exception"
+        );
         std::process::abort();
     }
     let control = Arc::clone(shared.control());
     let hold = super::deferred::DeferredHold::acquire(&control, true).unwrap_or_else(|_| {
-        eprintln!("mirvm[m4-engine]: guest panic was raised after its Engine began finalizing");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "guest panic was raised after its Engine began finalizing"
+        );
         std::process::abort()
     });
     raise_payload(
@@ -108,7 +132,11 @@ pub(crate) fn raise_engine_fault(ctx: *mut super::ctx::Ctx, message: String, cod
     let (shared, token) = super::ctx::begin_engine_fault(ctx);
     let control = Arc::clone(shared.control());
     let hold = super::deferred::DeferredHold::acquire(&control, true).unwrap_or_else(|_| {
-        eprintln!("mirvm[m4-engine]: EngineFault was raised after its Engine began finalizing");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault was raised after its Engine began finalizing"
+        );
         std::process::abort()
     });
     raise_payload(
@@ -250,7 +278,11 @@ impl CaughtException {
             })),
             StoredPayload::EngineClosed => Ok(MirvmPayload::EngineClosed),
             StoredPayload::Empty => {
-                eprintln!("mirvm[m4-engine]: MIRVM exception payload was consumed twice");
+                crate::diag_direct_at!(
+                    crate::diag::Severity::Error,
+                    Engine,
+                    "MIRVM exception payload was consumed twice"
+                );
                 std::process::abort()
             }
         }
@@ -382,7 +414,11 @@ impl CaughtException {
     /// newly caught exception must not run its normal "swallowed" cleanup.
     pub(crate) fn abort_during_panic_cleanup(self) -> ! {
         std::mem::forget(self);
-        eprintln!("mirvm[m4-engine]: drop of the panic payload panicked");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "drop of the panic payload panicked"
+        );
         std::process::abort()
     }
 
@@ -391,7 +427,11 @@ impl CaughtException {
         // In particular, resuming an EngineFault would strand the lifecycle in
         // Closing after `finalizer_started` was already published.
         std::mem::forget(self);
-        eprintln!("mirvm[m4-engine]: native finalizer unwound during Engine teardown");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "native finalizer unwound during Engine teardown"
+        );
         std::process::abort()
     }
 
@@ -399,7 +439,11 @@ impl CaughtException {
         let raw = self.raw.as_ptr();
         std::mem::forget(self);
         unsafe { crate::os::unwind::delete(raw) };
-        eprintln!("Rust cannot catch foreign exceptions, aborting");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "Rust cannot catch foreign exceptions, aborting"
+        );
         std::process::abort()
     }
 }
@@ -446,7 +490,11 @@ pub(crate) fn guard_native_teardown<R>(f: impl FnOnce() -> R) -> R {
 
 impl Drop for CaughtException {
     fn drop(&mut self) {
-        eprintln!("mirvm[m4-engine]: caught exception was dropped without a disposition");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "caught exception was dropped without a disposition"
+        );
         std::process::abort()
     }
 }
@@ -502,7 +550,11 @@ impl Drop for GuestPanicPayload {
         if self.inner == 0 {
             return;
         }
-        eprintln!("mirvm[m4-engine]: guest panic payload was dropped without a disposition");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "guest panic payload was dropped without a disposition"
+        );
         std::process::abort()
     }
 }
@@ -514,7 +566,11 @@ impl Drop for GuestPanicPayload {
 pub(crate) fn dispose_uncaught_guest_panic(ctx: *mut super::ctx::Ctx, payload: GuestPanicPayload) {
     payload.transfer(|shared, inner| {
         let Some(plan) = shared.module.guest_panic_cleanup else {
-            eprintln!("mirvm[m4-engine]: executable Module has no guest panic cleanup plan");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "executable Module has no guest panic cleanup plan"
+            );
             std::process::abort()
         };
         match catch_raw(|| {
@@ -579,7 +635,11 @@ impl Drop for EngineFaultPayload {
         if self.handled {
             return;
         }
-        eprintln!("mirvm[m4-engine]: EngineFault payload was dropped without owner handling");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "EngineFault payload was dropped without owner handling"
+        );
         std::process::abort()
     }
 }

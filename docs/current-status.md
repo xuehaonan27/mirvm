@@ -115,17 +115,17 @@ Measured on this tree against the Linux x86_64 release build, with the cases tha
 `the proxy helper` ([environment.md](environment.md)); `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 505 pass, 0 fail, 1 ignored. The suite gives each case a
-  thread, so on a loaded shared host a timing-sensitive case can fail without a defect: one run here
-  failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` and
-  `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread`, and both pass repeatedly in
-  isolation (E48).
+- `cargo test --locked --all-features`: 497 pass, 2 fail, 1 ignored. The suite gives each case a
+  thread, so on a loaded shared host a timing-sensitive case can fail without a defect: the run behind
+  these numbers failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` and
+  `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread` at a load average near 60, and
+  both pass repeatedly in isolation (E48).
 - `make test` (the fast tier, 77 cases): 73 pass / 4 fail.
 - `make smoke` (fast + smoke, 123 cases): 116 pass / 7 fail; which rayon-family and `cargo-diff` rows
   fail moves between runs, because one is wall-clock (E47) and the other depends on whether a project
   directory was materialized (G2), so an earlier run measured 112 pass / 8 fail.
 - `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
-  which is `repo-quality`'s 13 source checks.
+  which is `repo-quality`'s 17 source checks.
 - Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
 - Timing gates: `load` 155ms against its 1000ms ceiling; `fib32` RED (E40).
 
@@ -231,8 +231,10 @@ product covering all of Rust.
    go through `src/diag`, which renders `mirvm[component]: severity: message` (one JSON object per
    line under `MIRVM_OUTPUT=json`) and owns the two sinks: routed (fd2 plus the capture tee) and
    direct (fd2 alone, for signal-adjacent and teardown paths where the tee lock would deadlock). Guest
-   fd1/fd2, the rustc emitter's own rendering and the cargo-compatibility lines never pass through it.
-   Remaining conversions are T13.
+   fd1/fd2, the rustc emitter's own rendering and the cargo-compatibility lines never pass through it;
+   `src/out.rs` is the one writer of product output, and the `MIRVM_*_DEBUG` instruments are the other
+   raw channel. Every fallible signature names `crate::error::Error`, and the four source checks that
+   keep a second spelling out live in `repo-quality` ([output-grammar.md](designs/output-grammar.md)).
 6. **Product capability.** Direct archive semantic verification needs a new offset-based read-only
    representation before a format freeze can be reviewed. OS-level sandboxing is deliberately paused.
    Remaining stage boundaries and acceptance criteria are in `open-issues.md`.

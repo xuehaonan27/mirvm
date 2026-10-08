@@ -43,11 +43,11 @@ pub(crate) struct InitializerArgs {
 }
 
 impl InitializerArgs {
-    pub(crate) fn capture() -> Result<Self, String> {
+    pub(crate) fn capture() -> Result<Self, crate::error::Error> {
         let argv_storage = std::env::args_os()
             .map(|value| {
                 CString::new(crate::os::fs::raw_bytes(value.as_os_str()))
-                    .map_err(|_| "process argument contains NUL".to_string())
+                    .map_err(|_| crate::fail!(Engine, "process argument contains NUL".to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let env_storage = std::env::vars_os()
@@ -55,7 +55,9 @@ impl InitializerArgs {
                 let mut bytes = crate::os::fs::raw_bytes(key.as_os_str()).to_vec();
                 bytes.push(b'=');
                 bytes.extend_from_slice(crate::os::fs::raw_bytes(value.as_os_str()));
-                CString::new(bytes).map_err(|_| "process environment contains NUL".to_string())
+                CString::new(bytes).map_err(|_| {
+                    crate::fail!(Engine, "process environment contains NUL".to_string())
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut argv = argv_storage
@@ -137,7 +139,7 @@ impl NativeLifecycle {
 pub(crate) fn executable_ranges(
     layout: &Layout,
     bias: usize,
-) -> Result<Box<[(usize, usize)]>, String> {
+) -> Result<Box<[(usize, usize)]>, crate::error::Error> {
     layout
         .executable_loads
         .iter()
@@ -146,7 +148,7 @@ pub(crate) fn executable_ranges(
             let end = add_bias(bias, end, "executable load")?;
             Ok((start, end))
         })
-        .collect::<Result<Vec<_>, String>>()
+        .collect::<Result<Vec<_>, crate::error::Error>>()
         .map(Vec::into_boxed_slice)
 }
 
@@ -154,7 +156,10 @@ pub(crate) fn executable_ranges(
 ///
 /// A destructor list runs in reverse, which the loader's own order is: the object declared them in
 /// construction order and teardown unwinds it.
-pub(crate) fn materialize(layout: Layout, bias: usize) -> Result<NativeLifecycle, String> {
+pub(crate) fn materialize(
+    layout: Layout,
+    bias: usize,
+) -> Result<NativeLifecycle, crate::error::Error> {
     let mut initializers = Vec::new();
     if let Some(init) = layout.init {
         initializers.push(add_bias(bias, init, "the singular constructor")?);
@@ -189,11 +194,12 @@ pub(crate) fn materialize(layout: Layout, bias: usize) -> Result<NativeLifecycle
     Ok(NativeLifecycle::new(initializers, finalizers))
 }
 
-fn add_bias(bias: usize, value: u64, what: &str) -> Result<usize, String> {
+fn add_bias(bias: usize, value: u64, what: &str) -> Result<usize, crate::error::Error> {
     bias.checked_add(
-        usize::try_from(value).map_err(|_| format!("{what} address does not fit usize"))?,
+        usize::try_from(value)
+            .map_err(|_| crate::fail!(Engine, format!("{what} address does not fit usize")))?,
     )
-    .ok_or_else(|| format!("{what} address overflow"))
+    .ok_or_else(|| crate::fail!(Engine, format!("{what} address overflow")))
 }
 
 /// The callables a list holds, in the order the image declares them.
@@ -208,22 +214,28 @@ fn read_callable_list(
     form: CallableList,
     loads: &[(u64, u64)],
     what: &str,
-) -> Result<Vec<usize>, String> {
+) -> Result<Vec<usize>, crate::error::Error> {
     let stride: u64 = match form {
         CallableList::Pointers => 8,
         CallableList::Offsets => 4,
     };
     if !size.is_multiple_of(stride) || size > 1 << 20 {
-        return Err(format!("{what} has invalid size {size}"));
+        return Err(crate::fail!(
+            Engine,
+            format!("{what} has invalid size {size}")
+        ));
     }
     let end = address
         .checked_add(size)
-        .ok_or_else(|| format!("{what} range overflow"))?;
+        .ok_or_else(|| crate::fail!(Engine, format!("{what} range overflow")))?;
     if !loads
         .iter()
         .any(|&(start, load_end)| address >= start && end <= load_end)
     {
-        return Err(format!("{what} lies outside a loadable segment"));
+        return Err(crate::fail!(
+            Engine,
+            format!("{what} lies outside a loadable segment")
+        ));
     }
     let start = add_bias(bias, address, what)?;
     let mut functions = Vec::with_capacity((size / stride) as usize);

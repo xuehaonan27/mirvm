@@ -118,7 +118,9 @@ pub(crate) fn publish_lock() -> Option<Lock> {
         Ok(lock) => Some(lock),
         Err(error) => {
             if crate::options::a2_debug() {
-                eprintln!("[a2-debug] fragment lock not taken ({error}); publishing unlocked");
+                crate::diag::instrument(format_args!(
+                    "[a2-debug] fragment lock not taken ({error}); publishing unlocked"
+                ));
             }
             None
         }

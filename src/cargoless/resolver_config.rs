@@ -25,7 +25,7 @@ fn resolve(
     current: &Path,
     cargo_home: Option<&Path>,
     resolver: ResolverVersion,
-) -> Result<IncompatibleRustVersions, String> {
+) -> Result<IncompatibleRustVersions, crate::error::Error> {
     let mut selected = None;
     if let Some(home) = cargo_home
         && let Some(file) = config_file(home)
@@ -61,24 +61,35 @@ fn config_file(directory: &Path) -> Option<PathBuf> {
 fn load_file(
     path: &Path,
     stack: &mut Vec<PathBuf>,
-) -> Result<Option<IncompatibleRustVersions>, String> {
+) -> Result<Option<IncompatibleRustVersions>, crate::error::Error> {
     let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if stack.contains(&identity) {
-        return Err(format!(
-            "Cargo config include forms a cycle: {}",
-            path.display()
+        return Err(crate::fail!(
+            Resolver,
+            format!("Cargo config include forms a cycle: {}", path.display())
         ));
     }
     stack.push(identity.clone());
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("failed to read Cargo config {}: {error}", path.display()))?;
-    let value: toml::Value = toml::from_str(&text)
-        .map_err(|error| format!("failed to parse Cargo config {}: {error}", path.display()))?;
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("failed to read Cargo config {}: {error}", path.display())
+        )
+    })?;
+    let value: toml::Value = toml::from_str(&text).map_err(|error| {
+        crate::fail!(
+            Resolver,
+            format!("failed to parse Cargo config {}: {error}", path.display())
+        )
+    })?;
     let mut selected = None;
     if let Some(includes) = value.get("include") {
-        let includes = includes
-            .as_array()
-            .ok_or_else(|| format!("Cargo config {} include must be an array", path.display()))?;
+        let includes = includes.as_array().ok_or_else(|| {
+            crate::fail!(
+                Resolver,
+                format!("Cargo config {} include must be an array", path.display())
+            )
+        })?;
         for include in includes {
             let (relative, optional) = include_value(include, path)?;
             let include_path = path.parent().unwrap_or(Path::new(".")).join(relative);
@@ -86,10 +97,13 @@ fn load_file(
                 if optional {
                     continue;
                 }
-                return Err(format!(
-                    "Cargo config {} include {} does not exist",
-                    path.display(),
-                    include_path.display()
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "Cargo config {} include {} does not exist",
+                        path.display(),
+                        include_path.display()
+                    )
                 ));
             }
             selected = load_file(&include_path, stack)?.or(selected);
@@ -99,28 +113,37 @@ fn load_file(
         .get("resolver")
         .and_then(|resolver| resolver.get("incompatible-rust-versions"))
     {
-        let policy = policy.as_str().ok_or_else(|| {
-            format!(
-                "Cargo config {} resolver.incompatible-rust-versions must be a string",
-                path.display()
-            )
-        })?;
+        let policy = policy
+            .as_str()
+            .ok_or_else(|| {
+                format!(
+                    "Cargo config {} resolver.incompatible-rust-versions must be a string",
+                    path.display()
+                )
+            })
+            .map_err(|e| crate::fail!(Resolver, e))?;
         selected = Some(IncompatibleRustVersions::parse(policy)?);
     }
     stack.pop();
     Ok(selected)
 }
 
-fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), String> {
+fn include_value(
+    value: &toml::Value,
+    source: &Path,
+) -> Result<(PathBuf, bool), crate::error::Error> {
     if let Some(path) = value.as_str() {
         return Ok((PathBuf::from(path), false));
     }
-    let table = value.as_table().ok_or_else(|| {
-        format!(
-            "Cargo config {} include member must be a path or a table",
-            source.display()
-        )
-    })?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| {
+            format!(
+                "Cargo config {} include member must be a path or a table",
+                source.display()
+            )
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?;
     let path = table
         .get("path")
         .and_then(toml::Value::as_str)
@@ -129,7 +152,8 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
                 "Cargo config {} include table is missing a string `path`",
                 source.display()
             )
-        })?;
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?;
     let optional = table
         .get("optional")
         .map(|value| {
@@ -140,7 +164,8 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
                 )
             })
         })
-        .transpose()?
+        .transpose()
+        .map_err(|e| crate::fail!(Resolver, e))?
         .unwrap_or(false);
     Ok((PathBuf::from(path), optional))
 }

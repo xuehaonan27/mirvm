@@ -3,10 +3,16 @@
 
 use super::*;
 
-pub(crate) fn validate_guest_action(signum: i32, action: &Sigaction) -> Result<(), String> {
+pub(crate) fn validate_guest_action(
+    signum: i32,
+    action: &Sigaction,
+) -> Result<(), crate::error::Error> {
     if signum <= 0 || signum as usize >= SIGNAL_SLOTS {
-        return Err(format!(
-            "guest handler for signal {signum} is outside the supported traditional signal range"
+        return Err(crate::fail!(
+            Engine,
+            format!(
+                "guest handler for signal {signum} is outside the supported traditional signal range"
+            )
         ));
     }
     if matches!(
@@ -17,18 +23,25 @@ pub(crate) fn validate_guest_action(signum: i32, action: &Sigaction) -> Result<(
             | crate::os::signal::SIGILL
             | crate::os::signal::SIGTRAP
     ) {
-        return Err(format!(
-            "guest handler for synchronous fault signal {signum} is unsupported because host and guest faults cannot be distinguished"
+        return Err(crate::fail!(
+            Engine,
+            format!(
+                "guest handler for synchronous fault signal {signum} is unsupported because host and guest faults cannot be distinguished"
+            )
         ));
     }
     if crate::os::signal::is_realtime(signum) {
-        return Err(format!(
-            "guest handler for realtime signal {signum} requires queued siginfo delivery"
+        return Err(crate::fail!(
+            Engine,
+            format!("guest handler for realtime signal {signum} requires queued siginfo delivery")
         ));
     }
     if action.has_unsupported_guest_flags() {
-        return Err(format!(
-            "guest sigaction for signal {signum} uses unsupported SA_SIGINFO, SA_ONSTACK, SA_NODEFER, or SA_RESETHAND semantics"
+        return Err(crate::fail!(
+            Engine,
+            format!(
+                "guest sigaction for signal {signum} uses unsupported SA_SIGINFO, SA_ONSTACK, SA_NODEFER, or SA_RESETHAND semantics"
+            )
         ));
     }
     Ok(())
@@ -124,7 +137,8 @@ pub(crate) fn install_sigaction_value(
         crate::os::signal::SIG_DFL | crate::os::signal::SIG_IGN
     );
     if !special && matches!(resolved, ResolvedCallback::Deferred { .. }) {
-        validate_guest_action(signum, &guest_action).map_err(SignalError::contract)?;
+        validate_guest_action(signum, &guest_action)
+            .map_err(|e| SignalError::contract(e.to_string()))?;
     }
 
     let mut target_hold = None;
@@ -161,7 +175,7 @@ pub(crate) fn install_sigaction_value(
                 Ok(stub) => stub,
                 Err(error) => {
                     registration.deactivate();
-                    return Err(SignalError::contract(error));
+                    return Err(SignalError::contract(error.to_string()));
                 }
             };
             registration.control.signal_inbox.register(registration);

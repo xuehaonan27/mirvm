@@ -32,7 +32,7 @@ pub(crate) struct FuncBlob {
 struct DecodeState {
     map: std::sync::Arc<[u8]>,
     blobs: Box<[FuncBlob]>,
-    cells: Box<[std::sync::OnceLock<Result<FuncBody, String>>]>,
+    cells: Box<[std::sync::OnceLock<Result<FuncBody, crate::error::Error>>]>,
     queue: std::sync::Mutex<DecodeQueue>,
     ready: std::sync::Condvar,
     done: std::sync::Condvar,
@@ -257,12 +257,14 @@ fn decode_one(state: &DecodeState, index: usize) {
     let blob = state.blobs[index];
     let bytes = &state.map[blob.start..blob.end];
     let decoded = if func_blob_hash(bytes) != blob.expected_hash {
-        Err(format!(
-            "function {index} changed after package verification"
+        Err(crate::fail!(
+            Engine,
+            format!("function {index} changed after package verification")
         ))
     } else {
-        postcard::from_bytes(bytes)
-            .map_err(|error| format!("function {index} decode failed: {error}"))
+        postcard::from_bytes(bytes).map_err(|error| {
+            crate::fail!(Engine, format!("function {index} decode failed: {error}"))
+        })
     };
     let _ = state.cells[index].set(decoded);
 }

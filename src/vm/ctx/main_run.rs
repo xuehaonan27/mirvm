@@ -29,7 +29,11 @@ impl MainRunGuard {
     pub(crate) fn finish(mut self) -> bool {
         let states = unsafe { &mut (*self.ctx).main_runs };
         if states.len() <= self.index {
-            eprintln!("mirvm[m4-engine]: nested main execution state was finished out of order");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "nested main execution state was finished out of order"
+            );
             std::process::abort();
         }
         // The state this run pushed stays at `index`: a nested run appends above it, and a nested
@@ -139,7 +143,11 @@ impl Drop for MainCatchGuard {
     fn drop(&mut self) {
         let states = unsafe { &mut (*self.ctx).main_runs };
         let Some(state) = states.get_mut(self.index) else {
-            eprintln!("mirvm[m4-engine]: main catch state disappeared while active");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Engine,
+                "main catch state disappeared while active"
+            );
             std::process::abort();
         };
         state.catcher_active = false;

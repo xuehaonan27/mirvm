@@ -154,8 +154,8 @@ impl ModuleMeta {
         // Each instantiation gets its own frozen mapping so several instances of one package can run
         // at once; the embedded addresses are translated by the load map, which a packaged artifact
         // always fully covers.
-        let mut instance =
-            crate::vm::instance::Instance::materialize_dynamic(&module).map_err(Error::reject)?;
+        let mut instance = crate::vm::instance::Instance::materialize_dynamic(&module)
+            .map_err(|e| Error::reject(e.to_string()))?;
         instance.asm_stub_addrs = self.asm_stub_addrs.clone();
         instance.load_map.require_mapped();
         Ok((module, instance))

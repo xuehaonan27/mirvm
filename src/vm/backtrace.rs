@@ -119,7 +119,7 @@ impl Symbols {
     /// Publishes one symbol per guest function so the process symbolizer can name an interpreted
     /// frame. An artifact without function names gets no image, and a frame falls back to its
     /// synthetic token.
-    pub(crate) fn materialize(module: &Module) -> Result<Self, String> {
+    pub(crate) fn materialize(module: &Module) -> Result<Self, crate::error::Error> {
         if module.function_names.is_empty() {
             return Ok(Self::default());
         }
@@ -127,8 +127,14 @@ impl Symbols {
             crate::os::dll::OBJECT_FORMAT,
             &module.function_names,
         )?;
-        let image = crate::os::dll::load_private_image(&bytes, c"mirvm-guest-symbols")
-            .map_err(|error| format!("publishing the guest symbol object failed: {error}"))?;
+        let image = crate::os::dll::load_private_image(&bytes, c"mirvm-guest-symbols").map_err(
+            |error| {
+                crate::fail!(
+                    Engine,
+                    format!("publishing the guest symbol object failed: {error}")
+                )
+            },
+        )?;
         let bias = image.bias();
         let ips = (0..module.function_names.len())
             .map(|index| (bias + text_off + index * SLOT) as u64)

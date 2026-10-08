@@ -62,12 +62,17 @@ impl System {
     /// error: a region missing a byte is wrong at every address in it, so the caller turns this into a
     /// miss rather than a partially restored layer. Two chunks of one region may be equal — a zeroed
     /// page appears twice — which is why a repeated id is looked up again, not consumed.
-    pub(crate) fn read(&self, chunks: &[[u8; 32]], len: u64) -> Result<Vec<u8>, String> {
+    pub(crate) fn read(
+        &self,
+        chunks: &[[u8; 32]],
+        len: u64,
+    ) -> Result<Vec<u8>, crate::error::Error> {
         // The length sizes the buffer, so it is checked against what an arena can hold before it is
         // believed: a manifest is a file another build may have written.
         if len > crate::vm::frozen::FROZEN_CAP as u64 {
-            return Err(format!(
-                "frozen region of {len} B exceeds the arena capacity"
+            return Err(crate::fail!(
+                Store,
+                format!("frozen region of {len} B exceeds the arena capacity")
             ));
         }
         let index = Index::load_in(&self.dir);
@@ -75,17 +80,23 @@ impl System {
         let mut region = Vec::with_capacity(len as usize);
         for id in chunks {
             let Some(bytes) = held.get(id) else {
-                return Err(format!(
-                    "frozen chunk {} is not in the store",
-                    crate::utils::content::digest_hex(id)
+                return Err(crate::fail!(
+                    Store,
+                    format!(
+                        "frozen chunk {} is not in the store",
+                        crate::utils::content::digest_hex(id)
+                    )
                 ));
             };
             region.extend_from_slice(bytes);
         }
         if region.len() as u64 != len {
-            return Err(format!(
-                "frozen chunks reassemble to {} B, not the recorded {len} B",
-                region.len()
+            return Err(crate::fail!(
+                Store,
+                format!(
+                    "frozen chunks reassemble to {} B, not the recorded {len} B",
+                    region.len()
+                )
             ));
         }
         Ok(region)
@@ -110,7 +121,9 @@ impl System {
             Ok(lock) => Some(lock),
             Err(error) => {
                 if crate::options::a2_debug() {
-                    eprintln!("[a2-debug] frozen lock not taken ({error}); publishing unlocked");
+                    crate::diag::instrument(format_args!(
+                        "[a2-debug] frozen lock not taken ({error}); publishing unlocked"
+                    ));
                 }
                 None
             }

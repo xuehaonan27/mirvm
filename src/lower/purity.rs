@@ -55,25 +55,43 @@ impl PurityStats {
             format!("{:.1}", ns as f64 / 1e6)
         }
         let (l, t, p) = (self.local, self.tainted, self.pure);
-        eprintln!("[purity] local:   {} inst, {} ms", l.0, ms(l.1));
-        eprintln!("[purity] tainted: {} inst, {} ms", t.0, ms(t.1));
-        eprintln!("[purity] pure:    {} inst, {} ms", p.0, ms(p.1));
-        eprintln!(
+        crate::diag::instrument(format_args!(
+            "[purity] local:   {} inst, {} ms",
+            l.0,
+            ms(l.1)
+        ));
+        crate::diag::instrument(format_args!(
+            "[purity] tainted: {} inst, {} ms",
+            t.0,
+            ms(t.1)
+        ));
+        crate::diag::instrument(format_args!(
+            "[purity] pure:    {} inst, {} ms",
+            p.0,
+            ms(p.1)
+        ));
+        crate::diag::instrument(format_args!(
             "[purity] A2 re-lower per edit = local+tainted = {} inst, {} ms (total saved {} inst, {} ms)",
             l.0 + t.0,
             ms(l.1 + t.1),
             l.0 + t.0 + p.0,
             ms(l.1 + t.1 + p.1)
-        );
+        ));
         let mut crates: Vec<_> = self.pure_crates.iter().collect();
         crates.sort_by_key(|(_, v)| std::cmp::Reverse(v.0));
         for (k, (n, ns)) in crates.iter().take(12) {
-            eprintln!("[purity]   pure crate {k}: {n} inst, {} ms", ms(*ns));
+            crate::diag::instrument(format_args!(
+                "[purity]   pure crate {k}: {n} inst, {} ms",
+                ms(*ns)
+            ));
         }
         let mut t: Vec<_> = self.tainted_insts.iter().collect();
         t.sort_by_key(|(_, ns)| std::cmp::Reverse(*ns));
         for (sym, ns) in t.iter().take(10) {
-            eprintln!("[purity]   tainted top: {} ms  {sym}", ms(*ns));
+            crate::diag::instrument(format_args!(
+                "[purity]   tainted top: {} ms  {sym}",
+                ms(*ns)
+            ));
         }
     }
 }

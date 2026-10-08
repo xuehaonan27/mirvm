@@ -224,10 +224,10 @@ impl<'tcx> Linker<'tcx> {
                 let home = home.unit as usize;
                 if !self.placeable(home) {
                     if crate::options::a2_debug() {
-                        eprintln!(
+                        crate::diag::instrument(format_args!(
                             "[a2-debug] residue in this program: {} belongs to loaded home {home}",
                             self.tcx.symbol_name(inst).name
-                        );
+                        ));
                     }
                     return None;
                 }

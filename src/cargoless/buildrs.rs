@@ -66,7 +66,7 @@ pub struct BuildOutput {
 /// (cargo-equivalent — old build.rs `cargo:KEY=VALUE` is the legacy form of links metadata).
 /// cargo::error → Err (driver appends crate name); rerun-if-* both forms are collected into
 /// BuildOutput, which the rerun decision consumes (see should_rerun).
-pub fn parse_instructions(stdout: &str) -> Result<BuildOutput, String> {
+pub fn parse_instructions(stdout: &str) -> Result<BuildOutput, crate::error::Error> {
     let mut out = BuildOutput::default();
     for line in stdout.lines() {
         let line = line.strip_suffix('\r').unwrap_or(line);
@@ -80,7 +80,7 @@ pub fn parse_instructions(stdout: &str) -> Result<BuildOutput, String> {
     Ok(out)
 }
 
-fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String> {
+fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), crate::error::Error> {
     let (key, value) = match instr.split_once('=') {
         Some((k, v)) => (k, v),
         None => (instr, ""),
@@ -96,7 +96,10 @@ fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String>
                 } else if let Some(v) = tok.strip_prefix("-L") {
                     out.link_searches.push(v.to_string());
                 } else {
-                    return Err(format!("rustc-flags only allows -l/-L flags (got `{tok}`)"));
+                    return Err(crate::fail!(
+                        Build,
+                        format!("rustc-flags only allows -l/-L flags (got `{tok}`)")
+                    ));
                 }
             }
         }
@@ -104,19 +107,30 @@ fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String>
         "rustc-check-cfg" => out.check_cfgs.push(value.to_string()),
         "rustc-env" => {
             let Some((k, v)) = value.split_once('=') else {
-                return Err(format!("rustc-env missing `=`: `{value}`"));
+                return Err(crate::fail!(
+                    Build,
+                    format!("rustc-env missing `=`: `{value}`")
+                ));
             };
             out.envs.push((k.to_string(), v.to_string()));
         }
         "rustc-link-arg" | "rustc-link-arg-bins" => out.link_args.push(value.to_string()),
         "metadata" => {
             let Some((k, v)) = value.split_once('=') else {
-                return Err(format!("metadata missing `=`: `{value}`"));
+                return Err(crate::fail!(
+                    Build,
+                    format!("metadata missing `=`: `{value}`")
+                ));
             };
             out.metadata.insert(k.to_string(), v.to_string());
         }
         "warning" => out.warnings.push(value.to_string()),
-        "error" => return Err(format!("build script emitted cargo::error: {value}")),
+        "error" => {
+            return Err(crate::fail!(
+                Build,
+                format!("build script emitted cargo::error: {value}")
+            ));
+        }
         // Both instruction forms are accepted; cargo honors legacy rerun-if too.
         "rerun-if-changed" => out.rerun_if_changed.push(value.to_string()),
         "rerun-if-env-changed" => out.rerun_if_env_changed.push(value.to_string()),
@@ -313,7 +327,7 @@ pub fn run_build_script(
     exe: &Path,
     cwd: &Path,
     env: &BTreeMap<String, String>,
-) -> Result<String, String> {
+) -> Result<String, crate::error::Error> {
     let out = std::process::Command::new(exe)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
@@ -321,15 +335,24 @@ pub fn run_build_script(
         .stderr(std::process::Stdio::piped())
         .envs(env)
         .output()
-        .map_err(|e| format!("build script launch failed {}: {e}", exe.display()))?;
+        .map_err(|e| {
+            crate::fail!(
+                Build,
+                format!("build script launch failed {}: {e}", exe.display())
+            )
+        })?;
     if !out.status.success() {
-        return Err(format!(
-            "build script exited non-zero ({}):\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
+        return Err(crate::fail!(
+            Build,
+            format!(
+                "build script exited non-zero ({}):\n{}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            )
         ));
     }
-    String::from_utf8(out.stdout).map_err(|e| format!("build script stdout not UTF-8: {e}"))
+    String::from_utf8(out.stdout)
+        .map_err(|e| crate::fail!(Build, format!("build script stdout not UTF-8: {e}")))
 }
 
 /// links mutual exclusion (cargo-equivalent: same links value at most one package — prevents duplicate symbols). Root package and
@@ -338,13 +361,16 @@ pub fn run_build_script(
 pub fn check_links_unique(
     root: Option<(&str, Option<&str>)>,
     plan: &ResolvePlan,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let mut seen: BTreeMap<String, (String, String)> = BTreeMap::new();
-    let mut note = |links: &str, pkg: &str, ver: &str| -> Result<(), String> {
+    let mut note = |links: &str, pkg: &str, ver: &str| -> Result<(), crate::error::Error> {
         match seen.get(links) {
             Some((p, v)) if p == pkg && v == ver => Ok(()),
-            Some((p, v)) => Err(format!(
-                "links key conflict: `{links}` declared by both {p} {v} and {pkg} {ver} (cargo-equivalent rejection: same links at most one package)"
+            Some((p, v)) => Err(crate::fail!(
+                Build,
+                format!(
+                    "links key conflict: `{links}` declared by both {p} {v} and {pkg} {ver} (cargo-equivalent rejection: same links at most one package)"
+                )
             )),
             None => {
                 seen.insert(links.to_string(), (pkg.to_string(), ver.to_string()));
@@ -439,7 +465,7 @@ fn esc(s: &str) -> String {
     o
 }
 
-fn unesc(s: &str) -> Result<String, String> {
+fn unesc(s: &str) -> Result<String, crate::error::Error> {
     let mut o = String::with_capacity(s.len());
     let mut it = s.chars();
     while let Some(c) = it.next() {
@@ -448,7 +474,12 @@ fn unesc(s: &str) -> Result<String, String> {
                 Some('\\') => o.push('\\'),
                 Some('t') => o.push('\t'),
                 Some('n') => o.push('\n'),
-                other => return Err(format!("rerun.txt bad escape \\{}", other.unwrap_or('?'))),
+                other => {
+                    return Err(crate::fail!(
+                        Build,
+                        format!("rerun.txt bad escape \\{}", other.unwrap_or('?'))
+                    ));
+                }
             }
         } else {
             o.push(c);
@@ -471,14 +502,19 @@ struct RerunRecord {
     envs: Vec<(String, Option<String>)>,
 }
 
-fn parse_record(text: &str) -> Result<RerunRecord, String> {
+fn parse_record(text: &str) -> Result<RerunRecord, crate::error::Error> {
     let mut lines = text.lines();
-    let face = lines.next().ok_or("rerun.txt empty")?;
+    let face = lines.next().ok_or(crate::fail!(Build, "rerun.txt empty"))?;
     let mut rec = RerunRecord {
         changed_paths: match face {
             "mirvm-bldrs-rerun-v1 changed" => Some(Vec::new()),
             "mirvm-bldrs-rerun-v1 default" => None,
-            _ => return Err(format!("rerun.txt first line unrecognized: {face}")),
+            _ => {
+                return Err(crate::fail!(
+                    Build,
+                    format!("rerun.txt first line unrecognized: {face}")
+                ));
+            }
         },
         tree: None,
         envs: Vec::new(),
@@ -489,22 +525,23 @@ fn parse_record(text: &str) -> Result<RerunRecord, String> {
             let (len, mtime, path) = (
                 f.next().unwrap_or(""),
                 f.next().unwrap_or(""),
-                f.next().ok_or("P line missing path column")?,
+                f.next()
+                    .ok_or(crate::fail!(Build, "P line missing path column"))?,
             );
             let stamp = if len == "-" && mtime == "-" {
                 None
             } else {
                 Some((
                     len.parse::<u64>()
-                        .map_err(|_| format!("bad P line len: {len}"))?,
+                        .map_err(|_| crate::fail!(Build, format!("bad P line len: {len}")))?,
                     mtime
                         .parse::<u128>()
-                        .map_err(|_| format!("bad P line mtime: {mtime}"))?,
+                        .map_err(|_| crate::fail!(Build, format!("bad P line mtime: {mtime}")))?,
                 ))
             };
             rec.changed_paths
                 .as_mut()
-                .ok_or("default face mixed with P line")?
+                .ok_or(crate::fail!(Build, "default face mixed with P line"))?
                 .push((unesc(path)?, stamp));
         } else if let Some(stamp) = line.strip_prefix("T\t") {
             rec.tree = Some(stamp.to_string());
@@ -513,10 +550,10 @@ fn parse_record(text: &str) -> Result<RerunRecord, String> {
         } else if let Some(rest) = line.strip_prefix("E1\t") {
             let (var, val) = rest
                 .split_once('\t')
-                .ok_or("E1 line missing value column")?;
+                .ok_or(crate::fail!(Build, "E1 line missing value column"))?;
             rec.envs.push((unesc(var)?, Some(unesc(val)?)));
         } else {
-            return Err(format!("rerun.txt bad line: {line}"));
+            return Err(crate::fail!(Build, format!("rerun.txt bad line: {line}")));
         }
     }
     Ok(rec)
@@ -555,7 +592,7 @@ pub fn write_record(
     pkg: &str,
     pkg_root: &Path,
     env_get: &dyn Fn(&str) -> Option<String>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let mut t = String::new();
     if bo.rerun_if_changed.is_empty() {
         t.push_str("mirvm-bldrs-rerun-v1 default\n");
@@ -583,8 +620,12 @@ pub fn write_record(
         }
     }
     let w = |name: &str, data: &str| {
-        std::fs::write(record_dir.join(name), data)
-            .map_err(|e| format!("writing {name} failed ({}): {e}", record_dir.display()))
+        std::fs::write(record_dir.join(name), data).map_err(|e| {
+            crate::fail!(
+                Build,
+                format!("writing {name} failed ({}): {e}", record_dir.display())
+            )
+        })
     };
     w("rerun.txt", &t)?;
     w("output.txt", stdout)
@@ -717,11 +758,11 @@ mod tests {
     #[test]
     fn parse_error_and_bad_forms_are_loud() {
         let e = parse_instructions("cargo::error=missing libfoo").unwrap_err();
-        assert!(e.contains("missing libfoo"), "{e}");
+        assert!(e.to_string().contains("missing libfoo"), "{e}");
         let e = parse_instructions("cargo::rustc-env=NOEQ").unwrap_err();
-        assert!(e.contains("rustc-env"), "{e}");
+        assert!(e.to_string().contains("rustc-env"), "{e}");
         let e = parse_instructions("cargo::rustc-flags=-O2").unwrap_err();
-        assert!(e.contains("-l/-L"), "{e}");
+        assert!(e.to_string().contains("-l/-L"), "{e}");
         // new-form unknown keys silently ignored (forward compatibility), no error
         parse_instructions("cargo::brand-new=1").unwrap();
     }

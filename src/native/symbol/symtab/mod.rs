@@ -153,7 +153,7 @@ fn archive_undefined_symbols_in(
             crate::native::object::ObjectFormat::MachO
                 if crate::native::object::macho::is_image(member) =>
             {
-                macho::undefined_symbols(member).map_err(Error::malformed)?
+                macho::undefined_symbols(member).map_err(|e| Error::malformed(e.to_string()))?
             }
             // A member that is not an object of this format (a text listing, or the archive's own
             // symbol index) carries no symbols to enumerate.
@@ -182,7 +182,7 @@ pub(crate) fn object_undefined_symbols(
     match format {
         crate::native::object::ObjectFormat::Elf => elf::elf_undefined_symbols(&bytes),
         crate::native::object::ObjectFormat::MachO => {
-            macho::undefined_symbols(&bytes).map_err(Error::malformed)
+            macho::undefined_symbols(&bytes).map_err(|e| Error::malformed(e.to_string()))
         }
     }
 }
@@ -210,7 +210,7 @@ pub(crate) fn object_exports(
     match format {
         crate::native::object::ObjectFormat::Elf => elf::elf_exports(&bytes, path),
         crate::native::object::ObjectFormat::MachO => Ok(macho::symbols(&bytes)
-            .map_err(Error::malformed)?
+            .map_err(|e| Error::malformed(e.to_string()))?
             .into_iter()
             .filter(|symbol| symbol.exported)
             .map(|symbol| Export {

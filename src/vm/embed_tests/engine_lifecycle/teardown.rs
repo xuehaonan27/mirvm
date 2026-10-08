@@ -296,8 +296,12 @@ fn constructor_guest_trap_returns_engine_initialization_error() {
         Err(error) => error,
     };
     assert!(
-        error.contains("native constructor hit an Engine fault")
-            && error.contains("embedding contract engine fault"),
+        error
+            .to_string()
+            .contains("native constructor hit an Engine fault")
+            && error
+                .to_string()
+                .contains("embedding contract engine fault"),
         "constructor Trap returned the wrong startup error: {error}"
     );
 }
@@ -336,8 +340,12 @@ fn constructor_signal_fault_drains_masked_reraise_before_failed_engine_closes() 
         };
         let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
         assert!(
-            error.contains("native constructor hit an Engine fault")
-                && error.contains("constructor signal handler trapped"),
+            error
+                .to_string()
+                .contains("native constructor hit an Engine fault")
+                && error
+                    .to_string()
+                    .contains("constructor signal handler trapped"),
             "constructor signal fault returned the wrong startup error: {error}"
         );
         assert_eq!(

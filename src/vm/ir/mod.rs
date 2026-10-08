@@ -86,9 +86,12 @@ impl LoadMap {
         });
     }
 
-    pub fn add_exact(&mut self, link: LinkAddr, runtime: u64) -> Result<(), String> {
+    pub fn add_exact(&mut self, link: LinkAddr, runtime: u64) -> Result<(), crate::error::Error> {
         if self.exact.insert(link, runtime).is_some() {
-            return Err(format!("duplicate exact load mapping for {:#x}", link.0));
+            return Err(crate::fail!(
+                Engine,
+                format!("duplicate exact load mapping for {:#x}", link.0)
+            ));
         }
         Ok(())
     }

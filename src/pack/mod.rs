@@ -174,8 +174,8 @@ impl Package {
         instance.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
         instance
             .finalize_entry_argv(&mut module, &[])
-            .map_err(Error::reject)?;
+            .map_err(|e| Error::reject(e.to_string()))?;
         unsafe { crate::vm::Engine::from_artifact_unchecked(module, instance) }
-            .map_err(Error::reject)
+            .map_err(|e| Error::reject(e.to_string()))
     }
 }

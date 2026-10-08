@@ -117,7 +117,11 @@ impl Drop for ThreadSignalMaskGuard {
             libc::pthread_sigmask(libc::SIG_SETMASK, &self.previous.0, std::ptr::null_mut())
         };
         if result != 0 {
-            eprintln!("mirvm[m4-engine]: failed to restore host signal mask: {result}");
+            crate::diag_direct_at!(
+                crate::diag::Severity::Error,
+                Os,
+                "failed to restore host signal mask: {result}"
+            );
             std::process::abort();
         }
     }

@@ -83,7 +83,7 @@ pub fn dep_graph(plan: &ResolvePlan) -> (Vec<Vec<usize>>, Vec<usize>) {
 }
 
 /// Kahn topological order: deps before dependents. Returns a sequence of unit indices.
-pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
+pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, crate::error::Error> {
     let n = plan.units.len();
     let (dependents, mut indeg) = dep_graph(plan);
     let mut queue: VecDeque<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
@@ -98,7 +98,10 @@ pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
         }
     }
     if order.len() != n {
-        return Err("internal inconsistency: the compilation-unit dependency graph has a cycle (cargo's resolution graph should be a DAG)".into());
+        return Err(crate::fail!(
+            Build,
+            "internal inconsistency: the compilation-unit dependency graph has a cycle (cargo's resolution graph should be a DAG)"
+        ));
     }
     Ok(order)
 }
@@ -106,7 +109,7 @@ pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
 /// Kahn ready-queue parallel scheduler: a unit is ready once all of its deps are "done".
 /// The main thread runs the scheduling loop (owning indegree, the ready queue and the
 /// completion state), `jobs` worker threads take `(index, M)` from a channel and run `work`,
-/// and send `(index, Result<T, String>)` back through another channel; the main thread
+/// and send `(index, Result<T, crate::error::Error>)` back through another channel; the main thread
 /// consumes completions, absorbs them with `on_done`, decrements the dependents' indegree and
 /// enqueues newly ready units. On failure it keeps the **first** error (by completion arrival
 /// order, not by topological rank), stops dispatching new work, and returns Err once every
@@ -135,9 +138,9 @@ pub fn run_scheduler<S, M, T>(
     indeg: &mut [usize],
     jobs: usize,
     build_msg: impl Fn(&S, usize) -> M,
-    work: impl Fn(M) -> Result<T, String> + Sync,
+    work: impl Fn(M) -> Result<T, crate::error::Error> + Sync,
     mut on_done: impl FnMut(&mut S, usize, T),
-) -> Result<S, String>
+) -> Result<S, crate::error::Error>
 where
     M: Send,
     T: Send,
@@ -148,7 +151,7 @@ where
     // Ready-queue seeding follows topo_order's discipline: scan indeg==0 in ascending index order
     let mut ready: VecDeque<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
     let (work_tx, work_rx) = mpsc::channel::<(usize, M)>();
-    let (done_tx, done_rx) = mpsc::channel::<(usize, Result<T, String>)>();
+    let (done_tx, done_rx) = mpsc::channel::<(usize, Result<T, crate::error::Error>)>();
     // std's mpsc is single-consumer: the worker pool shares one lock to poll for work (one
     // recv per lock acquisition; the contention is negligible next to a rustc compile)
     let work_rx = Arc::new(Mutex::new(work_rx));
@@ -172,8 +175,9 @@ where
                     };
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(m)))
                         .unwrap_or_else(|_| {
-                            Err(format!(
-                                "compile worker for unit {ix} panicked (internal error)"
+                            Err(crate::fail!(
+                                Build,
+                                format!("compile worker for unit {ix} panicked (internal error)")
                             ))
                         });
                     if tx.send((ix, r)).is_err() {
@@ -224,7 +228,7 @@ where
                 }
                 Err(e) => {
                     if first_error.is_none() {
-                        first_error = Some(e);
+                        first_error = Some(e.to_string());
                     }
                 }
             }
@@ -244,7 +248,7 @@ where
     });
     match first_error {
         None => Ok(state),
-        Some(e) => Err(e),
+        Some(e) => Err(crate::fail!(Build, e)),
     }
 }
 
@@ -364,7 +368,7 @@ pub fn fingerprints(
     profile: &ProfileFlags,
     sysroot_stamp: &str,
     rustflags: &[String],
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, crate::error::Error> {
     let order = topo_order(plan)?;
     let mut fps: Vec<Option<String>> = vec![None; plan.units.len()];
     for &ix in &order {
@@ -431,7 +435,7 @@ pub fn fingerprints(
 /// unit = recursive walk over every file under source_dir (excluding target/ and .git/),
 /// folding (relative path, len, mtime_ns) after sorting. The root package follows the same
 /// rule (root_fingerprint reuses this).
-fn source_stamp(u: &Unit) -> Result<String, String> {
+fn source_stamp(u: &Unit) -> Result<String, crate::error::Error> {
     if let Some(source_id) = &u.immutable_source_id {
         return Ok(source_id.clone());
     }
@@ -445,27 +449,31 @@ pub(super) fn source_stamp_dir(
     from_registry: bool,
     source_dir: &Path,
     package: &str,
-) -> Result<String, String> {
+) -> Result<String, crate::error::Error> {
     if from_registry {
         return Ok("registry".to_string());
     }
     let mut rows: Vec<String> = Vec::new();
     let mut stack = vec![source_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let rd = std::fs::read_dir(&dir).map_err(|e| {
-            format!(
-                "failed to read source directory of path dependency {} at {}: {e}",
-                package,
-                dir.display()
-            )
-        })?;
-        for ent in rd {
-            let ent = ent.map_err(|e| {
+        let rd = std::fs::read_dir(&dir)
+            .map_err(|e| {
                 format!(
-                    "failed to read an entry of path dependency {} source directory: {e}",
-                    package
+                    "failed to read source directory of path dependency {} at {}: {e}",
+                    package,
+                    dir.display()
                 )
-            })?;
+            })
+            .map_err(|e| crate::fail!(Build, e))?;
+        for ent in rd {
+            let ent = ent
+                .map_err(|e| {
+                    format!(
+                        "failed to read an entry of path dependency {} source directory: {e}",
+                        package
+                    )
+                })
+                .map_err(|e| crate::fail!(Build, e))?;
             let p = ent.path();
             if p.is_dir() {
                 if ent.file_name() == "target" || ent.file_name() == ".git" {
@@ -473,13 +481,15 @@ pub(super) fn source_stamp_dir(
                 }
                 stack.push(p);
             } else if p.is_file() {
-                let md = std::fs::metadata(&p).map_err(|e| {
-                    format!(
-                        "failed to stat source file of path dependency {} at {}: {e}",
-                        package,
-                        p.display()
-                    )
-                })?;
+                let md = std::fs::metadata(&p)
+                    .map_err(|e| {
+                        format!(
+                            "failed to stat source file of path dependency {} at {}: {e}",
+                            package,
+                            p.display()
+                        )
+                    })
+                    .map_err(|e| crate::fail!(Build, e))?;
                 let rel = p.strip_prefix(source_dir).unwrap_or(&p);
                 let mtime_ns = md
                     .modified()
@@ -510,7 +520,7 @@ pub fn root_fingerprint(
     profile: &ProfileFlags,
     sysroot_stamp: &str,
     rustflags: &[String],
-) -> Result<String, String> {
+) -> Result<String, crate::error::Error> {
     let src_stamp = source_stamp_dir(false, &manifest.root, &manifest.name)?;
     let mut key = String::from(crate::options::build::BUILD_ID);
     let mut put = |s: &str| {

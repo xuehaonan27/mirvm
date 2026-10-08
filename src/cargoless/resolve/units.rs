@@ -34,12 +34,12 @@ pub(super) fn read_registry_minimal(
     dir: &Path,
     package: &str,
     version: &Version,
-) -> Result<RegistryMinimal, String> {
+) -> Result<RegistryMinimal, crate::error::Error> {
     let file = dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&file)
-        .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
-    let v: toml::Value =
-        toml::from_str(&text).map_err(|e| format!("failed to parse {}: {e}", file.display()))?;
+        .map_err(|e| crate::fail!(Resolver, format!("failed to read {}: {e}", file.display())))?;
+    let v: toml::Value = toml::from_str(&text)
+        .map_err(|e| crate::fail!(Resolver, format!("failed to parse {}: {e}", file.display())))?;
     let pkg_table = v.get("package");
     let lib = v.get("lib");
     let name = lib
@@ -132,10 +132,11 @@ pub(super) fn read_registry_minimal(
     // The Cargo.toml inside a registry package is the manifest normalized at publish time
     // and may still carry `[lints]`; reuse only the lint parsing here, so the full
     // manifest subset does not constrain registry packages.
-    let rustc_lint_flags =
-        crate::cargoless::manifest::parse_lints(v.get("lints")).map_err(|error| {
+    let rustc_lint_flags = crate::cargoless::manifest::parse_lints(v.get("lints"))
+        .map_err(|error| {
             format!("failed to parse [lints] of registry package {package} {version}: {error}")
-        })?;
+        })
+        .map_err(|e| crate::fail!(Resolver, e))?;
     Ok(RegistryMinimal {
         lib_name: name,
         proc_macro,
@@ -157,7 +158,7 @@ fn node_featdeps(
     version: &Version,
     path_manifests: &BTreeMap<String, PackageManifest>,
     src: &mut impl PkgSource,
-) -> Result<Vec<FeatDep>, String> {
+) -> Result<Vec<FeatDep>, crate::error::Error> {
     if let Some(m) = path_manifests.get(name) {
         return decls_to_featdeps(&m.deps);
     }
@@ -192,7 +193,7 @@ fn node_featdeps(
 
 /// Whether this edge enters the host build graph (platform_cfg evaluated against the
 /// host).
-fn host_edge(dep: &FeatDep) -> Result<bool, String> {
+fn host_edge(dep: &FeatDep) -> Result<bool, crate::error::Error> {
     match &dep.platform_cfg {
         None => Ok(true),
         Some(expr) => crate::cargoless::manifest::eval_cfg(expr),
@@ -222,7 +223,7 @@ pub(super) fn assemble_units(
     nodes: &BTreeMap<NodeKey, FeatNode>,
     src: &mut impl PkgSource,
     include_root_dev: bool,
-) -> Result<(Vec<Unit>, Vec<UnitDep>), String> {
+) -> Result<(Vec<Unit>, Vec<UnitDep>), crate::error::Error> {
     // Buildable set: reachable from the root along edges whose host cfg is true (cargo's
     // build-graph filter -- versions and the lock are the union over all platforms while
     // the build graph is evaluated against the host; a subgraph reached only through a
@@ -254,9 +255,12 @@ pub(super) fn assemble_units(
                 if dep.optional {
                     continue;
                 }
-                return Err(format!(
-                    "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
-                    dep.key, key.0, key.1
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                        dep.key, key.0, key.1
+                    )
                 ));
             };
             let child = (child_name.clone(), child_version.clone(), dep.class);
@@ -357,9 +361,12 @@ pub(super) fn assemble_units(
                 if d.optional {
                     continue;
                 }
-                return Err(format!(
-                    "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
-                    d.key, key.0, key.1
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                        d.key, key.0, key.1
+                    )
                 ));
             };
             let Some(&to_idx) = index.get(&(child_name.clone(), child_version.clone(), d.class))
@@ -399,9 +406,12 @@ pub(super) fn assemble_units(
                 if d.optional {
                     continue;
                 }
-                return Err(format!(
-                    "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
-                    d.key, root_key.0, root_key.1
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                        d.key, root_key.0, root_key.1
+                    )
                 ));
             };
             let Some(&to_idx) = index.get(&(child_name.clone(), child_version.clone(), d.class))
@@ -430,7 +440,7 @@ pub(super) fn validate_compiler_rust_version(
     units: &[Unit],
     src: &mut impl PkgSource,
     compiler: &Version,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let mut incompatible: BTreeSet<(String, Version, Version)> = BTreeSet::new();
     if let Some(required) = &root.rust_version
         && required > compiler
@@ -483,7 +493,10 @@ pub(super) fn validate_compiler_rust_version(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Err(format!(
-        "the current rustc {compiler} does not satisfy the rust-version of:\n{packages}\nupgrade the toolchain, choose compatible dependency versions, or pass --ignore-rust-version explicitly"
+    Err(crate::fail!(
+        Resolver,
+        format!(
+            "the current rustc {compiler} does not satisfy the rust-version of:\n{packages}\nupgrade the toolchain, choose compatible dependency versions, or pass --ignore-rust-version explicitly"
+        )
     ))
 }

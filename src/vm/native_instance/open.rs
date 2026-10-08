@@ -18,10 +18,14 @@ use super::identity::copy_unique;
 /// Lowering needs symbols from self-produced objects, but native constructors
 /// belong to Engine startup, not compilation. Load a private copy with its
 /// lifecycle deferred and intentionally keep that mapping for the process.
-pub(crate) fn open_for_lower(path: &Path) -> Result<NativeImage, String> {
+pub(crate) fn open_for_lower(path: &Path) -> Result<NativeImage, crate::error::Error> {
     let dir = crate::store::LOWER_NATIVE.dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("fail to create lower native directory: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::fail!(
+            Engine,
+            format!("fail to create lower native directory: {e}")
+        )
+    })?;
     let private = copy_unique(path, &dir, "lower")?;
     open_deferred(&private, true)
 }
@@ -31,7 +35,7 @@ pub(crate) fn open_for_lower(path: &Path) -> Result<NativeImage, String> {
 pub(crate) fn prepare_required_libraries(
     module: &Module,
     instance: &mut Instance,
-) -> Result<(), String> {
+) -> Result<(), crate::error::Error> {
     let mut images = Vec::with_capacity(module.required_native_libs.len());
     for path in &module.required_native_libs {
         match open_deferred(Path::new(&**path), true) {
@@ -48,7 +52,10 @@ pub(crate) fn prepare_required_libraries(
     Ok(())
 }
 
-fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, String> {
+fn open_deferred(
+    path: &Path,
+    remove_private_file: bool,
+) -> Result<NativeImage, crate::error::Error> {
     struct FileGuard(Option<PathBuf>);
     impl Drop for FileGuard {
         fn drop(&mut self) {
@@ -63,14 +70,23 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
     // the file again before its loader will.
     let tags =
         crate::native::symbol::lifecycle::read_and_suppress(path, crate::os::dll::OBJECT_FORMAT)?;
-    crate::os::dll::reseal(path).map_err(|error| error.to_string())?;
-    let cpath = CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|_| format!("per-Engine native path contains NUL: {}", path.display()))?;
+    crate::os::dll::reseal(path).map_err(|error| crate::fail!(Engine, error.to_string()))?;
+    let cpath = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+        crate::fail!(
+            Engine,
+            format!("per-Engine native path contains NUL: {}", path.display())
+        )
+    })?;
     let handle = crate::os::dll::open_with_flags(
         &cpath,
         crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
     )
-    .map_err(|e| format!("fail to map/relocate native `{}`: {e}", path.display()))?;
+    .map_err(|e| {
+        crate::fail!(
+            Engine,
+            format!("fail to map/relocate native `{}`: {e}", path.display())
+        )
+    })?;
     struct HandleGuard(Option<usize>);
     impl Drop for HandleGuard {
         fn drop(&mut self) {
@@ -81,13 +97,17 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
     }
     let mut handle_guard = HandleGuard(Some(handle));
     crate::lower::asm::refill_syscall_slot(handle);
-    let bias = crate::os::dll::load_bias(handle, &cpath)
-        .ok_or_else(|| format!("fail to find load base for `{}`", path.display()))?;
+    let bias = crate::os::dll::load_bias(handle, &cpath).ok_or_else(|| {
+        crate::fail!(
+            Engine,
+            format!("fail to find load base for `{}`", path.display())
+        )
+    })?;
     let hidden_symbols = crate::native::symbol::symtab::hidden_symtab_values(
         &path.to_string_lossy(),
         crate::os::dll::OBJECT_FORMAT,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| crate::fail!(Engine, error.to_string()))?;
     let executable_ranges = executable_ranges(&tags, bias)?;
     let lifecycle = materialize(tags, bias)?;
     handle_guard.0 = None;

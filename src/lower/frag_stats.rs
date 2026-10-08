@@ -84,13 +84,13 @@ impl FragStats {
                 .entry(id)
                 .or_insert((0, bytes.len() as u64))
                 .0 += 1;
-            eprintln!(
+            crate::diag::instrument(format_args!(
                 "[frag] {} {} {} {}",
                 name,
                 crate::utils::content::digest_hex(&id),
                 bytes.len(),
                 body.name
-            );
+            ));
         }
         self.layers.push(layer);
     }
@@ -102,7 +102,7 @@ impl FragStats {
             let unique = layer.fragments.len() as u64;
             let unique_bytes: u64 = layer.fragments.values().map(|(_, bytes)| *bytes).sum();
             let unit_bytes = unique_bytes + layer.frozen_bytes;
-            eprintln!(
+            crate::diag::instrument(format_args!(
                 "[frag] {}: {} bodies -> {} fragments (x{:.2}), canonical {} B -> {} B (x{:.2})",
                 layer.name,
                 layer.bodies,
@@ -111,25 +111,25 @@ impl FragStats {
                 layer.canonical_bytes,
                 unique_bytes,
                 ratio(layer.canonical_bytes, unique_bytes)
-            );
-            eprintln!(
+            ));
+            crate::diag::instrument(format_args!(
                 "[frag] {}: unit {} B = {} B fragments + {} B frozen ({:.1}% frozen)",
                 layer.name,
                 unit_bytes,
                 unique_bytes,
                 layer.frozen_bytes,
                 100.0 * ratio(layer.frozen_bytes, unit_bytes)
-            );
+            ));
             for (id, (_, bytes)) in &layer.fragments {
                 session.insert(*id, *bytes);
             }
         }
         let bytes: u64 = session.values().sum();
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "[frag] session: {} fragments, {} B unique canonical bytes",
             session.len(),
             bytes
-        );
+        ));
     }
 }
 
@@ -171,21 +171,23 @@ impl FragStats {
                 }
                 _ => None,
             };
-            eprintln!(
+            crate::diag::instrument(format_args!(
                 "[frag] home {name}: {} bodies ({} name no unit) -> {unique} fragments, canonical {} B -> {kept} B{}",
                 entry.bodies,
                 entry.unattached,
                 entry.canonical_bytes,
                 key.map(|key| format!(", key {key}")).unwrap_or_default()
-            );
+            ));
             bodies += entry.bodies;
             unique_bytes += kept;
         }
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "[frag] homes: {bodies} image bodies homed, {unique_bytes} B of unique fragments"
-        );
+        ));
         if keys_ms > 0.0 {
-            eprintln!("[frag] unit keys: {keys_ms:.1}ms of rlib stamping");
+            crate::diag::instrument(format_args!(
+                "[frag] unit keys: {keys_ms:.1}ms of rlib stamping"
+            ));
         }
     }
 }

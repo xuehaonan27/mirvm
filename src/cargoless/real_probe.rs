@@ -14,12 +14,15 @@ fn real_libgit2_probe() {
     let mut reg = Registry::open().unwrap();
     match resolve(&m, &mut reg) {
         Ok(plan) => {
-            eprintln!(
+            crate::diag::instrument(format_args!(
                 "PROBE libgit2-sys: {:?}",
                 plan.version_map.get("libgit2-sys")
-            );
-            eprintln!("PROBE git2: {:?}", plan.version_map.get("git2"));
+            ));
+            crate::diag::instrument(format_args!(
+                "PROBE git2: {:?}",
+                plan.version_map.get("git2")
+            ));
         }
-        Err(e) => eprintln!("PROBE ERR: {e}"),
+        Err(e) => crate::diag::instrument(format_args!("PROBE ERR: {e}")),
     }
 }

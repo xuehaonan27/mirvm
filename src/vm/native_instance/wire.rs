@@ -17,7 +17,10 @@ use super::NativeImage;
 use super::{OWNED_NATIVE_CODE, OwnedNativeCode};
 
 /// Fill every native bridge slot after all per-Engine P1 closures exist.
-pub(crate) fn patch_entry_slots(module: &Module, instance: &Instance) -> Result<(), String> {
+pub(crate) fn patch_entry_slots(
+    module: &Module,
+    instance: &Instance,
+) -> Result<(), crate::error::Error> {
     let mut slots = BTreeMap::<String, u64>::new();
     for site in module.entry_stub_sites.iter().chain(
         instance
@@ -38,18 +41,26 @@ pub(crate) fn patch_entry_slots(module: &Module, instance: &Instance) -> Result<
             .iter()
             .filter(|(name, _)| name.starts_with("__mirvm_p1_target_"))
         {
-            let target = slots
-                .get(name.as_ref())
-                .ok_or_else(|| format!("native entry slot `{name}` has no P1 recipe"))?;
+            let target = slots.get(name.as_ref()).ok_or_else(|| {
+                crate::fail!(
+                    Engine,
+                    format!("native entry slot `{name}` has no P1 recipe")
+                )
+            })?;
             let slot = (image.load_bias() as u64)
                 .checked_add(value)
-                .ok_or_else(|| format!("native entry slot `{name}` address overflow"))?;
+                .ok_or_else(|| {
+                    crate::fail!(
+                        Engine,
+                        format!("native entry slot `{name}` address overflow")
+                    )
+                })?;
             unsafe { (slot as *mut u64).write(*target) };
         }
     }
 
     if instance.native_images.len() != module.required_native_libs.len() {
-        return Err("native image/path count mismatch".into());
+        return Err(crate::fail!(Engine, "native image/path count mismatch"));
     }
     for image in &instance.native_images {
         for (name, &value) in image
@@ -57,13 +68,18 @@ pub(crate) fn patch_entry_slots(module: &Module, instance: &Instance) -> Result<
             .iter()
             .filter(|(name, _)| name.starts_with("__mirvm_p1_target_"))
         {
-            let target = slots
-                .get(name.as_ref())
-                .ok_or_else(|| format!("native entry slot `{name}` has no P1 recipe"))?;
-            let slot = image
-                .bias
-                .checked_add(value)
-                .ok_or_else(|| format!("native entry slot `{name}` address overflow"))?;
+            let target = slots.get(name.as_ref()).ok_or_else(|| {
+                crate::fail!(
+                    Engine,
+                    format!("native entry slot `{name}` has no P1 recipe")
+                )
+            })?;
+            let slot = image.bias.checked_add(value).ok_or_else(|| {
+                crate::fail!(
+                    Engine,
+                    format!("native entry slot `{name}` address overflow")
+                )
+            })?;
             unsafe { (slot as *mut u64).write(*target) };
         }
     }
@@ -73,7 +89,10 @@ pub(crate) fn patch_entry_slots(module: &Module, instance: &Instance) -> Result<
 /// Fill the private runtime interposition slots injected into every
 /// self-produced machine-code image. Images are already relocated but no
 /// constructor has run yet.
-pub(crate) fn patch_pthread_slots(instance: &Instance, engine_id: u64) -> Result<(), String> {
+pub(crate) fn patch_pthread_slots(
+    instance: &Instance,
+    engine_id: u64,
+) -> Result<(), crate::error::Error> {
     use super::super::interpose::{INTERPOSED_CALLS, owner_slot};
     let targets = [
         (
@@ -152,7 +171,10 @@ pub(crate) fn patch_pthread_slots(instance: &Instance, engine_id: u64) -> Result
             continue;
         }
         if present != total {
-            return Err("self-produced native image has an incomplete runtime bridge".into());
+            return Err(crate::fail!(
+                Engine,
+                "self-produced native image has an incomplete runtime bridge"
+            ));
         }
         for &(name, target) in &targets {
             unsafe { (address(name) as *mut u64).write(target) };
@@ -178,18 +200,27 @@ pub(crate) fn patch_pthread_slots(instance: &Instance, engine_id: u64) -> Result
             continue;
         }
         if present != total {
-            return Err("self-produced native image has an incomplete runtime bridge".into());
+            return Err(crate::fail!(
+                Engine,
+                "self-produced native image has an incomplete runtime bridge"
+            ));
         }
         for &(name, target) in &targets {
-            let slot = bias
-                .checked_add(symbols[name])
-                .ok_or_else(|| format!("runtime bridge slot `{name}` address overflow"))?;
+            let slot = bias.checked_add(symbols[name]).ok_or_else(|| {
+                crate::fail!(
+                    Engine,
+                    format!("runtime bridge slot `{name}` address overflow")
+                )
+            })?;
             unsafe { (slot as *mut u64).write(target) };
         }
         for name in &owners {
-            let slot = bias
-                .checked_add(symbols[*name])
-                .ok_or_else(|| format!("runtime owner slot `{name}` address overflow"))?;
+            let slot = bias.checked_add(symbols[*name]).ok_or_else(|| {
+                crate::fail!(
+                    Engine,
+                    format!("runtime owner slot `{name}` address overflow")
+                )
+            })?;
             unsafe { (slot as *mut u64).write(engine_id) };
         }
     }
@@ -227,7 +258,7 @@ pub(crate) fn commit_images(instance: &Instance, control: &Arc<super::super::ctx
     }
 }
 
-pub(crate) fn run_initializers(instance: &Instance) -> Result<(), String> {
+pub(crate) fn run_initializers(instance: &Instance) -> Result<(), crate::error::Error> {
     let mut args = InitializerArgs::capture()?;
     for image in &instance.native_images {
         image.lifecycle.run_initializers(&mut args);

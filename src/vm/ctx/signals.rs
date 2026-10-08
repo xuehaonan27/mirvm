@@ -337,7 +337,11 @@ pub(super) fn defer_finalizer_while_signal_masked(shared: &Arc<Shared>) -> bool 
     }
     let pending = unsafe { &mut (*contexts).pending_finalizers };
     if pending.try_reserve(1).is_err() {
-        eprintln!("mirvm[m4-engine]: failed to queue a masked Engine finalizer");
+        crate::diag_direct_at!(
+            crate::diag::Severity::Error,
+            Engine,
+            "failed to queue a masked Engine finalizer"
+        );
         std::process::abort();
     }
     pending.push(Arc::clone(shared));

@@ -52,15 +52,22 @@ mod tests;
 // ---------- package source abstraction (production = Registry; tests = in-memory fake) ----------
 
 pub trait PkgSource {
-    fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String>;
-    fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String>;
+    fn registry_source(
+        &mut self,
+        reference: &RegistryReference,
+    ) -> Result<String, crate::error::Error>;
+    fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, crate::error::Error>;
     /// The same entry with the source's own copy revalidated rather than served from a snapshot.
     ///
     /// A registry's index copy is written once and read unchanged afterwards, so a version published
     /// after it was written is invisible until something asks for a refresh. Reading a lock is what
     /// asks: a lock names exact versions, and whoever wrote it may have seen a newer index. Sources
     /// that keep no remote copy to revalidate from answer exactly as `index_entry` does.
-    fn refresh_index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String> {
+    fn refresh_index_entry(
+        &mut self,
+        source: &str,
+        name: &str,
+    ) -> Result<IndexEntry, crate::error::Error> {
         self.index_entry(source, name)
     }
     fn ensure_source(
@@ -69,26 +76,36 @@ pub trait PkgSource {
         name: &str,
         version: &Version,
         cksum: Option<&str>,
-    ) -> Result<PathBuf, String>;
+    ) -> Result<PathBuf, crate::error::Error>;
     fn ensure_git_package(
         &mut self,
         spec: &GitSpec,
         package: &str,
         locked_source: Option<&str>,
-    ) -> Result<PackageManifest, String> {
+    ) -> Result<PackageManifest, crate::error::Error> {
         let _ = (spec, package, locked_source);
-        Err("the current package source does not support Git dependencies".into())
+        Err(crate::fail!(
+            Resolver,
+            "the current package source does not support Git dependencies"
+        ))
     }
 }
 
 impl PkgSource for Registry {
-    fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String> {
+    fn registry_source(
+        &mut self,
+        reference: &RegistryReference,
+    ) -> Result<String, crate::error::Error> {
         Registry::registry_source(self, reference)
     }
-    fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String> {
+    fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, crate::error::Error> {
         Registry::index_entry(self, source, name)
     }
-    fn refresh_index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String> {
+    fn refresh_index_entry(
+        &mut self,
+        source: &str,
+        name: &str,
+    ) -> Result<IndexEntry, crate::error::Error> {
         Registry::refresh_index_entry(self, source, name)
     }
     fn ensure_source(
@@ -97,7 +114,7 @@ impl PkgSource for Registry {
         name: &str,
         version: &Version,
         cksum: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, crate::error::Error> {
         Registry::ensure_source(self, source, name, version, cksum)
     }
     fn ensure_git_package(
@@ -105,7 +122,7 @@ impl PkgSource for Registry {
         spec: &GitSpec,
         package: &str,
         locked_source: Option<&str>,
-    ) -> Result<PackageManifest, String> {
+    ) -> Result<PackageManifest, crate::error::Error> {
         Registry::ensure_git_package(self, spec, package, locked_source)
     }
 }
@@ -222,7 +239,10 @@ impl ResolvePurpose {
 
 // ---------- main entry points ----------
 
-pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<ResolvePlan, String> {
+pub fn resolve(
+    root: &PackageManifest,
+    src: &mut impl PkgSource,
+) -> Result<ResolvePlan, crate::error::Error> {
     resolve_for(root, src, ResolvePurpose::Run)
 }
 
@@ -230,7 +250,7 @@ pub fn resolve_for(
     root: &PackageManifest,
     src: &mut impl PkgSource,
     purpose: ResolvePurpose,
-) -> Result<ResolvePlan, String> {
+) -> Result<ResolvePlan, crate::error::Error> {
     resolve_for_known(root, src, purpose, &[])
 }
 
@@ -243,7 +263,7 @@ pub fn resolve_for_known(
     src: &mut impl PkgSource,
     purpose: ResolvePurpose,
     known_paths: &[PackageManifest],
-) -> Result<ResolvePlan, String> {
+) -> Result<ResolvePlan, crate::error::Error> {
     resolve_for_known_with_features(root, src, purpose, known_paths, &FeatureOverrides::new())
 }
 
@@ -253,7 +273,7 @@ pub fn resolve_for_known_with_features(
     purpose: ResolvePurpose,
     known_paths: &[PackageManifest],
     workspace_features: &FeatureOverrides,
-) -> Result<ResolvePlan, String> {
+) -> Result<ResolvePlan, crate::error::Error> {
     let compiler_rust_version = current_rust_version()?;
     let rust_version_policy = if root.ignore_rust_version {
         IncompatibleRustVersions::Allow
@@ -284,9 +304,12 @@ pub fn resolve_for_known_with_features(
             load_override_manifest(&patch.dependency, input_lock.as_ref(), src)?
         {
             if manifest.name != patch.dependency.package {
-                return Err(format!(
-                    "[patch] key {} points at package.name {}",
-                    patch.dependency.package, manifest.name
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "[patch] key {} points at package.name {}",
+                        patch.dependency.package, manifest.name
+                    )
                 ));
             }
             manifest.patches.clear();
@@ -312,9 +335,12 @@ pub fn resolve_for_known_with_features(
                 );
             }
             if !matched {
-                return Err(format!(
-                    "[patch] registry source has no version of {} matching {}",
-                    patch.dependency.package, req
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "[patch] registry source has no version of {} matching {}",
+                        patch.dependency.package, req
+                    )
                 ));
             }
         }
@@ -336,9 +362,12 @@ pub fn resolve_for_known_with_features(
             load_override_manifest(&replacement.dependency, input_lock.as_ref(), src)?
         {
             if manifest.name != replacement.package || manifest.version != replacement.version {
-                return Err(format!(
-                    "[replace] {}:{} must be replaced by a package of the same name and version, got {}:{}",
-                    replacement.package, replacement.version, manifest.name, manifest.version
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "[replace] {}:{} must be replaced by a package of the same name and version, got {}:{}",
+                        replacement.package, replacement.version, manifest.name, manifest.version
+                    )
                 ));
             }
             manifest.patches.clear();
@@ -354,9 +383,12 @@ pub fn resolve_for_known_with_features(
                     .iter()
                     .any(|candidate| candidate.version == replacement.version)
             {
-                return Err(format!(
-                    "[replace] source has no {} {}",
-                    replacement.package, replacement.version
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "[replace] source has no {} {}",
+                        replacement.package, replacement.version
+                    )
                 ));
             }
             selected
@@ -368,9 +400,12 @@ pub fn resolve_for_known_with_features(
             .insert((logical, replacement.version.clone()), selected)
             .is_some()
         {
-            return Err(format!(
-                "[replace] {} {} is specified twice",
-                replacement.package, replacement.version
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "[replace] {} {} is specified twice",
+                    replacement.package, replacement.version
+                )
             ));
         }
     }
@@ -405,7 +440,8 @@ pub fn resolve_for_known_with_features(
                                 d.package,
                                 absolute.display()
                             )
-                        })?;
+                        })
+                        .map_err(|e| crate::fail!(Resolver, e))?;
                     if let Some(checkout) = &m.git_checkout_root {
                         // Containment is a question about real locations, so both sides have to be
                         // the same kind of path: `absolute` is canonical, while the checkout root
@@ -414,10 +450,13 @@ pub fn resolve_for_known_with_features(
                         // it is asked to be.
                         let checkout = std::fs::canonicalize(checkout).unwrap_or(checkout.clone());
                         if !absolute.starts_with(&checkout) {
-                            return Err(format!(
-                                "path dependency {} of Git package {} escapes the repository checkout; a Cargo Git source may not reference a path outside the repository",
-                                m.name,
-                                absolute.display()
+                            return Err(crate::fail!(
+                                Resolver,
+                                format!(
+                                    "path dependency {} of Git package {} escapes the repository checkout; a Cargo Git source may not reference a path outside the repository",
+                                    m.name,
+                                    absolute.display()
+                                )
                             ));
                         }
                         manifest.lock_source = m.lock_source.clone();
@@ -439,11 +478,14 @@ pub fn resolve_for_known_with_features(
                 let identity = local_manifest_key(&manifest);
                 if let Some(existing) = path_manifests.get(&identity) {
                     if existing.root != manifest.root {
-                        return Err(format!(
-                            "local/Git package identity collision on `{}`: {} and {}",
-                            d.package,
-                            existing.root.display(),
-                            manifest.root.display()
+                        return Err(crate::fail!(
+                            Resolver,
+                            format!(
+                                "local/Git package identity collision on `{}`: {} and {}",
+                                d.package,
+                                existing.root.display(),
+                                manifest.root.display()
+                            )
                         ));
                     }
                     continue;
@@ -599,7 +641,10 @@ fn identity_source(identity: &str) -> Option<&str> {
         .map(|(_, source)| source)
 }
 
-fn registry_entry(src: &mut impl PkgSource, identity: &str) -> Result<IndexEntry, String> {
+fn registry_entry(
+    src: &mut impl PkgSource,
+    identity: &str,
+) -> Result<IndexEntry, crate::error::Error> {
     let source = identity_source(identity).unwrap_or(CRATES_IO_LOCK_SOURCE);
     src.index_entry(source, identity_package_name(identity))
 }
@@ -607,7 +652,7 @@ fn registry_entry(src: &mut impl PkgSource, identity: &str) -> Result<IndexEntry
 fn registry_entry_refreshed(
     src: &mut impl PkgSource,
     identity: &str,
-) -> Result<IndexEntry, String> {
+) -> Result<IndexEntry, crate::error::Error> {
     let source = identity_source(identity).unwrap_or(CRATES_IO_LOCK_SOURCE);
     src.refresh_index_entry(source, identity_package_name(identity))
 }
@@ -623,7 +668,7 @@ fn index_version(
     src: &mut impl PkgSource,
     identity: &str,
     version: &Version,
-) -> Result<IndexVersion, String> {
+) -> Result<IndexVersion, crate::error::Error> {
     let found = |entry: &IndexEntry| entry.iter().find(|v| v.version == *version).cloned();
     if let Some(iv) = found(&registry_entry(src, identity)?) {
         return Ok(iv);
@@ -631,9 +676,12 @@ fn index_version(
     if let Some(iv) = found(&registry_entry_refreshed(src, identity)?) {
         return Ok(iv);
     }
-    Err(format!(
-        "{} {version} is not in the index",
-        identity_package_name(identity)
+    Err(crate::fail!(
+        Resolver,
+        format!(
+            "{} {version} is not in the index",
+            identity_package_name(identity)
+        )
     ))
 }
 
@@ -659,7 +707,7 @@ impl SourceOverrides {
         src: &mut impl PkgSource,
         manifests: &BTreeMap<String, PackageManifest>,
         identity: &str,
-    ) -> Result<IndexEntry, String> {
+    ) -> Result<IndexEntry, crate::error::Error> {
         let mut versions = registry_entry(src, identity)?.to_vec();
         for ((logical, version), selected) in &self.patches {
             if logical != identity {
@@ -678,7 +726,8 @@ impl SourceOverrides {
                             selected,
                             identity_package_name(identity)
                         )
-                    })?
+                    })
+                    .map_err(|e| crate::fail!(Resolver, e))?
             };
             versions.retain(|existing| existing.version != *version);
             versions.push(candidate);
@@ -692,7 +741,7 @@ fn load_override_manifest(
     dependency: &super::manifest::DepDecl,
     input_lock: Option<&Lockfile>,
     src: &mut impl PkgSource,
-) -> Result<Option<PackageManifest>, String> {
+) -> Result<Option<PackageManifest>, crate::error::Error> {
     match &dependency.source {
         DepSource::Path(path) => {
             let absolute = std::fs::canonicalize(path)
@@ -730,7 +779,7 @@ fn local_package_name(identity: &str, manifests: &BTreeMap<String, PackageManife
 fn local_dep_identity(
     dependency: &super::manifest::DepDecl,
     manifests: &BTreeMap<String, PackageManifest>,
-) -> Result<String, String> {
+) -> Result<String, crate::error::Error> {
     let mut matches = manifests.iter().filter(|(_, manifest)| {
         if manifest.name != dependency.package {
             return false;
@@ -751,20 +800,23 @@ fn local_dep_identity(
     });
     let first = matches.next().map(|(identity, _)| identity.clone());
     if matches.next().is_some() {
-        return Err(format!(
-            "dependency {} matches several local/Git packages with the same source",
-            dependency.package
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "dependency {} matches several local/Git packages with the same source",
+                dependency.package
+            )
         ));
     }
     first.ok_or_else(|| {
-        format!(
+        crate::fail!(Resolver, format!(
             "the local/Git package of dependency {} was fetched but cannot be located by source",
             dependency.package
-        )
+        ))
     })
 }
 
-fn read_path_manifest(path: &Path) -> Result<PackageManifest, String> {
+fn read_path_manifest(path: &Path) -> Result<PackageManifest, crate::error::Error> {
     let workspace = super::workspace::WorkspaceManifest::read_dependency(path)?;
     workspace
         .members
@@ -779,14 +831,19 @@ fn read_path_manifest(path: &Path) -> Result<PackageManifest, String> {
                     .find(|member| member.root == canonical)
             })
         })
-        .ok_or_else(|| format!("{} is not a resolvable Cargo package", path.display()))
+        .ok_or_else(|| {
+            crate::fail!(
+                Resolver,
+                format!("{} is not a resolvable Cargo package", path.display())
+            )
+        })
 }
 
 fn locked_git_source(
     lock: &Lockfile,
     spec: &GitSpec,
     package: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, crate::error::Error> {
     let source_id = spec.source_id();
     let mut matches = lock.packages.iter().filter(|candidate| {
         candidate.name == package
@@ -798,13 +855,19 @@ fn locked_git_source(
     });
     let first = matches.next().and_then(|package| package.source.clone());
     if matches.next().is_some() {
-        return Err(format!(
-            "Cargo.lock has several precise commits for Git dependency {package} / {source_id}; cannot disambiguate"
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "Cargo.lock has several precise commits for Git dependency {package} / {source_id}; cannot disambiguate"
+            )
         ));
     }
     if first.is_none() {
-        return Err(format!(
-            "stale Cargo.lock: Git dependency {package} has no locked package matching {source_id}"
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "stale Cargo.lock: Git dependency {package} has no locked package matching {source_id}"
+            )
         ));
     }
     Ok(first)
@@ -816,7 +879,7 @@ fn versions_from_lock(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
     lf: &Lockfile,
-) -> Result<(BTreeMap<String, Vec<Version>>, EdgeVersions), String> {
+) -> Result<(BTreeMap<String, Vec<Version>>, EdgeVersions), crate::error::Error> {
     let mut map: BTreeMap<String, Vec<Version>> = BTreeMap::new();
     let mut edges: EdgeVersions = BTreeMap::new();
     // Walk the graph from the root's lock row (the root package is always in the lock)
@@ -829,7 +892,7 @@ fn versions_from_lock(
                 "Cargo.lock has no root package {} {} -- the lock and the manifest are out of sync (re-resolve or delete the lock)",
                 root.name, root.version
             )
-        })?;
+        }).map_err(|e| crate::fail!(Resolver, e))?;
     let mut visited: BTreeSet<(String, Version)> = BTreeSet::new();
     let mut stack: Vec<(&LockedPkg, String)> = vec![(root_locked, root.name.clone())];
     while let Some((pkg, parent_identity)) = stack.pop() {
@@ -852,16 +915,22 @@ fn versions_from_lock(
             let child = match candidates.as_slice() {
                 [child] => *child,
                 [] => {
-                    return Err(format!(
-                        "broken lock graph: no package row for {} {:?} {:?}",
-                        dependency.name, dependency.version, dependency.source
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "broken lock graph: no package row for {} {:?} {:?}",
+                            dependency.name, dependency.version, dependency.source
+                        )
                     ));
                 }
                 _ => {
-                    return Err(format!(
-                        "ambiguous lock graph: {} matches {} package rows and the dependency line lacks version/source disambiguation",
-                        dependency.name,
-                        candidates.len()
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!(
+                            "ambiguous lock graph: {} matches {} package rows and the dependency line lacks version/source disambiguation",
+                            dependency.name,
+                            candidates.len()
+                        )
                     ));
                 }
             };
@@ -902,7 +971,7 @@ fn versions_from_lock(
     }
     // Integrity check: every registry req in a manifest must be satisfied by a locked
     // version (the guard against a stale lock)
-    let check = |m: &PackageManifest, include_dev: bool| -> Result<(), String> {
+    let check = |m: &PackageManifest, include_dev: bool| -> Result<(), crate::error::Error> {
         for d in m
             .deps
             .iter()
@@ -918,9 +987,12 @@ fn versions_from_lock(
                     .get(&d.package)
                     .is_some_and(|versions| versions.iter().any(|version| req.matches(version)))
             {
-                return Err(format!(
-                    "stale Cargo.lock: the locked version of {} does not satisfy req {req} (the manifest changed; re-resolve or delete the lock)",
-                    d.package
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "stale Cargo.lock: the locked version of {} does not satisfy req {req} (the manifest changed; re-resolve or delete the lock)",
+                        d.package
+                    )
                 ));
             }
         }
@@ -936,20 +1008,32 @@ fn versions_from_lock(
 fn effective_locked_package<'a>(
     lock: &'a Lockfile,
     package: &'a LockedPkg,
-) -> Result<&'a LockedPkg, String> {
+) -> Result<&'a LockedPkg, crate::error::Error> {
     let Some(replace) = package.replace.as_deref() else {
         return Ok(package);
     };
     let mut parts = replace.split_whitespace();
-    let name = parts
-        .next()
-        .ok_or_else(|| format!("invalid Cargo.lock replace line: {replace}"))?;
+    let name = parts.next().ok_or_else(|| {
+        crate::fail!(
+            Resolver,
+            format!("invalid Cargo.lock replace line: {replace}")
+        )
+    })?;
     let version = parts
         .next()
-        .ok_or_else(|| format!("Cargo.lock replace line lacks a version: {replace}"))
+        .ok_or_else(|| {
+            crate::fail!(
+                Resolver,
+                format!("Cargo.lock replace line lacks a version: {replace}")
+            )
+        })
         .and_then(|version| {
-            Version::parse(version)
-                .map_err(|error| format!("invalid version on Cargo.lock replace line: {error}"))
+            Version::parse(version).map_err(|error| {
+                crate::fail!(
+                    Resolver,
+                    format!("invalid version on Cargo.lock replace line: {error}")
+                )
+            })
         })?;
     let candidates = lock
         .packages
@@ -962,11 +1046,13 @@ fn effective_locked_package<'a>(
         .collect::<Vec<_>>();
     match candidates.as_slice() {
         [replacement] => Ok(*replacement),
-        [] => Err(format!(
-            "Cargo.lock replace `{replace}` has no replacement package row"
+        [] => Err(crate::fail!(
+            Resolver,
+            format!("Cargo.lock replace `{replace}` has no replacement package row")
         )),
-        _ => Err(format!(
-            "Cargo.lock replace `{replace}` matches several replacement package rows"
+        _ => Err(crate::fail!(
+            Resolver,
+            format!("Cargo.lock replace `{replace}` matches several replacement package rows")
         )),
     }
 }
@@ -974,7 +1060,7 @@ fn effective_locked_package<'a>(
 fn locked_package_identity(
     package: &LockedPkg,
     manifests: &BTreeMap<String, PackageManifest>,
-) -> Result<String, String> {
+) -> Result<String, crate::error::Error> {
     let mut matches = manifests.iter().filter(|(_, manifest)| {
         manifest.name == package.name
             && manifest.version == package.version
@@ -982,9 +1068,12 @@ fn locked_package_identity(
     });
     let first = matches.next().map(|(identity, _)| identity.clone());
     if matches.next().is_some() {
-        return Err(format!(
-            "Cargo.lock package {} {} {:?} matches several local/Git packages",
-            package.name, package.version, package.source
+        return Err(crate::fail!(
+            Resolver,
+            format!(
+                "Cargo.lock package {} {} {:?} matches several local/Git packages",
+                package.name, package.version, package.source
+            )
         ));
     }
     Ok(first.unwrap_or_else(|| match package.source.as_deref() {

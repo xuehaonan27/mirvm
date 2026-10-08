@@ -77,30 +77,30 @@ pub fn canonical(body: &FuncBody) -> Canonical {
 
 /// The fragment's bytes: the encoding version, then the canonical body's postcard form. The
 /// version is hashed rather than assumed, so a form change cannot silently alias old fragments.
-pub fn encode(body: &FuncBody) -> Result<Vec<u8>, String> {
+pub fn encode(body: &FuncBody) -> Result<Vec<u8>, crate::error::Error> {
     encode_canonical(&canonical(body).body)
 }
 
 /// [`encode`] for a body that is already canonical, so a caller that projected one does not
 /// canonicalize it twice.
-pub fn encode_canonical(body: &FuncBody) -> Result<Vec<u8>, String> {
+pub fn encode_canonical(body: &FuncBody) -> Result<Vec<u8>, crate::error::Error> {
     let mut bytes = Vec::new();
     bytes.push(ENCODING_VERSION);
-    bytes.extend(postcard::to_stdvec(body).map_err(|e| e.to_string())?);
+    bytes.extend(postcard::to_stdvec(body).map_err(|e| crate::fail!(Engine, e.to_string()))?);
     Ok(bytes)
 }
 
 /// The canonical body inside a fragment's bytes. The encoding version is checked here rather than
 /// assumed, so bytes another version wrote are refused instead of misread.
-pub fn decode(bytes: &[u8]) -> Result<FuncBody, String> {
+pub fn decode(bytes: &[u8]) -> Result<FuncBody, crate::error::Error> {
     match bytes.split_first() {
-        Some((&ENCODING_VERSION, body)) => {
-            postcard::from_bytes(body).map_err(|error| format!("fragment decode: {error}"))
-        }
-        Some((&version, _)) => Err(format!(
-            "fragment encoding version {version} is not {ENCODING_VERSION}"
+        Some((&ENCODING_VERSION, body)) => postcard::from_bytes(body)
+            .map_err(|error| crate::fail!(Engine, format!("fragment decode: {error}"))),
+        Some((&version, _)) => Err(crate::fail!(
+            Engine,
+            format!("fragment encoding version {version} is not {ENCODING_VERSION}")
         )),
-        None => Err("empty fragment".into()),
+        None => Err(crate::fail!(Engine, "empty fragment")),
     }
 }
 
@@ -110,7 +110,7 @@ pub fn id_of(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// The content address of one body.
-pub fn id(body: &FuncBody) -> Result<[u8; 32], String> {
+pub fn id(body: &FuncBody) -> Result<[u8; 32], crate::error::Error> {
     Ok(id_of(&encode(body)?))
 }
 

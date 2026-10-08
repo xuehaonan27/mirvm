@@ -62,12 +62,21 @@ impl FrozenSnapshot {
     /// to `home`: only an arena at its fixed base can be snapshotted, so the link base equals the home
     /// domain by construction, and a snapshot that claimed otherwise would embed addresses that are
     /// wrong after re-mapping.
-    pub(crate) fn from_home_and_bytes(home: usize, bytes: Vec<u8>) -> Result<Self, String> {
+    pub(crate) fn from_home_and_bytes(
+        home: usize,
+        bytes: Vec<u8>,
+    ) -> Result<Self, crate::error::Error> {
         if !is_valid_home(home) {
-            return Err(format!("invalid frozen snapshot domain: {home:#x}"));
+            return Err(crate::fail!(
+                Engine,
+                format!("invalid frozen snapshot domain: {home:#x}")
+            ));
         }
         if bytes.len() > FROZEN_CAP {
-            return Err("frozen snapshot exceeds arena capacity".into());
+            return Err(crate::fail!(
+                Engine,
+                "frozen snapshot exceeds arena capacity"
+            ));
         }
         Ok(Self {
             home,
@@ -99,8 +108,12 @@ pub(crate) fn deserialize_module_frozen<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<FrozenSnapshot>, D::Error> {
     let wire: Option<(u64, Vec<u8>)> = serde::Deserialize::deserialize(deserializer)?;
     wire.map(|(home, bytes)| {
-        let home = usize::try_from(home)
-            .map_err(|_| format!("frozen snapshot domain {home:#x} does not fit this host"))?;
+        let home = usize::try_from(home).map_err(|_| {
+            crate::fail!(
+                Engine,
+                format!("frozen snapshot domain {home:#x} does not fit this host")
+            )
+        })?;
         FrozenSnapshot::from_home_and_bytes(home, bytes)
     })
     .transpose()
@@ -154,7 +167,7 @@ impl FrozenArena {
     }
 
     /// Restore from a snapshot into the given domain (L2 warm / base image / dependency image load). Err if the fixed base is occupied—the caller treats this as a cache miss and never replays the snapshot at another base (snapshots embed absolute addresses; wrong base = silently wrong values).
-    pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, String> {
+    pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, crate::error::Error> {
         assert!(
             snapshot.len() <= FROZEN_CAP,
             "frozen snapshot exceeds arena capacity"
@@ -166,8 +179,9 @@ impl FrozenArena {
         let Some(p) =
             crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
         else {
-            return Err(format!(
-                "frozen fixed base {home:#x} is occupied; cannot restore snapshot"
+            return Err(crate::fail!(
+                Engine,
+                format!("frozen fixed base {home:#x} is occupied; cannot restore snapshot")
             ));
         };
         unsafe {
@@ -183,19 +197,22 @@ impl FrozenArena {
     }
 
     /// Create a separate runnable instance from a reusable image. Uses an anonymous address each time so that instances of the same artifact do not contend for the fixed mapping; absolute pointers in the image are later patched by the Module's FrozenReloc.
-    pub fn restore_dynamic(snapshot: &FrozenSnapshot) -> Result<Self, String> {
+    pub fn restore_dynamic(snapshot: &FrozenSnapshot) -> Result<Self, crate::error::Error> {
         if snapshot.bytes.len() > FROZEN_CAP {
-            return Err("frozen snapshot exceeds arena capacity".into());
+            return Err(crate::fail!(
+                Engine,
+                "frozen snapshot exceeds arena capacity"
+            ));
         }
         if !is_valid_home(snapshot.home) {
-            return Err(format!(
-                "invalid frozen snapshot home: {:#x}",
-                snapshot.home
+            return Err(crate::fail!(
+                Engine,
+                format!("invalid frozen snapshot home: {:#x}", snapshot.home)
             ));
         }
         let base = crate::os::mem::map_anon(FROZEN_CAP, crate::os::mem::Prot::RW, false);
         if base.is_null() {
-            return Err("fail to map frozen instance".into());
+            return Err(crate::fail!(Engine, "fail to map frozen instance"));
         }
         unsafe {
             std::ptr::copy_nonoverlapping(snapshot.bytes.as_ptr(), base, snapshot.bytes.len());
@@ -233,9 +250,12 @@ impl FrozenArena {
     }
 
     /// Turn a fixed-address lower product into a package image that does not occupy a mapping.
-    pub fn to_snapshot(&self) -> Result<FrozenSnapshot, String> {
+    pub fn to_snapshot(&self) -> Result<FrozenSnapshot, crate::error::Error> {
         if !self.at_fixed_base {
-            return Err("frozen arena is not at its link-time base".into());
+            return Err(crate::fail!(
+                Engine,
+                "frozen arena is not at its link-time base"
+            ));
         }
         Ok(FrozenSnapshot {
             home: self.home,

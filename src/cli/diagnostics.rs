@@ -5,7 +5,6 @@
 
 use std::env;
 use std::ffi::CString;
-use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -275,18 +274,6 @@ fn path_present(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
-}
-
-/// Emit one MIRVM-owned control diagnostic to inherited stderr and, when a
-/// capture owns a router, append the same bytes to its diagnostics stream.
-pub(crate) fn control(arguments: fmt::Arguments<'_>) {
-    let mut bytes = Vec::new();
-    bytes
-        .write_fmt(arguments)
-        .expect("formatting into a byte vector cannot fail");
-    bytes.push(b'\n');
-
-    crate::diag::write(&bytes);
 }
 
 /// The capture tee `diag` calls for every routed line: the byte-level entry the router owns, so the

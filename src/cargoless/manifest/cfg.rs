@@ -32,16 +32,22 @@ fn parse_cfg_inner(s: &str) -> Result<CfgExpr, MErr> {
         }),
     ] {
         if let Some(rest) = s.strip_prefix(op) {
-            let rest = rest
-                .strip_suffix(')')
-                .ok_or_else(|| format!("unbalanced parentheses in cfg expression: {s}"))?;
+            let rest = rest.strip_suffix(')').ok_or_else(|| {
+                crate::fail!(
+                    Resolver,
+                    format!("unbalanced parentheses in cfg expression: {s}")
+                )
+            })?;
             let parts = split_top_level(rest)?;
             let exprs = parts
                 .iter()
                 .map(|p| parse_cfg_inner(p.trim()))
                 .collect::<Result<Vec<_>, _>>()?;
             if op == "not(" && exprs.len() != 1 {
-                return Err(format!("cfg not() takes exactly one argument: {s}"));
+                return Err(crate::fail!(
+                    Resolver,
+                    format!("cfg not() takes exactly one argument: {s}")
+                ));
             }
             return Ok(make(exprs));
         }
@@ -51,7 +57,10 @@ fn parse_cfg_inner(s: &str) -> Result<CfgExpr, MErr> {
         None => (s.trim().to_string(), String::new()),
     };
     if key.is_empty() {
-        return Err(format!("invalid cfg atom form: {s}"));
+        return Err(crate::fail!(
+            Resolver,
+            format!("invalid cfg atom form: {s}")
+        ));
     }
     Ok(CfgExpr::Atom(key, val))
 }
@@ -133,7 +142,10 @@ fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
             ')' => {
                 depth -= 1;
                 if depth < 0 {
-                    return Err(format!("unbalanced parentheses in cfg expression: {s}"));
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!("unbalanced parentheses in cfg expression: {s}")
+                    ));
                 }
                 cur.push(c);
             }
@@ -145,7 +157,10 @@ fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
         }
     }
     if depth != 0 {
-        return Err(format!("unbalanced parentheses in cfg expression: {s}"));
+        return Err(crate::fail!(
+            Resolver,
+            format!("unbalanced parentheses in cfg expression: {s}")
+        ));
     }
     if !cur.trim().is_empty() {
         out.push(cur.trim().to_string());

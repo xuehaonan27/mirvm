@@ -56,12 +56,15 @@ pub enum ResolverVersion {
 }
 
 impl ResolverVersion {
-    pub fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, crate::error::Error> {
         match value {
             "1" => Ok(Self::V1),
             "2" => Ok(Self::V2),
             "3" => Ok(Self::V3),
-            other => Err(format!("resolver must be 1, 2 or 3, got `{other}`")),
+            other => Err(crate::fail!(
+                Resolver,
+                format!("resolver must be 1, 2 or 3, got `{other}`")
+            )),
         }
     }
 
@@ -86,12 +89,15 @@ pub enum IncompatibleRustVersions {
 }
 
 impl IncompatibleRustVersions {
-    pub fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, crate::error::Error> {
         match value {
             "allow" => Ok(Self::Allow),
             "fallback" => Ok(Self::Fallback),
-            other => Err(format!(
-                "resolver.incompatible-rust-versions accepts only `allow` or `fallback`, got `{other}`"
+            other => Err(crate::fail!(
+                Resolver,
+                format!(
+                    "resolver.incompatible-rust-versions accepts only `allow` or `fallback`, got `{other}`"
+                )
             )),
         }
     }
@@ -100,7 +106,10 @@ impl IncompatibleRustVersions {
 /// Cargo's rust-version allows 1, 2 or 3 bare numeric segments and rejects semver
 /// operators, prerelease and build metadata. Internally it is padded to three
 /// segments so comparisons are stable.
-pub fn parse_rust_version(value: &str, field: &str) -> Result<semver::Version, String> {
+pub fn parse_rust_version(
+    value: &str,
+    field: &str,
+) -> Result<semver::Version, crate::error::Error> {
     let parts: Vec<&str> = value.split('.').collect();
     if parts.is_empty()
         || parts.len() > 3
@@ -108,8 +117,9 @@ pub fn parse_rust_version(value: &str, field: &str) -> Result<semver::Version, S
             .iter()
             .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
     {
-        return Err(format!(
-            "{field} must be 1, 2 or 3 bare version segments, got `{value}`"
+        return Err(crate::fail!(
+            Resolver,
+            format!("{field} must be 1, 2 or 3 bare version segments, got `{value}`")
         ));
     }
     let normalized = match parts.len() {
@@ -119,12 +129,12 @@ pub fn parse_rust_version(value: &str, field: &str) -> Result<semver::Version, S
         _ => unreachable!(),
     };
     semver::Version::parse(&normalized)
-        .map_err(|error| format!("invalid {field} `{value}`: {error}"))
+        .map_err(|error| crate::fail!(Resolver, format!("invalid {field} `{value}`: {error}")))
 }
 
 /// The version of the rustc mirvm actually embeds. The sysroot rustc is used at
 /// build time so another toolchain on PATH cannot affect dependency selection.
-pub fn current_rust_version() -> Result<semver::Version, String> {
+pub fn current_rust_version() -> Result<semver::Version, crate::error::Error> {
     static VERSION: std::sync::OnceLock<semver::Version> = std::sync::OnceLock::new();
     if let Some(version) = VERSION.get() {
         return Ok(version.clone());
@@ -132,7 +142,12 @@ pub fn current_rust_version() -> Result<semver::Version, String> {
     let rustc = crate::sysroot::toolchain::rustc();
     let command = std::process::Command::new(&rustc);
     let mut version = rustc_version::VersionMeta::for_command(command)
-        .map_err(|error| format!("failed to read version of {}: {error}", rustc.display()))?
+        .map_err(|error| {
+            crate::fail!(
+                Resolver,
+                format!("failed to read version of {}: {error}", rustc.display())
+            )
+        })?
         .semver;
     version.pre = semver::Prerelease::EMPTY;
     version.build = semver::BuildMetadata::EMPTY;
@@ -551,12 +566,15 @@ struct RawTargetDeps {
 
 // ---------- errors ----------
 
-type MErr = String;
+type MErr = crate::error::Error;
 
 fn unsupported(what: impl Into<String>) -> MErr {
-    format!(
-        "manifest construct outside the supported subset (rejected loudly): {}",
-        what.into()
+    crate::fail!(
+        Resolver,
+        format!(
+            "manifest construct outside the supported subset (rejected loudly): {}",
+            what.into()
+        )
     )
 }
 
@@ -565,18 +583,23 @@ fn unsupported(what: impl Into<String>) -> MErr {
 impl PackageManifest {
     /// Read from a project directory (directory/Cargo.toml).
     pub fn read_dir(dir: &Path) -> Result<Self, MErr> {
-        let dir = std::path::absolute(dir)
-            .map_err(|e| format!("failed to absolutize project dir {}: {e}", dir.display()))?;
+        let dir = std::path::absolute(dir).map_err(|e| {
+            crate::fail!(
+                Resolver,
+                format!("failed to absolutize project dir {}: {e}", dir.display())
+            )
+        })?;
         let file = dir.join("Cargo.toml");
-        let text = std::fs::read_to_string(&file)
-            .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+        let text = std::fs::read_to_string(&file).map_err(|e| {
+            crate::fail!(Resolver, format!("failed to read {}: {e}", file.display()))
+        })?;
         Self::parse(&text, &dir)
     }
 
     /// Parse from manifest text (root = package root directory).
     pub fn parse(text: &str, root: &Path) -> Result<Self, MErr> {
-        let raw: RawManifest =
-            toml::from_str(text).map_err(|e| format!("failed to parse Cargo.toml: {e}"))?;
+        let raw: RawManifest = toml::from_str(text)
+            .map_err(|e| crate::fail!(Resolver, format!("failed to parse Cargo.toml: {e}")))?;
         let rustc_lint_flags = parse_lints(raw.lints.as_ref())?;
         if raw.package.is_none() && raw.workspace.is_some() {
             return Err(unsupported(
@@ -585,39 +608,44 @@ impl PackageManifest {
         }
         let pkg = raw
             .package
-            .ok_or_else(|| "manifest has no [package]".to_string())?;
+            .ok_or_else(|| crate::fail!(Resolver, "manifest has no [package]".to_string()))?;
         let name = pkg
             .name
-            .ok_or_else(|| "package.name is missing".to_string())?;
+            .ok_or_else(|| crate::fail!(Resolver, "package.name is missing".to_string()))?;
 
         // version/edition support workspace inheritance (workspace.package.*)
         let ws_pkg = raw.workspace.as_ref().and_then(|w| w.package.as_ref());
         let version = match pkg.version {
             Some(toml::Value::String(v)) => semver::Version::parse(&v)
-                .map_err(|e| format!("invalid package.version {v}: {e}"))?,
+                .map_err(|e| crate::fail!(Resolver, format!("invalid package.version {v}: {e}")))?,
             Some(toml::Value::Table(t)) if t.get("workspace").is_some() => ws_pkg
                 .and_then(|w| w.version.clone())
                 .and_then(|v| semver::Version::parse(&v).ok())
                 .ok_or_else(|| {
                     "package.version inherits from workspace but the root has no version"
                         .to_string()
-                })?,
-            Some(_) => return Err("unsupported package.version form".into()),
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?,
+            Some(_) => return Err(crate::fail!(Resolver, "unsupported package.version form")),
             None => semver::Version::new(0, 0, 0),
         };
         let edition = match pkg.edition {
             Some(toml::Value::String(e)) => e,
-            Some(toml::Value::Table(t)) if t.get("workspace").is_some() => {
-                ws_pkg.and_then(|w| w.edition.clone()).ok_or_else(|| {
+            Some(toml::Value::Table(t)) if t.get("workspace").is_some() => ws_pkg
+                .and_then(|w| w.edition.clone())
+                .ok_or_else(|| {
                     "package.edition inherits from workspace but the root has no edition"
                         .to_string()
-                })?
-            }
-            Some(_) => return Err("unsupported package.edition form".into()),
+                })
+                .map_err(|e| crate::fail!(Resolver, e))?,
+            Some(_) => return Err(crate::fail!(Resolver, "unsupported package.edition form")),
             None => "2015".to_string(),
         };
         if !matches!(edition.as_str(), "2015" | "2018" | "2021" | "2024") {
-            return Err(format!("package.edition `{edition}` is not supported"));
+            return Err(crate::fail!(
+                Resolver,
+                format!("package.edition `{edition}` is not supported")
+            ));
         }
         let resolver = raw
             .workspace
@@ -636,9 +664,10 @@ impl PackageManifest {
                 ws_pkg.and_then(|w| w.rust_version.clone())
             }
             Some(_) => {
-                return Err(
-                    "package.rust-version must be a string or a workspace inheritance".into(),
-                );
+                return Err(crate::fail!(
+                    Resolver,
+                    "package.rust-version must be a string or a workspace inheritance"
+                ));
             }
             None => None,
         };
@@ -655,9 +684,12 @@ impl PackageManifest {
                 _ => unreachable!(),
             };
             if version < &minimum {
-                return Err(format!(
-                    "package.rust-version {} is incompatible with Rust {minimum} required by edition {edition}",
-                    rust_version_text.as_deref().unwrap_or("")
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "package.rust-version {} is incompatible with Rust {minimum} required by edition {edition}",
+                        rust_version_text.as_deref().unwrap_or("")
+                    )
                 ));
             }
         }
@@ -717,7 +749,8 @@ impl PackageManifest {
         for (cfg_expr, tdeps) in raw.target.iter().flatten() {
             // The expression is validated here (a typo must be loud); semantic evaluation
             // happens at use time
-            validate_cfg_expr(cfg_expr).map_err(|e| format!("target.{cfg_expr}: {e}"))?;
+            validate_cfg_expr(cfg_expr)
+                .map_err(|e| crate::fail!(Resolver, format!("target.{cfg_expr}: {e}")))?;
             parse_dep_table(
                 &tdeps.dependencies,
                 DepKind::Normal,
@@ -856,7 +889,7 @@ impl PackageManifest {
             },
             manifest_text,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| crate::fail!(Resolver, error.to_string()))?;
         Self::parse(&effective, root)
     }
 
@@ -881,23 +914,35 @@ impl PackageManifest {
             if let Some(b) = bins.iter().find(|(n, _)| *n == want) {
                 return Ok(*b);
             }
-            return Err(format!(
-                "no bin target named `{want}` (available: {})",
-                bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+            return Err(crate::fail!(
+                Resolver,
+                format!(
+                    "no bin target named `{want}` (available: {})",
+                    bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                )
             ));
         }
         if let Some(dr) = &self.default_run {
             if let Some(b) = bins.iter().find(|(n, _)| *n == dr) {
                 return Ok(*b);
             }
-            return Err(format!("default-run={dr} does not exist in [[bin]]"));
+            return Err(crate::fail!(
+                Resolver,
+                format!("default-run={dr} does not exist in [[bin]]")
+            ));
         }
         match bins.len() {
-            0 => Err(format!("package {} has no bin target", self.name)),
+            0 => Err(crate::fail!(
+                Resolver,
+                format!("package {} has no bin target", self.name)
+            )),
             1 => Ok(bins[0]),
-            _ => Err(format!(
-                "multiple bin targets ({}) -- choose one with --bin or pin it with default-run",
-                bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+            _ => Err(crate::fail!(
+                Resolver,
+                format!(
+                    "multiple bin targets ({}) -- choose one with --bin or pin it with default-run",
+                    bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                )
             )),
         }
     }
@@ -943,7 +988,7 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
     };
     let tools = value
         .as_table()
-        .ok_or_else(|| "[lints] must be a table".to_string())?;
+        .ok_or_else(|| crate::fail!(Resolver, "[lints] must be a table".to_string()))?;
     if tools.contains_key("workspace") {
         return Err(unsupported(
             "[lints] workspace inheritance (the workspace layer must materialize it first)",
@@ -954,7 +999,7 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
     for (tool, lints) in tools {
         let lints = lints
             .as_table()
-            .ok_or_else(|| format!("[lints.{tool}] must be a table"))?;
+            .ok_or_else(|| crate::fail!(Resolver, format!("[lints.{tool}] must be a table")))?;
         for (name, spec) in lints {
             let (level, priority, check_cfg) = match spec {
                 toml::Value::String(level) => (level.as_str(), 0, Vec::new()),
@@ -963,34 +1008,46 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
                         .keys()
                         .find(|key| !matches!(key.as_str(), "level" | "priority" | "check-cfg"))
                     {
-                        return Err(format!(
-                            "lints.{tool}.{name} has a key `{key}` that Cargo does not know"
+                        return Err(crate::fail!(
+                            Resolver,
+                            format!(
+                                "lints.{tool}.{name} has a key `{key}` that Cargo does not know"
+                            )
                         ));
                     }
                     let level = table
                         .get("level")
                         .and_then(toml::Value::as_str)
-                        .ok_or_else(|| format!("lints.{tool}.{name}.level must be a string"))?;
+                        .ok_or_else(|| {
+                            crate::fail!(
+                                Resolver,
+                                format!("lints.{tool}.{name}.level must be a string")
+                            )
+                        })?;
                     let priority = match table.get("priority") {
-                        Some(value) => value.as_integer().ok_or_else(|| {
-                            format!("lints.{tool}.{name}.priority must be an integer")
-                        })?,
+                        Some(value) => value
+                            .as_integer()
+                            .ok_or_else(|| {
+                                format!("lints.{tool}.{name}.priority must be an integer")
+                            })
+                            .map_err(|e| crate::fail!(Resolver, e))?,
                         None => 0,
                     };
                     let check_cfg = match table.get("check-cfg") {
                         Some(value) => {
                             if tool != "rust" || name != "unexpected_cfgs" {
-                                return Err(
+                                return Err(crate::fail!(
+                                    Resolver,
                                     "check-cfg is only allowed under lints.rust.unexpected_cfgs"
-                                        .to_string(),
-                                );
+                                        .to_string()
+                                ));
                             }
                             value
                                 .as_array()
                                 .ok_or_else(|| {
                                     "lints.rust.unexpected_cfgs.check-cfg must be an array of strings"
                                         .to_string()
-                                })?
+                                }).map_err(|e| crate::fail!(Resolver, e))?
                                 .iter()
                                 .map(|item| {
                                     item.as_str().map(str::to_string).ok_or_else(|| {
@@ -998,21 +1055,25 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
                                             .to_string()
                                     })
                                 })
-                                .collect::<Result<Vec<_>, _>>()?
+                                .collect::<Result<Vec<_>, _>>().map_err(|e| crate::fail!(Resolver, e))?
                         }
                         None => Vec::new(),
                     };
                     (level, priority, check_cfg)
                 }
                 _ => {
-                    return Err(format!(
-                        "lints.{tool}.{name} must be a level string or a config table"
+                    return Err(crate::fail!(
+                        Resolver,
+                        format!("lints.{tool}.{name} must be a level string or a config table")
                     ));
                 }
             };
             if !matches!(level, "allow" | "warn" | "deny" | "forbid") {
-                return Err(format!(
-                    "lints.{tool}.{name}.level accepts only allow/warn/deny/forbid, got `{level}`"
+                return Err(crate::fail!(
+                    Resolver,
+                    format!(
+                        "lints.{tool}.{name}.level accepts only allow/warn/deny/forbid, got `{level}`"
+                    )
                 ));
             }
             let qualified = if tool == "rust" {

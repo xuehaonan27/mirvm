@@ -36,16 +36,21 @@ pub fn compile_plan(
     root_has_build_script: bool,
     root_proc_macro: bool,
     quiet_build_warnings: bool,
-) -> Result<CompiledPlan, String> {
+) -> Result<CompiledPlan, crate::error::Error> {
     // unit-level Kahn ready-queue parallel scheduling: a unit is ready when all its deps are 'done'
     // (build.rs lifecycle + host/target compilation all finished according to set membership);
     // N workers each run the full pipeline of assigned units (build.rs decision/
     // execution → compilation), completion table is only gathered on the main thread.
     for d in [&layout.deps, &layout.host_deps, &layout.build_root] {
-        std::fs::create_dir_all(d).map_err(|e| format!("create {} failed: {e}", d.display()))?;
+        std::fs::create_dir_all(d)
+            .map_err(|e| crate::fail!(Build, format!("create {} failed: {e}", d.display())))?;
     }
-    let fps = schedule::fingerprints(plan, profile, stamp, rustflags)
-        .map_err(|e| format!("dependency fingerprint computation failed: {e}"))?;
+    let fps = schedule::fingerprints(plan, profile, stamp, rustflags).map_err(|e| {
+        crate::fail!(
+            Build,
+            format!("dependency fingerprint computation failed: {e}")
+        )
+    })?;
     let host_set = schedule::host_closure_for_root(plan, root_proc_macro);
     let target_set = schedule::target_units(plan);
     let build_set = schedule::build_closure(plan, root_has_build_script);
@@ -235,7 +240,7 @@ fn build_work_msg(ctx: &SharedCtx, t: &UnitTables, ix: usize) -> WorkMsg {
 /// build.rs lifecycle → host-side compile → target-side compile; hit stages are skipped as usual
 /// (**disk checked inside the lock** — artifacts from same-fp predecessor must be visible to count as hit). Failure returns
 /// original error text (`mirvm: ` prefix added by main thread after convergence, byte-identical to serial text).
-fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, String> {
+fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, crate::error::Error> {
     let ix = msg.ix;
     let u = &ctx.plan.units[ix];
     let fp = &ctx.fps[ix];
@@ -340,15 +345,18 @@ fn run_build_lifecycle(
     ctx: &SharedCtx,
     dep_env: BTreeMap<String, String>,
     dep_links_reran: Vec<String>,
-) -> Result<(BuildOutput, bool), String> {
+) -> Result<(BuildOutput, bool), crate::error::Error> {
     let fp = &ctx.fps[ix];
     let bdir = ctx.layout.build_dir(&u.package, fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
-        return Err(format!(
-            "failed to create build directory {} ({} {}): {e}",
-            bdir.display(),
-            u.package,
-            u.version
+        return Err(crate::fail!(
+            Build,
+            format!(
+                "failed to create build directory {} ({} {}): {e}",
+                bdir.display(),
+                u.package,
+                u.version
+            )
         ));
     }
     let bexe = bdir.join(format!("build_script_build-{fp}"));
@@ -401,12 +409,13 @@ pub(super) fn run_build_lifecycle_root(
 ) -> (BuildOutput, bool) {
     let bdir = layout.build_dir(&manifest.name, root_fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
-        eprintln!(
-            "mirvm: failed to create build directory {} (root package {}): {e}",
+        crate::diag_error!(
+            Build,
+            "failed to create build directory {} (root package {}): {e}",
             bdir.display(),
             manifest.name
         );
-        std::process::exit(1);
+        std::process::exit(crate::diag::exit::FAILURE.into());
     }
     let bexe = bdir.join(format!("build_script_build-{root_fp}"));
     if !bexe.is_file() {
@@ -424,19 +433,23 @@ pub(super) fn run_build_lifecycle_root(
         let status = match cmd.status() {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "mirvm: build script compilation child process failed to start (root package {} {}): {e}",
-                    manifest.name, manifest.version
+                crate::diag_error!(
+                    Build,
+                    "build script compilation child process failed to start (root package {} {}): {e}",
+                    manifest.name,
+                    manifest.version
                 );
-                std::process::exit(1);
+                std::process::exit(crate::diag::exit::FAILURE.into());
             }
         };
         if !status.success() {
-            eprintln!(
-                "mirvm: build script compilation failed: root package {} {}",
-                manifest.name, manifest.version
+            crate::diag_error!(
+                Build,
+                "build script compilation failed: root package {} {}",
+                manifest.name,
+                manifest.version
             );
-            std::process::exit(1);
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     }
     let env = buildrs::build_script_env(&buildrs::ExecCtx {
@@ -469,8 +482,8 @@ pub(super) fn run_build_lifecycle_root(
     ) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("mirvm: {e}");
-            std::process::exit(1);
+            crate::diag_error!(Build, "{e}");
+            std::process::exit(crate::diag::exit::FAILURE.into());
         }
     }
 }
@@ -494,7 +507,7 @@ fn rerun_gate(
     env: &BTreeMap<String, String>,
     dep_links_reran: &[String],
     quiet_build_warnings: bool,
-) -> Result<(BuildOutput, bool), String> {
+) -> Result<(BuildOutput, bool), crate::error::Error> {
     let env_get = |k: &str| std::env::var(k).ok();
     let (rerun, why) = buildrs::should_rerun(
         bdir,
@@ -505,7 +518,11 @@ fn rerun_gate(
         &env_get,
     );
     if crate::options::debug_bldrs() {
-        eprintln!("bldrs {} {pkg} {why}", if rerun { "run" } else { "skip" });
+        crate::diag_error!(
+            Build,
+            "bldrs {} {pkg} {why}",
+            if rerun { "run" } else { "skip" }
+        );
     }
     if !rerun {
         // skip execution: output.txt reparse is BuildOutput (replay failure treated as corrupted archive, self-healing by falling through to run)
@@ -537,7 +554,7 @@ fn rerun_gate(
 fn show_warnings(pkg: &str, ver: &str, from_registry: bool, bo: &BuildOutput, quiet: bool) {
     if !from_registry && !quiet {
         for w in &bo.warnings {
-            eprintln!("warning: {pkg}@{ver}: {w}");
+            crate::diag_error!(Build, "warning: {pkg}@{ver}: {w}");
         }
     }
 }
@@ -553,11 +570,19 @@ fn exec_and_parse(
     cwd: &Path,
     env: &BTreeMap<String, String>,
     quiet_build_warnings: bool,
-) -> Result<(BuildOutput, String), String> {
-    let stdout = buildrs::run_build_script(bexe, cwd, env)
-        .map_err(|e| format!("build script execution failed ({pkg} {ver}): {e}"))?;
-    let bo = buildrs::parse_instructions(&stdout)
-        .map_err(|e| format!("build script instruction parse failed ({pkg} {ver}): {e}"))?;
+) -> Result<(BuildOutput, String), crate::error::Error> {
+    let stdout = buildrs::run_build_script(bexe, cwd, env).map_err(|e| {
+        crate::fail!(
+            Build,
+            format!("build script execution failed ({pkg} {ver}): {e}")
+        )
+    })?;
+    let bo = buildrs::parse_instructions(&stdout).map_err(|e| {
+        crate::fail!(
+            Build,
+            format!("build script instruction parse failed ({pkg} {ver}): {e}")
+        )
+    })?;
     show_warnings(pkg, ver, from_registry, &bo, quiet_build_warnings);
     Ok((bo, stdout))
 }
@@ -593,17 +618,24 @@ fn apply_build_env(
 
 /// Compile child process runs synchronously to completion; startup/compile failure returns original error text (what = artifact category,
 /// names the crate — main thread prepends `mirvm: ` prefix and exits loudly after convergence, same shape as serial text).
-fn run_compile(cmd: &mut std::process::Command, u: &Unit, what: &str) -> Result<(), String> {
-    let status = cmd.status().map_err(|e| {
-        format!(
-            "{what} compilation child process failed to start ({} {}): {e}",
-            u.package, u.version
-        )
-    })?;
+fn run_compile(
+    cmd: &mut std::process::Command,
+    u: &Unit,
+    what: &str,
+) -> Result<(), crate::error::Error> {
+    let status = cmd
+        .status()
+        .map_err(|e| {
+            format!(
+                "{what} compilation child process failed to start ({} {}): {e}",
+                u.package, u.version
+            )
+        })
+        .map_err(|e| crate::fail!(Build, e))?;
     if !status.success() {
-        return Err(format!(
-            "{what} compilation failed: {} {}",
-            u.package, u.version
+        return Err(crate::fail!(
+            Build,
+            format!("{what} compilation failed: {} {}", u.package, u.version)
         ));
     }
     Ok(())

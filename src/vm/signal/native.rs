@@ -90,13 +90,13 @@ pub(crate) fn set_errno(value: i32) {
 
 pub(crate) fn materialize_signal_stub(
     registration: &'static SignalRegistration,
-) -> Result<usize, String> {
+) -> Result<usize, crate::error::Error> {
     // The entry stub's bytes are the pair's (the kernel's SA_SIGINFO entry contract as the CPU
     // encodes it); where they go and that they must end up read-execute is the engine's.
     let page_size = crate::os::mem::page_size();
     let page = crate::os::mem::map_anon(page_size, crate::os::mem::Prot::RW, false);
     if page.is_null() {
-        return Err("mmap for fixed signal stub failed".into());
+        return Err(crate::fail!(Engine, "mmap for fixed signal stub failed"));
     }
     let code = crate::os_arch::signal::entry_stub_bytes(
         ptr::from_ref(registration) as usize,
@@ -105,7 +105,10 @@ pub(crate) fn materialize_signal_stub(
     unsafe { ptr::copy_nonoverlapping(code.as_ptr(), page, code.len()) };
     if let Err(error) = crate::os::mem::protect(page, page_size, crate::os::mem::Prot::RX) {
         unsafe { crate::os::mem::unmap(page, page_size) };
-        return Err(format!("failed to seal fixed signal stub RX: {error}"));
+        return Err(crate::fail!(
+            Engine,
+            format!("failed to seal fixed signal stub RX: {error}")
+        ));
     }
     Ok(page as usize)
 }

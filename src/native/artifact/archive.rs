@@ -421,7 +421,7 @@ pub(crate) fn materialize_for_target_in(
     // Its name *is* that content: the artifact is addressed by the hash of what it was built from.
     let native_runtime_bridge =
         crate::native::artifact::bridge::artifact(cache_dir, cc, &cc_identity)
-            .map_err(Error::tool)?;
+            .map_err(|e| Error::tool(e.to_string()))?;
     let bridge_name = native_runtime_bridge
         .file_name()
         .unwrap_or_default()
@@ -555,7 +555,10 @@ fn rescue_with_rlib_symbols(
         }
     }
     if crate::options::c2_debug() {
-        eprintln!("c2-debug: undefs={undefs:?} hit={}", hit.len());
+        crate::diag::instrument(format_args!(
+            "c2-debug: undefs={undefs:?} hit={}",
+            hit.len()
+        ));
     }
     if hit.is_empty() {
         return Ok(None);

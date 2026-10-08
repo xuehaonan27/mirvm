@@ -12,17 +12,28 @@ use super::parse::Tables;
 /// The address of every FDE, which is what registers a function's unwind information. A CIE --
 /// a record whose `cie_pointer` field is zero -- is not a registration point; the unwinder reaches
 /// it through the FDEs that reference it.
-pub(super) fn frames(mapping: &Mapping, tables: &Tables) -> Result<Box<[usize]>, String> {
+pub(super) fn frames(
+    mapping: &Mapping,
+    tables: &Tables,
+) -> Result<Box<[usize]>, crate::error::Error> {
     let Some(eh_frame) = tables.eh_frame else {
         return Ok(Vec::new().into_boxed_slice());
     };
     if !mapping.contains(eh_frame.addr, eh_frame.size) {
-        return Err("MC .eh_frame lies outside a loadable segment".into());
+        return Err(crate::fail!(
+            Native,
+            "MC .eh_frame lies outside a loadable segment"
+        ));
     }
     let start = mapping.address(eh_frame.addr, ".eh_frame")?;
     let end = start
-        .checked_add(usize::try_from(eh_frame.size).map_err(|_| bad())?)
-        .ok_or_else(bad)?;
+        .checked_add(
+            usize::try_from(eh_frame.size)
+                .map_err(|_| bad())
+                .map_err(|e| crate::fail!(Native, e))?,
+        )
+        .ok_or_else(bad)
+        .map_err(|e| crate::fail!(Native, e))?;
     let mut frames = Vec::new();
     let mut cursor = start;
     while cursor + 8 <= end {
@@ -33,9 +44,9 @@ pub(super) fn frames(mapping: &Mapping, tables: &Tables) -> Result<Box<[usize]>,
         }
         let record_end = cursor
             .checked_add(length + 4)
-            .ok_or_else(|| "MC .eh_frame record overflow".to_string())?;
+            .ok_or_else(|| crate::fail!(Native, "MC .eh_frame record overflow".to_string()))?;
         if record_end > end {
-            return Err("MC .eh_frame record exceeds section".into());
+            return Err(crate::fail!(Native, "MC .eh_frame record exceeds section"));
         }
         let cie_pointer =
             u32::from_le_bytes(unsafe { std::ptr::read((cursor + 4) as *const [u8; 4]) });

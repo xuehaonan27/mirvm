@@ -155,7 +155,10 @@ fn scheduler_never_starts_before_deps_and_finishes_all() {
                 let d = done_flags.lock().unwrap();
                 for &dep in deps[ix] {
                     if !d[dep] {
-                        return Err(format!("unit {ix} started before dep {dep} finished"));
+                        return Err(crate::fail!(
+                            Build,
+                            format!("unit {ix} started before dep {dep} finished")
+                        ));
                     }
                 }
             }
@@ -210,14 +213,14 @@ fn scheduler_first_error_wins_and_dispatch_stops() {
         |ix| {
             started.lock().unwrap().push(ix);
             if ix >= 1 {
-                Err(format!("boom-{ix}"))
+                Err(crate::fail!(Build, format!("boom-{ix}")))
             } else {
                 Ok(ix)
             }
         },
         |s, ix, _| s.push(ix),
     );
-    assert_eq!(r.unwrap_err(), "boom-1", "first error kept");
+    assert_eq!(r.unwrap_err().to_string(), "boom-1", "first error kept");
     assert_eq!(
         *started.lock().unwrap(),
         vec![0, 1],
@@ -240,7 +243,7 @@ fn scheduler_reports_cycle_loudly() {
         |s, ix, _| s.push(ix),
     );
     assert_eq!(
-        r.unwrap_err(),
+        r.unwrap_err().to_string(),
         "internal inconsistency: the compilation-unit dependency graph has a cycle (cargo's resolution graph should be a DAG)"
     );
 }

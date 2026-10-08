@@ -285,5 +285,5 @@ pub fn print(module: &Module) {
         crate::options::output_format(),
         Ok(crate::options::OutputFormat::Json)
     );
-    print!("{}", if json { survey.json() } else { survey.text() });
+    crate::out::text(if json { survey.json() } else { survey.text() });
 }

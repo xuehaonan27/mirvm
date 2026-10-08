@@ -32,7 +32,7 @@ pub(crate) struct ImageSymbol {
 }
 
 /// The symbols of a Mach-O image, in the order its table lists them.
-pub(crate) fn symbols(bytes: &[u8]) -> Result<Vec<ImageSymbol>, String> {
+pub(crate) fn symbols(bytes: &[u8]) -> Result<Vec<ImageSymbol>, crate::error::Error> {
     let (commands, _) = header(bytes)?;
     let mut cursor = HEADER_SIZE;
     for _ in 0..commands {
@@ -40,16 +40,19 @@ pub(crate) fn symbols(bytes: &[u8]) -> Result<Vec<ImageSymbol>, String> {
         if command == LC_SYMTAB {
             return symbol_table(bytes, symtab_at(bytes, cursor)?);
         }
-        cursor = cursor
-            .checked_add(size as usize)
-            .ok_or_else(|| "the load commands overrun the image".to_string())?;
+        cursor = cursor.checked_add(size as usize).ok_or_else(|| {
+            crate::fail!(Native, "the load commands overrun the image".to_string())
+        })?;
     }
-    Err("the image carries no symbol table".to_string())
+    Err(crate::fail!(
+        Native,
+        "the image carries no symbol table".to_string()
+    ))
 }
 
 /// The names of the symbols the loader has to resolve, which is what an image's own undefined
 /// range is: the external symbols its table defines nowhere.
-pub(crate) fn undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
+pub(crate) fn undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, crate::error::Error> {
     Ok(symbols(bytes)?
         .into_iter()
         .filter(|symbol| symbol.undefined)
@@ -61,7 +64,7 @@ pub(crate) fn undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
 ///
 /// An image exports every external symbol it does not mark private, so this is the set a caller
 /// cannot reach by name through the loader however the image is loaded.
-pub(crate) fn hidden_symbols(bytes: &[u8]) -> Result<Vec<(Box<str>, u64)>, String> {
+pub(crate) fn hidden_symbols(bytes: &[u8]) -> Result<Vec<(Box<str>, u64)>, crate::error::Error> {
     Ok(symbols(bytes)?
         .into_iter()
         .filter(|symbol| !symbol.undefined && symbol.private_extern)
@@ -70,38 +73,50 @@ pub(crate) fn hidden_symbols(bytes: &[u8]) -> Result<Vec<(Box<str>, u64)>, Strin
 }
 
 /// The `LC_SYMTAB` fields at `cursor`: `symoff`, `nsyms`, `stroff` and `strsize`.
-pub(crate) fn symtab_at(bytes: &[u8], cursor: usize) -> Result<[usize; 4], String> {
+pub(crate) fn symtab_at(bytes: &[u8], cursor: usize) -> Result<[usize; 4], crate::error::Error> {
     let short = || "the image ends inside a load command".to_string();
     let mut fields = [0_usize; 4];
     for (index, field) in fields.iter_mut().enumerate() {
         let at = cursor + 8 + index * 4;
-        *field = read_u32(bytes, at).ok_or_else(short)? as usize;
+        *field = read_u32(bytes, at)
+            .ok_or_else(short)
+            .map_err(|e| crate::fail!(Native, e))? as usize;
     }
     Ok(fields)
 }
 
 /// Walks `[symoff, nsyms, stroff, strsize]` into the symbols they name.
-fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, String> {
+fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, crate::error::Error> {
     let [symoff, nsyms, stroff, strsize] = fields;
-    let strings = bytes
-        .get(stroff..stroff + strsize)
-        .ok_or_else(|| "the string table lies outside the image".to_string())?;
+    let strings = bytes.get(stroff..stroff + strsize).ok_or_else(|| {
+        crate::fail!(
+            Native,
+            "the string table lies outside the image".to_string()
+        )
+    })?;
     let mut out = Vec::with_capacity(nsyms);
     for index in 0..nsyms {
         let at = symoff + index * NLIST_SIZE;
-        let entry = bytes
-            .get(at..at + NLIST_SIZE)
-            .ok_or_else(|| "the symbol table lies outside the image".to_string())?;
+        let entry = bytes.get(at..at + NLIST_SIZE).ok_or_else(|| {
+            crate::fail!(
+                Native,
+                "the symbol table lies outside the image".to_string()
+            )
+        })?;
         // `nlist_64` is `n_strx`, `n_type`, `n_sect`, `n_desc`, `n_value`.
         let name = name_of(
             strings,
-            read_u32(bytes, at)
-                .ok_or_else(|| "the symbol table lies outside the image".to_string())?
-                as usize,
+            read_u32(bytes, at).ok_or_else(|| {
+                crate::fail!(
+                    Native,
+                    "the symbol table lies outside the image".to_string()
+                )
+            })? as usize,
         )?;
         out.push(ImageSymbol {
             name,
-            value: read_u64(entry, 8).ok_or_else(|| "a symbol entry is truncated".to_string())?,
+            value: read_u64(entry, 8)
+                .ok_or_else(|| crate::fail!(Native, "a symbol entry is truncated".to_string()))?,
             undefined: entry[4] & N_TYPE == N_UNDF && entry[4] & N_EXT != 0,
             private_extern: entry[4] & N_PEXT != 0,
             exported: entry[4] & N_TYPE != N_UNDF
@@ -114,15 +129,18 @@ fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, St
 }
 
 /// The symbol name at `offset` in the string table, without this format's leading underscore.
-fn name_of(strings: &[u8], offset: usize) -> Result<Box<str>, String> {
-    let tail = strings
-        .get(offset..)
-        .ok_or_else(|| "a symbol name lies outside the string table".to_string())?;
+fn name_of(strings: &[u8], offset: usize) -> Result<Box<str>, crate::error::Error> {
+    let tail = strings.get(offset..).ok_or_else(|| {
+        crate::fail!(
+            Native,
+            "a symbol name lies outside the string table".to_string()
+        )
+    })?;
     let end = tail
         .iter()
         .position(|&byte| byte == 0)
-        .ok_or_else(|| "a symbol name is not terminated".to_string())?;
-    let name =
-        std::str::from_utf8(&tail[..end]).map_err(|_| "a symbol name is not UTF-8".to_string())?;
+        .ok_or_else(|| crate::fail!(Native, "a symbol name is not terminated".to_string()))?;
+    let name = std::str::from_utf8(&tail[..end])
+        .map_err(|_| crate::fail!(Native, "a symbol name is not UTF-8".to_string()))?;
     Ok(Box::from(name.strip_prefix('_').unwrap_or(name)))
 }

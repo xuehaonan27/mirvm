@@ -106,7 +106,7 @@ struct TrieNode {
 /// by starting from the widest encoding and narrowing until they stop changing: narrowing only ever
 /// moves a child earlier, which can only narrow a width further, so the loop settles on widths that
 /// agree with the offsets they encode.
-fn export_trie(symbols: &[Vec<u8>], text_off: usize) -> Result<Vec<u8>, String> {
+fn export_trie(symbols: &[Vec<u8>], text_off: usize) -> Result<Vec<u8>, crate::error::Error> {
     let mut root = Trie::default();
     for (index, symbol) in symbols.iter().enumerate() {
         let mut node = &mut root;
@@ -257,11 +257,12 @@ fn align(value: usize, alignment: usize) -> usize {
 
 /// Appends `value` and a terminating NUL, returning the offset the name starts at. The symbol
 /// table's first byte is a NUL, so offset zero stays the empty name.
-fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, String> {
+fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, crate::error::Error> {
     if value.contains(&0) {
-        return Err("guest function name contains NUL".into());
+        return Err(crate::fail!(Native, "guest function name contains NUL"));
     }
-    let offset = u32::try_from(table.len()).map_err(|_| "Mach-O string table too large")?;
+    let offset = u32::try_from(table.len())
+        .map_err(|_| crate::fail!(Native, "Mach-O string table too large"))?;
     table.extend_from_slice(value);
     table.push(0);
     Ok(offset)
@@ -324,7 +325,7 @@ fn uuid(text_off: usize, slot_count: usize) -> [u8; 16] {
 
 /// Builds the unsigned dylib and returns its bytes together with the file offset the slots start
 /// at. The caller signs the bytes before loading them.
-pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
+pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), crate::error::Error> {
     // A symbol in this format carries a leading underscore, and a loader looks a C name up with it
     // applied: `dlsym` asking for `x` searches for `_x`. The symbol table and the export trie
     // therefore both spell every name this way, which is also what `nm` and `dyld_info` print.
@@ -366,7 +367,7 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     let text_len = names
         .len()
         .checked_mul(SLOT)
-        .ok_or("Mach-O text section too large")?;
+        .ok_or(crate::fail!(Native, "Mach-O text section too large"))?;
     let text_end = text_off + text_len;
     // `__LINKEDIT` has to begin on a page boundary, and the only thing between it and the slots is
     // the padding that brings the text segment up to the page it occupies. `codesign` reads this
@@ -375,7 +376,7 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     let sym_len = names
         .len()
         .checked_mul(NLIST_SIZE)
-        .ok_or("Mach-O symbol table too large")?;
+        .ok_or(crate::fail!(Native, "Mach-O symbol table too large"))?;
     let str_off = sym_off + sym_len;
     // The export trie follows the string table, and it ends the file. Neither is padded: a loader
     // reads both by offset, and the next thing on disk is the signature `codesign` appends, which

@@ -256,7 +256,7 @@ fn print_phase_timing(
         line.push_str(&format!(" engine={:.1}ms", ms(d)));
     }
     line.push_str(&format!(" total={:.1}ms", ms(total)));
-    diagnostics::control(format_args!("{line}"));
+    crate::diag::instrument(format_args!("{line}"));
 }
 
 impl Callbacks for MirvmCallbacks {
@@ -282,14 +282,12 @@ impl Callbacks for MirvmCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         self.timing.frontend = Some(self.t_start.elapsed());
         let Some((def_id, entry_ty)) = tcx.entry_fn(()) else {
-            diagnostics::control(format_args!("mirvm: entry fn not found (needs `fn main`)"));
+            crate::diag_error!(Run, "entry fn not found (needs `fn main`)");
             self.exit_code = Some(1);
             return Compilation::Stop;
         };
         if !matches!(entry_ty, rustc_session::config::EntryFnType::Main { .. }) {
-            diagnostics::control(format_args!(
-                "mirvm: #![no_main]/start entry points are not supported yet"
-            ));
+            crate::diag_error!(Run, "#![no_main]/start entry points are not supported yet");
             self.exit_code = Some(1);
             return Compilation::Stop;
         }
@@ -300,7 +298,7 @@ impl Callbacks for MirvmCallbacks {
             rustc_middle::mir::pretty::MirWriter::new(tcx)
                 .write_mir_fn(body, &mut buf)
                 .expect("write_mir_fn failed");
-            print!("{}", String::from_utf8_lossy(&buf));
+            crate::out::text(String::from_utf8_lossy(&buf));
         } else {
             // Verify the lowering fingerprint inside the session: the image stack bakes in the
             // (ub/overflow/contract) checks of its build session. On a mismatch (cargo runner
@@ -359,13 +357,10 @@ impl Callbacks for MirvmCallbacks {
                     out,
                 ) {
                     Ok(()) => {
-                        diagnostics::control(format_args!(
-                            "mirvm: package written to {}",
-                            out.display()
-                        ));
+                        crate::diag_info!(Pack, "package written to {}", out.display());
                     }
                     Err(reason) => {
-                        diagnostics::control(format_args!("mirvm: packing failed: {reason}"));
+                        crate::diag_error!(Pack, "packing failed: {reason}");
                         self.exit_code = Some(1);
                     }
                 }
@@ -464,7 +459,7 @@ pub(super) fn run_vm_engine(
     heat: crate::vm::jit::Heat,
 ) -> i32 {
     if !already_verified && let Err(e) = crate::vm::verify::module(&module, &instance) {
-        diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
+        crate::diag_error!(Engine, "bytecode verification failed: {e}");
         return 70;
     }
     if crate::options::a2_debug() {
@@ -478,13 +473,13 @@ pub(super) fn run_vm_engine(
             let bytes = frag::encode(body).unwrap_or_default();
             let id = crate::utils::content::digest_hex(&frag::id_of(&bytes));
             if dump {
-                eprintln!("[a2-dump] {index} {id} {}", body.name);
+                crate::diag::instrument(format_args!("[a2-dump] {index} {id} {}", body.name));
             }
             if dump && body.name.contains("Blake2bVarCore8compress") {
                 let canonical = frag::canonical(body);
                 let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                eprintln!("[a2-targets] {:?}", canonical.targets);
-                eprintln!(
+                crate::diag::instrument(format_args!("[a2-targets] {:?}", canonical.targets));
+                crate::diag::instrument(format_args!(
                     "[a2-body] {} blocks {} frame {} targets {} bytes {} {}",
                     body.name,
                     body.blocks.len(),
@@ -492,7 +487,7 @@ pub(super) fn run_vm_engine(
                     canonical.targets.len(),
                     bytes.len(),
                     hex
-                );
+                ));
             }
             bodies.part(&id);
         }
@@ -527,14 +522,14 @@ pub(super) fn run_vm_engine(
                 &crate::vm::ir::frag::id_of(arena.snapshot()),
             ));
         }
-        eprintln!(
+        crate::diag::instrument(format_args!(
             "[a2-debug] module: funcs {} bodies {} exports {} tables {} data {}",
             module.funcs.len(),
             bodies.digest(),
             exports.len(),
             tables.digest(),
             data.digest()
-        );
+        ));
     }
     if vm_stats {
         // One call, and it must stay one call: growing this branch's body changes the codegen of the
@@ -547,7 +542,7 @@ pub(super) fn run_vm_engine(
     }
     // Finalize argv: runtime input is placed after snapshot semantics; one path for cold and warm.
     if let Err(e) = instance.finalize_entry_argv(&mut module, program_argv) {
-        diagnostics::control(format_args!("mirvm: {e}"));
+        crate::diag_error!(Engine, "{e}");
         return 70;
     }
     let mut capture = if let Some(directory) = CAPTURE_DIRECTORY.get() {
@@ -563,9 +558,7 @@ pub(super) fn run_vm_engine(
         match crate::telemetry::CaptureSession::start(options) {
             Ok(session) => Some(session),
             Err(error) => {
-                diagnostics::control(format_args!(
-                    "mirvm capture: cannot start event writer: {error}"
-                ));
+                crate::diag_error!(Capture, "cannot start event writer: {error}");
                 return 70;
             }
         }
@@ -577,15 +570,11 @@ pub(super) fn run_vm_engine(
         match session.finish(std::time::Duration::from_secs(30)) {
             Ok(crate::telemetry::CaptureFinish::Finished(_)) => {}
             Ok(crate::telemetry::CaptureFinish::InProgress) => {
-                diagnostics::control(format_args!(
-                    "mirvm capture: writer did not finish within 30 seconds"
-                ));
+                crate::diag_error!(Capture, "writer did not finish within 30 seconds");
                 return 70;
             }
             Err(error) => {
-                diagnostics::control(format_args!(
-                    "mirvm capture: cannot finish event file: {error}"
-                ));
+                crate::diag_error!(Capture, "cannot finish event file: {error}");
                 return 70;
             }
         }
@@ -606,7 +595,7 @@ fn run_vm_engine_loaded(
     let engine = match crate::vm::ctx::Engine::try_new(shared) {
         Ok(engine) => engine,
         Err(e) => {
-            diagnostics::control(format_args!("mirvm: {e}"));
+            crate::diag_error!(Engine, "{e}");
             return 70;
         }
     };
@@ -616,7 +605,7 @@ fn run_vm_engine_loaded(
         let result = match on_guest_stack(move || crate::vm::run_main(&execution)) {
             Ok(result) => result,
             Err(error) => {
-                diagnostics::control(format_args!("{}", error.message));
+                crate::diag_error!(Engine, "{}", error.message);
                 engine.exit_process();
                 return error.exit_code;
             }
@@ -628,7 +617,7 @@ fn run_vm_engine_loaded(
             // exit status.
             Ok(crate::vm::RunOutcome::GuestPanic) => 101,
             Err(e) => {
-                diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
+                crate::diag_error!(Engine, "{e}");
                 e.exit_code
             }
         };
@@ -638,7 +627,7 @@ fn run_vm_engine_loaded(
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
         Err(e) => {
-            diagnostics::control(format_args!("mirvm: fail to resolve `--vm-call`: {e}"));
+            crate::diag_error!(Run, "fail to resolve `--vm-call`: {e}");
             return 2;
         }
     };
@@ -650,22 +639,22 @@ fn run_vm_engine_loaded(
     }) {
         Ok(result) => result,
         Err(error) => {
-            diagnostics::control(format_args!("{}", error.message));
+            crate::diag_error!(Engine, "{}", error.message);
             engine.exit_process();
             return error.exit_code;
         }
     };
     let code = match result {
         Ok(crate::vm::RunOutcome::Returned(r)) => {
-            println!("{}", r.lo);
+            crate::out::line(r.lo);
             0
         }
         Ok(crate::vm::RunOutcome::GuestPanic) => {
-            diagnostics::control(format_args!("mirvm[m4-engine]: guest panic not caught"));
+            crate::diag_error!(Engine, "guest panic not caught");
             101
         }
         Err(e) => {
-            diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
+            crate::diag_error!(Engine, "{e}");
             e.exit_code
         }
     };
@@ -710,7 +699,7 @@ fn on_guest_stack<R: Send + 'static>(
             // environment with vm.overcommit_memory=2.
             Err(GuestStackStartError {
                 message: format!(
-                    "mirvm: failed to create the guest execution thread ({reserve} bytes of stack \
+                    "failed to create the guest execution thread ({reserve} bytes of stack \
                      reserved): {error}; retry with a smaller --stack-size / MIRVM_STACK_SIZE"
                 ),
                 exit_code: 70,
@@ -720,7 +709,7 @@ fn on_guest_stack<R: Send + 'static>(
 }
 
 /// Parse `name(1,2,…)` (or a bare `name`, which means no arguments).
-fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), String> {
+fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), crate::error::Error> {
     let spec = spec.trim();
     let Some(open) = spec.find('(') else {
         return Ok((spec.to_string(), Vec::new()));
@@ -728,7 +717,7 @@ fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), String> {
     let name = spec[..open].trim().to_string();
     let inner = spec[open + 1..]
         .strip_suffix(')')
-        .ok_or("missing closing parenthesis")?;
+        .ok_or(crate::fail!(Run, "missing closing parenthesis"))?;
     let mut args = Vec::new();
     for part in inner.split(',') {
         let p = part.trim();
@@ -737,7 +726,7 @@ fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), String> {
         }
         args.push(
             p.parse::<u64>()
-                .map_err(|e| format!("argument `{p}`: {e}"))?,
+                .map_err(|e| crate::fail!(Run, format!("argument `{p}`: {e}")))?,
         );
     }
     Ok((name, args))
@@ -758,10 +747,8 @@ pub(crate) fn run_driver(
     ) {
         Ok(router) => router,
         Err(error) => {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot start diagnostics stream: {error}"
-            ));
-            return ExitCode::from(70);
+            crate::diag_error!(Capture, "cannot start diagnostics stream: {error}");
+            return ExitCode::from(crate::diag::exit::SOFTWARE);
         }
     };
     let t_start = std::time::Instant::now();
@@ -805,7 +792,10 @@ pub(crate) fn run_driver(
                         match layer {
                             Some(layer) => {
                                 if crate::options::a2_debug() {
-                                    eprintln!("[a2-debug] layer loaded: {}", layer.key);
+                                    crate::diag::instrument(format_args!(
+                                        "[a2-debug] layer loaded: {}",
+                                        layer.key
+                                    ));
                                 }
                                 stack.push(layer);
                             }
@@ -817,9 +807,9 @@ pub(crate) fn run_driver(
                     }
                     if unusable {
                         if crate::options::a2_debug() {
-                            eprintln!(
+                            crate::diag::instrument(format_args!(
                                 "[a2-debug] unit store not usable whole; lowering every unit instead"
-                            );
+                            ));
                         }
                         stack.truncate(before);
                     }
@@ -862,24 +852,20 @@ pub(crate) fn run_driver(
             // what was loaded and stop short of the guest.
             print_phase_timing(&timing, None, t_start.elapsed(), crate::diag::verbose());
             if let Err(error) = diagnostic_router.finish() {
-                diagnostics::control(format_args!(
-                    "mirvm capture: cannot finish diagnostics stream: {error}"
-                ));
-                exit(70);
+                crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                exit(crate::diag::exit::SOFTWARE.into());
             }
-            exit(0);
+            exit(crate::diag::exit::SUCCESS.into());
         }
         if let Some(guest) = &guest_process
             && let Err(error) = guest.enter()
         {
             crate::diag::emit(&crate::error::Error::from(error));
             if let Err(error) = diagnostic_router.finish() {
-                diagnostics::control(format_args!(
-                    "mirvm capture: cannot finish diagnostics stream: {error}"
-                ));
-                exit(70);
+                crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                exit(crate::diag::exit::SOFTWARE.into());
             }
-            exit(1);
+            exit(crate::diag::exit::FAILURE.into());
         }
         let t_engine = std::time::Instant::now();
         // What a previous run of this program found hot: the JIT worker links those entries before it
@@ -897,10 +883,8 @@ pub(crate) fn run_driver(
         let engine = (!vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(&timing, engine, t_start.elapsed(), vm_stats);
         if let Err(error) = diagnostic_router.finish() {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot finish diagnostics stream: {error}"
-            ));
-            exit(70);
+            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+            exit(crate::diag::exit::SOFTWARE.into());
         }
         exit(code);
     }
@@ -948,19 +932,15 @@ pub(crate) fn run_driver(
     diagnostic_router.seal_compiler();
     if compiler_code != ExitCode::SUCCESS {
         if let Err(error) = diagnostic_router.finish() {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot finish diagnostics stream: {error}"
-            ));
-            return ExitCode::from(70);
+            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+            return ExitCode::from(crate::diag::exit::SOFTWARE);
         }
         return compiler_code;
     }
     if let Some(code) = callbacks.exit_code {
         if let Err(error) = diagnostic_router.finish() {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot finish diagnostics stream: {error}"
-            ));
-            exit(70);
+            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+            exit(crate::diag::exit::SOFTWARE.into());
         }
         exit(code);
     }
@@ -976,10 +956,8 @@ pub(crate) fn run_driver(
             crate::diag::verbose(),
         );
         if let Err(error) = diagnostic_router.finish() {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot finish diagnostics stream: {error}"
-            ));
-            return ExitCode::from(70);
+            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+            return ExitCode::from(crate::diag::exit::SOFTWARE);
         }
         return ExitCode::SUCCESS;
     }
@@ -1002,12 +980,10 @@ pub(crate) fn run_driver(
         {
             crate::diag::emit(&crate::error::Error::from(error));
             if let Err(error) = diagnostic_router.finish() {
-                diagnostics::control(format_args!(
-                    "mirvm capture: cannot finish diagnostics stream: {error}"
-                ));
-                exit(70);
+                crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                exit(crate::diag::exit::SOFTWARE.into());
             }
-            exit(1);
+            exit(crate::diag::exit::FAILURE.into());
         }
         let t_engine = std::time::Instant::now();
         let heat = crate::image::program::heat(&callbacks.rustc_args);
@@ -1030,18 +1006,14 @@ pub(crate) fn run_driver(
             callbacks.vm_stats,
         );
         if let Err(error) = diagnostic_router.finish() {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot finish diagnostics stream: {error}"
-            ));
-            exit(70);
+            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+            exit(crate::diag::exit::SOFTWARE.into());
         }
         exit(code);
     }
     if let Err(error) = diagnostic_router.finish() {
-        diagnostics::control(format_args!(
-            "mirvm capture: cannot finish diagnostics stream: {error}"
-        ));
-        return ExitCode::from(70);
+        crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+        return ExitCode::from(crate::diag::exit::SOFTWARE);
     }
     compiler_code
 }
