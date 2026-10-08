@@ -109,6 +109,12 @@ modifications.
   everything under `docs/` in English. The design contract is `docs/designs/`: its
   `README.md` is the umbrella and the index, each sibling owns one topic, and
   neither may restate what the other owns.
+- Nothing published names the development environment: no host, address, port,
+  credential, proxy helper or toolchain-install note about a particular machine.
+  State the fact a reader needs (a Linux x86_64 host is authoritative for the
+  gate, a case that fetches needs a proxy) and keep the identity out of the tree.
+  A file of environment notes is not documentation of the product and does not
+  belong in this repository.
 - A code comment describes the code in front of it: say what it does and why the
   non-obvious parts are that way (invariants, preconditions, hazards, units,
   ownership). No milestone/slice/design-document citations, no "was X, now Y"
