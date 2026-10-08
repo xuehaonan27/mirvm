@@ -350,10 +350,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   is one line at the end of `mode_run`, so converting one is cheap; what it costs is that every check
   the mode already had starts being enforced, which is the point.
   `case_summary` (`tests/lib/harness.sh`) is still not any mode's verdict.
-- **G12** `ACCEPTED`: the network-dependent cases need the dev container's HTTP proxy, and mirvm's own
-  registry client does not read Cargo's config, so an unexported proxy makes them fail in a way that
-  looks like a product defect. Run the suite under `the proxy helper` (`docs/environment.md`); the proxy must
-  not be exported globally. Without it, `telemetry` reports seven FAILs — "parent produced no capture
+- **G12** `ACCEPTED`: the network-dependent cases need an HTTP proxy on a host that reaches the
+  network through one, and mirvm's own registry client does not read Cargo's config, so a proxy only
+  Cargo sees makes them fail in a way that looks like a product defect. Export it for the suite rather
+  than globally. Without any, `telemetry` reports seven FAILs — "parent produced no capture
   file", "fork child produced no capture file", the generation checks and the three trace-domain
   checks — all downstream of one `HTTP fetch failed https://index.crates.io/config.json: Network is
   unreachable`, and `pair` fails the same way. With it, `telemetry` passes all fourteen. This is runner

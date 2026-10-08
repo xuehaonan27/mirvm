@@ -142,8 +142,8 @@ semantics.
 
 ### 2.6 Embedding surface
 
-The public surface is `Package::load(path) -> Result<Package, String>` and
-`unsafe Package::instantiate() -> Result<Engine, String>`. `load` is safe container and bytecode
+The public surface is `Package::load(path) -> Result<Package, pack::Error>` and
+`unsafe Package::instantiate() -> Result<Engine, pack::Error>`. `load` is safe container and bytecode
 validation into an owned snapshot; the `unsafe` on `instantiate` means the caller must still trust the
 package's native libraries, foreign ABI declarations and host symbol contracts. One `Package` supports
 concurrent, repeated instantiation. A hand-built Module can only go through

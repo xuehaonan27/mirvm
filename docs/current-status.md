@@ -111,8 +111,8 @@ in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call site n
 
 ## 3. Verified boundaries
 
-Measured on this tree against the Linux x86_64 release build, with the cases that fetch run under
-`the proxy helper` ([environment.md](environment.md)); `tests/README.md` documents the suites.
+Measured on this tree against the Linux x86_64 release build, with network access wherever a case
+fetches; `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
 - `cargo test --locked --all-features`: 497 pass, 2 fail, 1 ignored. The suite gives each case a
