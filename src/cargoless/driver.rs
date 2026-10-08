@@ -714,6 +714,9 @@ fn install_unit_table(plan: &ResolvePlan, fps: &[String], layout: &Layout) {
         })
         .collect();
     if !units.is_empty() {
+        if crate::options::a2_debug() {
+            eprintln!("[a2-debug] unit table: {} target units", units.len());
+        }
         crate::image::units::install(crate::image::units::UnitTable::new(units));
     }
 }

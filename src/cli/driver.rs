@@ -211,13 +211,16 @@ struct MirvmCallbacks {
 /// dependency metadata loading); `lower` = mono collection + lowering + frozen materialization.
 /// `run_driver` records the engine phase after interpretation ends. `cache_load` = L2 hit
 /// deserialization + verification (the warm path replaces frontend+lower entirely);
-/// `cache_store` = clean-snapshot entry on the cold path.
+/// `cache_store` = clean-snapshot entry on the cold path. `layer_load` = the pre-session layer
+/// load (manifest decode plus the binding walk that resolves every stored ordinal against the
+/// stack below), which `cache_load` covers on a hit and `frontend` covers otherwise.
 #[derive(Default)]
 struct PhaseTiming {
     frontend: Option<std::time::Duration>,
     lower: Option<std::time::Duration>,
     cache_load: Option<std::time::Duration>,
     cache_store: Option<std::time::Duration>,
+    layer_load: Option<std::time::Duration>,
 }
 
 /// With `MIRVM_TIMING=1` (or the --vm-stats instrument) prints a one-line phase ledger to
@@ -234,6 +237,9 @@ fn print_phase_timing(
     }
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
     let mut line = String::from("mirvm-timing:");
+    if let Some(d) = timing.layer_load {
+        line.push_str(&format!(" layer-load={:.1}ms", ms(d)));
+    }
     if let Some(d) = timing.cache_load {
         line.push_str(&format!(" cache-load={:.1}ms", ms(d)));
     }
@@ -773,6 +779,7 @@ pub(crate) fn run_driver(
     // each one's symbols resolve against what is already below it; a unit without a usable manifest
     // is lowered by this session and published for the next one.
     let mut deps_image_loaded = false;
+    let t_layers = std::time::Instant::now();
     if !dump_mir && !crate::image::deps::bypassed() {
         match crate::image::units::current() {
             Some(table) => {
@@ -828,6 +835,7 @@ pub(crate) fn run_driver(
             }
         }
     }
+    let layer_load = Some(t_layers.elapsed());
     // L2 warm path: a hit skips the entire rustc session (frontend + metadata + mono + lower).
     // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
     // against the key chain.
@@ -839,6 +847,7 @@ pub(crate) fn run_driver(
         diagnostic_router.seal_compiler();
         let timing = PhaseTiming {
             cache_load: Some(t_start.elapsed()),
+            layer_load,
             ..PhaseTiming::default()
         };
         if stack.is_empty() {
@@ -907,7 +916,10 @@ pub(crate) fn run_driver(
         runner_finalization_filter_installed: false,
         route_compiler_diagnostics: diagnostic_router.is_active(),
         t_start,
-        timing: PhaseTiming::default(),
+        timing: PhaseTiming {
+            layer_load,
+            ..PhaseTiming::default()
+        },
         rustc_args: rustc_args.clone(),
         stack,
         split_images: Vec::new(),

@@ -365,25 +365,39 @@ deleted and replaced, not phased out.
 
 ## 7. Open items
 
-- Residue stays in the delta (v1) in three cases: an instance that mentions the local crate, one that
+The three numbers this section owed are measured on the shared verify host (384 cores, medians of five
+warm L2 hits, store on the NFS home unless a local store is named). The instruments are in the tree:
+`MIRVM_TIMING=1` prints `layer-load=` in the phase ledger — the pre-session restore, a subset of
+`cache-load` — `MIRVM_A2_DEBUG=1` prints the unit table and the records each loaded manifest bound, and
+`MIRVM_FRAG_STATS=1` prints the per-home ledger.
+
+- **The restore is the warm path's dominant cost, and it does erode the L2 gate.** For the
+  `serde_json` corpus (5 target units, 4 manifests, 1 794 stored bodies, 1.27 MB) the restore is 179 ms
+  of a 286 ms `cache-load` (396 ms total) with the store on NFS, and 84 ms of 175 ms (281 ms total)
+  with the same cache on local disk: the difference is the store's file reads, and the rest is per
+  body — BLAKE3 over the fragment bytes, symbol-table hashing and `verify::body`, with no hotspot
+  above 6% in a `perf` profile. A 2-unit closure (`unit-share` b, 309 bodies) pays 76 ms of 180 ms,
+  and the same program's single 1.25 MB deps image pays 57 ms of 163 ms. The restore alone is 60% of
+  the L2 gate's 300 ms budget and 95% of it with the L2 decode included, so binding into the L2 entry
+  — the counter-move — is justified rather than a hedge. A shared host's numbers move by up to a
+  factor of two between batches; these are magnitudes, not constants.
+- **The store converges from cold sessions only, exactly as §3.5 requires.** A cold session stores the
+  homes its program exercised (corpus 4 of 5 units, `serde.rs` 2 of 10, `unit-sharing` a 1 of 1), and a
+  session that loaded a layer lowers no home: the corpus over `serde.rs`'s two manifests (288 records)
+  loads both, stores nothing, reports its remaining ~1 500 bodies as `residue … belongs to loaded home
+  N`, and leaves its coverage at 2 of 5 units. Growing the store in place still needs a placement rule
+  independent of the load set, and this coverage is not yet the problem that pays for it.
+- **Residue that names no unit is the largest single manifest cost.** Instances that name no unit — std
+  residue the base lacks, which every closure covers — are 227 of `serde.rs`'s 288 bodies (78.8%) and
+  236 of a one-dependency closure's 293 (80.5%), and they all land in the first unit in topological
+  order: about 138 KB of `serde.rs`'s 176 KB of unit manifests, and 27% of the corpus's 1.27 MB. A
+  base-owned home for them — the adaptive-base direction of open-issues D9 — would take them out of
+  every unit manifest, and the same split machinery hosts either choice, so the decision is still this
+  ledger's.
+- Three other residue cases stay in the delta (v1): an instance that mentions the local crate, one that
   spans units no closure covers, and one whose mangled name carries this program as its instantiating
   crate (§3.5). The last is measured at 2 of memchr's 218 bodies; it is the price of the loaded layer
   being immutable, and it grows only with how much rustc chooses to instantiate locally.
-- The fourth case is measured and still open: instances that name no unit at all — std residue the base
-  lacks, which every closure covers — are 227 of the 288 image bodies in the `serde_json` fixture (196
-  fragments) and 400 of 400 in a one-dependency closure. They land in the first unit whose closure
-  covers them, which costs unit-manifest size rather than sharing (the fragments are shared either
-  way). A base-owned home for them — the adaptive-base direction of open-issues D9 — would take them
-  out of every unit manifest, and the same split machinery hosts either choice, so the decision is left
-  to this ledger.
-- Binding-walk cost on the warm path is unmeasured; if it erodes the L2 gate, the counter-move is
-  caching bound bodies in the L2 entry (space traded back for time, per program).
-- The store grows only from cold sessions (§3.5): a session that loaded any layer publishes nothing,
-  because a home lowered beside a loaded layer is laid out differently from the manifests written
-  above it. Growing it in place — lowering exactly the units whose manifest missed and publishing
-  those above the loaded ones — needs the whole placement rule to be independent of the load set, of
-  which the stable home rule is the first half; it is deferred until stored units per cold run is
-  measured and too low, and the store's coverage per program is the number to watch.
 - open-issues G5 asks whether cross-project sharing is needed at all and whether tainted images
   should become project-local; this RFC is the "yes, and finer" answer to the first question and
   leaves the second untouched. Deciding this RFC closes that branch of G5.

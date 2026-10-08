@@ -201,14 +201,14 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   PLT slot, a cheap sampled counter in the fast path, and the interpreter's existing call counter;
   whichever lands has its cost measured against the D16 ledger before the tier thresholds mean
   anything. Analysis in [jit-code-cache-design.md](designs/jit-code-cache-design.md) §6.
-- **E44** `UNSCHEDULED`: three dep-sharing numbers are still owed. Binding-walk cost on the warm path
-  is unmeasured, so whether it erodes the L2 gate is unknown (the counter-move is caching bound bodies
-  in the L2 entry). The store grows only from cold sessions, because a session that loaded any layer
-  publishes nothing — growing it in place needs the placement rule to be independent of the load set,
-  of which the stable home rule is the first half, and the store's coverage per program is the number
-  to watch. And std-residue fragments that name no unit land in the first unit whose closure covers
-  them, which costs unit-manifest size rather than sharing; a base-owned home is D9's adaptive-base
-  direction. Analysis in [dep-sharing-design.md](designs/dep-sharing-design.md) §7.
+- **E44** `UNSCHEDULED`: dep-sharing's costs are measured and two items remain. The warm-path restore
+  is 84 ms of a 175 ms `cache-load` with a local store, and 179 ms of 286 ms with the store on NFS, for
+  a 5-unit closure of 1 794 stored bodies — about 60% of the L2 gate's 300 ms budget, so binding into
+  the L2 entry is now a justified counter-move rather than a hedge. The store still converges from cold
+  sessions only (a later program lowers no home and keeps the bodies it would have homed in its own
+  delta), and residue that names no unit is ~78% of a small closure's manifest bytes, all of it in
+  whichever unit comes first. Open: the binding-into-L2 move, and where that residue lives (the
+  adaptive base of D9). Analysis in [dep-sharing-design.md](designs/dep-sharing-design.md) §7.
 
 ## Distribution and product
 
