@@ -33,18 +33,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Open defects
 
-- **E50** `OPEN`: a fresh solve resolves against the cached index snapshot, so mirvm can pick older
-  versions than Cargo would. The copy is one file per crate under
-  `data/registry/index/<registry key>/<sparse path>`, written when it was first downloaded and served
-  unchanged afterwards (`src/cargoless/registry.rs`). Measured on the verify host: `libc = "0.2"`
-  resolved to 0.2.189 while the Cargo leg resolved 0.2.190 on the same machine, and only the lock the
-  Cargo leg wrote kept the two legs on one version — reading that lock failed outright until the lock
-  path learned to revalidate its own copy first. Reading a lock is not enough on its own, because a
-  program with no lock (a frontmatter script, a first run) has nothing to agree with. What is open is
-  the fresh-solve policy: revalidate each crate's copy when a solve reads its index (one conditional
-  request per crate per solve, which is what Cargo does), leave it to a time-to-live, or keep the
-  snapshot deliberately for reproducible offline solves — and if it stays, what tells a user that
-  their resolution is older than the ecosystem's.
 - **E40** `OPEN`: `fib32`'s 80ms ceiling is unreachable, and has been: the best of three runs is about
   8.7s on the Linux verify host, against 9.1s in the round-7 full gate. The `--vm-call fib(32)` path
   raises one compilation request per function, and the baseline/optimized tier policy with heat-order

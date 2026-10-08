@@ -115,11 +115,12 @@ Measured on this tree against the Linux x86_64 release build, with network acces
 fetches; `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 497 pass, 2 fail, 1 ignored. The suite gives each case a
+- `cargo test --locked --all-features`: 499 pass, 1 fail, 1 ignored. The suite gives each case a
   thread, so on a loaded shared host a timing-sensitive case can fail without a defect: the run behind
-  these numbers failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` and
-  `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread` at a load average near 60, and
-  both pass repeatedly in isolation (E48).
+  these numbers failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` at a
+  load average near 190, and of three isolated reruns two passed and one failed. Which E48 case fails
+  moves between runs — the previous measurement had
+  `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread` beside it.
 - `make test` (the fast tier, 77 cases): 73 pass / 4 fail.
 - `make smoke` (fast + smoke, 123 cases): 116 pass / 7 fail; which rayon-family and `cargo-diff` rows
   fail moves between runs, because one is wall-clock (E47) and the other depends on whether a project

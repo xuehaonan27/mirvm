@@ -3,6 +3,7 @@
 //! Own store layout (root = `$MIRVM_HOME/data/registry`; `MIRVM_HOME` is the only relocation knob):
 //! ```text
 //! index/<reg-key>/<sparse path>     # sparse index cache (JSON line files)
+//! index/<reg-key>/<sparse path>.http # the HTTP validators of the response that wrote it
 //! cache/<reg-key>/<name>-<version>.crate
 //! src/<reg-key>/<name>-<version>/   # .crate unpack tree (.cargo-ok marks completion)
 //! ```
@@ -105,6 +106,71 @@ pub struct Registry {
     /// Index entries are immutable within a single command; version solving and feature convergence repeatedly query the same
     /// package, so cache parsed results to avoid re-reading and re-parsing the whole JSON line each round.
     index_cache: std::cell::RefCell<BTreeMap<String, IndexEntry>>,
+    /// Crates whose cached index copy this process has already revalidated, so a solve asks once per
+    /// crate however many times it reads it.
+    revalidated: std::cell::RefCell<std::collections::BTreeSet<String>>,
+    /// Whether the run has already said that a resolution came from cached copies.
+    snapshot_noted: std::cell::Cell<bool>,
+}
+
+/// How hard an index read works not to serve a copy the registry has moved past.
+#[derive(Clone, Copy)]
+enum Freshness {
+    /// Revalidate the first time this process reads the crate, then trust that check.
+    Once,
+    /// Revalidate on every read, for a caller that must not trust an earlier one.
+    Always,
+}
+
+/// What a sparse index fetch found.
+enum IndexFetch {
+    /// The copy on disk is what the server would send.
+    Unchanged,
+    /// The server sent a new body.
+    Replaced(String),
+}
+
+/// The validators of the response that wrote a cached index file, kept beside it so the next read can
+/// ask a conditional question instead of downloading the file again.
+#[derive(Default)]
+struct IndexValidators {
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+/// The validators file of one cached index body: `<file>.http`, one `name: value` per line.
+fn validators_path(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_os_string();
+    name.push(".http");
+    PathBuf::from(name)
+}
+
+fn read_validators(file: &Path) -> IndexValidators {
+    let mut validators = IndexValidators::default();
+    let Ok(text) = std::fs::read_to_string(validators_path(file)) else {
+        return validators;
+    };
+    for line in text.lines() {
+        match line.split_once(": ") {
+            Some(("etag", value)) if !value.is_empty() => validators.etag = Some(value.to_string()),
+            Some(("last-modified", value)) if !value.is_empty() => {
+                validators.last_modified = Some(value.to_string())
+            }
+            _ => {}
+        }
+    }
+    validators
+}
+
+fn write_validators(file: &Path, validators: &IndexValidators) -> std::io::Result<()> {
+    let mut text = String::new();
+    if let Some(etag) = &validators.etag {
+        text.push_str(&format!("etag: {etag}\n"));
+    }
+    if let Some(modified) = &validators.last_modified {
+        text.push_str(&format!("last-modified: {modified}\n"));
+    }
+    crate::store::publish_bytes(&validators_path(file), text.as_bytes())
 }
 
 impl Registry {
@@ -155,6 +221,8 @@ impl Registry {
             agent: config.into(),
             endpoints: std::cell::RefCell::new(BTreeMap::new()),
             index_cache: std::cell::RefCell::new(BTreeMap::new()),
+            revalidated: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            snapshot_noted: std::cell::Cell::new(false),
         })
     }
 
@@ -328,25 +396,40 @@ impl Registry {
     }
 
     /// Read an index entry (use cache on hit; otherwise read from the backend selected by config and cache it).
-    pub fn index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
-        self.read_index(source, name, false)
-    }
-
-    /// The same entry with the backend's own copy revalidated first.
     ///
-    /// The sparse backend keeps one file per crate, written when it was first downloaded, and
-    /// `index_entry` serves it unchanged forever after. That makes the file a snapshot: a version
-    /// published after it was written is invisible to every later run, including a lock that names
-    /// it — and reading a Cargo-written lock without revalidating therefore refused versions Cargo
-    /// had just resolved. Offline mode cannot revalidate and falls back to the snapshot; a backend
-    /// with no remote to ask (a local registry or a directory) has nothing to revalidate from.
-    pub fn refresh_index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
-        self.read_index(source, name, true)
+    /// The first read of a crate in this process revalidates the copy it is about to trust. The
+    /// sparse backend keeps one file per crate, written when it was first downloaded, so serving it
+    /// unchanged forever makes a fresh solve resolve against a snapshot: it picked `libc 0.2.189`
+    /// where the pinned Cargo on the same machine had just resolved 0.2.190 (E50). The question is
+    /// conditional, so an unchanged crate costs one `304`; an offline run cannot ask and serves the
+    /// snapshot, which is what makes an offline solve reproducible. Later reads in the same process
+    /// serve the copy this one checked.
+    pub fn index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
+        self.read_index(source, name, Freshness::Once)
     }
 
-    fn read_index(&self, source: &str, name: &str, refresh: bool) -> Result<IndexEntry, RErr> {
+    /// The same entry with the backend's own copy revalidated first, every time.
+    ///
+    /// A caller that must not trust an earlier check — the lock reader, asking whether a version the
+    /// lock names exists at all — says so here. Offline mode cannot revalidate and falls back to the
+    /// snapshot; a backend with no remote to ask (a local registry or a directory) has nothing to
+    /// revalidate from.
+    pub fn refresh_index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
+        self.read_index(source, name, Freshness::Always)
+    }
+
+    fn read_index(
+        &self,
+        source: &str,
+        name: &str,
+        freshness: Freshness,
+    ) -> Result<IndexEntry, RErr> {
         let cache_key = format!("{source}\u{1f}{name}");
-        if !refresh && let Some(entry) = self.index_cache.borrow().get(&cache_key) {
+        let checked = self.revalidated.borrow().contains(&cache_key);
+        if let Some(entry) = self.index_cache.borrow().get(&cache_key)
+            && (matches!(freshness, Freshness::Once) && checked
+                || matches!(freshness, Freshness::Always) && self.offline)
+        {
             return Ok(entry.clone());
         }
         let mut endpoint = self.endpoint(source)?;
@@ -354,15 +437,15 @@ impl Registry {
             Backend::Sparse { base } => {
                 self.ensure_download_config(&mut endpoint)?;
                 let file = self.index_file(source, name)?;
-                if file.is_file() && (!refresh || self.offline) {
-                    std::fs::read_to_string(&file).map_err(|e| {
-                        crate::fail!(
-                            Resolver,
-                            format!("index cache read failed {}: {e}", file.display())
-                        )
-                    })?
-                } else {
-                    if self.offline {
+                let have = file.is_file();
+                let ask = match freshness {
+                    Freshness::Always => true,
+                    Freshness::Once => !checked,
+                };
+                if !ask {
+                    Self::read_index_file(&file)?
+                } else if self.offline {
+                    if !have {
                         return Err(crate::fail!(
                             Resolver,
                             crate::options::offline_error(format!(
@@ -370,6 +453,11 @@ impl Registry {
                             ))
                         ));
                     }
+                    self.note_snapshot(name, None);
+                    self.revalidated.borrow_mut().insert(cache_key.clone());
+                    Self::read_index_file(&file)?
+                } else {
+                    self.revalidated.borrow_mut().insert(cache_key.clone());
                     let url = format!(
                         "{}{}",
                         ensure_trailing_slash(&base),
@@ -384,9 +472,19 @@ impl Registry {
                     } else {
                         endpoint.token.clone()
                     };
-                    let text = self.http_text(&url, token)?;
-                    write_cache(&file, text.as_bytes(), "index")?;
-                    text
+                    match self.fetch_index(&url, token, &file, have) {
+                        Ok(IndexFetch::Unchanged) => Self::read_index_file(&file)?,
+                        Ok(IndexFetch::Replaced(text)) => {
+                            write_cache(&file, text.as_bytes(), "index")?;
+                            text
+                        }
+                        Err(why) if have => {
+                            let why = why.to_string();
+                            self.note_snapshot(name, Some(&why));
+                            Self::read_index_file(&file)?
+                        }
+                        Err(why) => return Err(why),
+                    }
                 }
             }
             Backend::GitIndex { url, checkout } => {
@@ -413,15 +511,98 @@ impl Registry {
                 let entries = directory_index_entry(&path, name)?;
                 self.index_cache
                     .borrow_mut()
-                    .insert(cache_key, entries.clone());
+                    .insert(cache_key.clone(), entries.clone());
+                self.revalidated.borrow_mut().insert(cache_key);
                 return Ok(entries);
             }
         };
         let entry: IndexEntry = parse_index_lines(&text)?.into();
         self.index_cache
             .borrow_mut()
-            .insert(cache_key, entry.clone());
+            .insert(cache_key.clone(), entry.clone());
+        // A git, local or directory source has answered as freshly as it can; a sparse one has just
+        // asked, so the next read in this process may serve the parsed entry.
+        self.revalidated.borrow_mut().insert(cache_key);
         Ok(entry)
+    }
+
+    /// The cached body of one crate's index file.
+    fn read_index_file(file: &Path) -> Result<String, RErr> {
+        std::fs::read_to_string(file).map_err(|e| {
+            crate::fail!(
+                Resolver,
+                format!("index cache read failed {}: {e}", file.display())
+            )
+        })
+    }
+
+    /// Fetch a crate's sparse index file, asking a conditional question when a cached copy and the
+    /// validators of the response that wrote it are present. The body comes back only when the
+    /// server sends one; `304` means the copy on disk is what the server would send.
+    fn fetch_index(
+        &self,
+        url: &str,
+        token: Option<String>,
+        file: &Path,
+        have: bool,
+    ) -> Result<IndexFetch, crate::error::Error> {
+        let validators = if have {
+            read_validators(file)
+        } else {
+            IndexValidators::default()
+        };
+        let mut request = self.agent.get(url);
+        if let Some(token) = token {
+            request = request.header("Authorization", token);
+        }
+        if let Some(etag) = &validators.etag {
+            request = request.header("If-None-Match", etag);
+        } else if let Some(modified) = &validators.last_modified {
+            request = request.header("If-Modified-Since", modified);
+        }
+        let mut response = request
+            .call()
+            .map_err(|e| crate::fail!(Resolver, format!("HTTP fetch failed {url}: {e}")))?;
+        if response.status() == 304 {
+            return Ok(IndexFetch::Unchanged);
+        }
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        let validators = IndexValidators {
+            etag: header("etag"),
+            last_modified: header("last-modified"),
+        };
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| crate::fail!(Resolver, format!("HTTP response read failed {url}: {e}")))?;
+        // A validator that cannot be written costs the next run one full fetch, never a wrong answer.
+        let _ = write_validators(file, &validators);
+        Ok(IndexFetch::Replaced(text))
+    }
+
+    /// Say once per process that a read was served from the cached copy without revalidation, so a
+    /// resolution that may be older than the registry is never silent.
+    fn note_snapshot(&self, name: &str, why: Option<&str>) {
+        if self.snapshot_noted.replace(true) {
+            return;
+        }
+        match why {
+            None => crate::diag_info!(
+                Resolver,
+                "offline: the resolution uses cached index copies without revalidation"
+            ),
+            Some(why) => crate::diag_warn!(
+                Resolver,
+                "index revalidation failed for {name} ({why}); using the cached copy, so the \
+                 resolution may be older than the registry"
+            ),
+        }
     }
 
     // ---------- .crate download and unpack ----------

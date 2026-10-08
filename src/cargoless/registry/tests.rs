@@ -158,3 +158,41 @@ fn offline_mode_refuses_http_loudly() {
     );
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+#[test]
+fn index_validators_are_kept_beside_the_body_they_describe() {
+    let dir = tmpdir("validators");
+    let file = dir.join("fi/xt/fixture-dep");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"{\"name\":\"fixture-dep\"}\n").unwrap();
+    assert!(
+        read_validators(&file).etag.is_none(),
+        "a body written without validators has none"
+    );
+
+    write_validators(
+        &file,
+        &IndexValidators {
+            etag: Some("\"abc\"".to_string()),
+            last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
+        },
+    )
+    .unwrap();
+    let written = read_validators(&file);
+    assert_eq!(written.etag.as_deref(), Some("\"abc\""));
+    assert_eq!(
+        written.last_modified.as_deref(),
+        Some("Wed, 21 Oct 2015 07:28:00 GMT")
+    );
+    // The validators are a sidecar: the cached index body is the bytes the server sent.
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "{\"name\":\"fixture-dep\"}\n"
+    );
+
+    // A sidecar a reader cannot parse is no validator, not a failure: the next read asks in full.
+    std::fs::write(validators_path(&file), b"garbage\netag: \n").unwrap();
+    let junk = read_validators(&file);
+    assert!(junk.etag.is_none() && junk.last_modified.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}

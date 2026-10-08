@@ -57,6 +57,18 @@ Cargo.
   index, so a version the snapshot lacks is looked up again after a refresh and only a version the
   refreshed copy also lacks is refused. Offline mode cannot revalidate and falls back to the
   snapshot.
+- **C14 the fresh solve revalidates what it reads.** The snapshot problem is not the lock's alone: a
+  program with no lock — a frontmatter script, a first run — resolves against whatever the copy holds,
+  and one measured `libc = "0.2"` at 0.2.189 where the pinned Cargo on the same machine had just
+  resolved 0.2.190. The first read of a crate in a process therefore asks a **conditional** question,
+  carrying the validator (`If-None-Match`, else `If-Modified-Since`) of the response that wrote the
+  copy: a `304` keeps it, so an unchanged crate costs one round trip and no body, and an answer that
+  carries a body replaces it. Later reads of that crate in the same process serve the copy this one
+  checked. Offline mode cannot ask and keeps the snapshot, which is what makes an offline resolve
+  reproducible; it says so once per run at `info` (the user asked for offline), while a revalidation
+  that failed says so at `warning`, so a resolution that may be older than the registry is never
+  silent. A backend with no remote to ask (a git or local registry, a directory) answers as freshly as
+  it can and is not revalidated.
 
 ## 2. Model
 

@@ -99,27 +99,58 @@ printf '%s\n' \
 
 PORT_FILE="$TMP/registry.port"
 AUTH_LOG="$TMP/registry-auth.log"
-"$PYTHON" - "$REGISTRY" "$PORT_FILE" "$AUTH_LOG" <<'PY' &
+REQ_LOG="$TMP/registry-requests.log"
+: >"$REQ_LOG"
+"$PYTHON" - "$REGISTRY" "$PORT_FILE" "$AUTH_LOG" "$REQ_LOG" <<'PY' &
 import http.server
+import os
 import pathlib
 import sys
 
-root = sys.argv[1]
+root = pathlib.Path(sys.argv[1])
 port_file = pathlib.Path(sys.argv[2])
 auth_log = pathlib.Path(sys.argv[3])
+request_log = pathlib.Path(sys.argv[4])
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=root, **kwargs)
-
+class Handler(http.server.BaseHTTPRequestHandler):
+    # One ETag per file version, so a cached copy can be revalidated with a conditional request and
+    # the answer is 304 exactly while the file the server would send is the file that was cached.
     def do_GET(self):
         token = self.headers.get("Authorization", "")
         auth_log.open("a").write(f"{self.path}|{token}\n")
         if self.path != "/config.json" and token != "secret-token":
+            request_log.open("a").write(f"{self.path}|unauthorized\n")
             self.send_response(401)
             self.end_headers()
             return
-        super().do_GET()
+        path = root / self.path.lstrip("/")
+        try:
+            stat = os.stat(path)
+            etag = f'"{stat.st_mtime_ns}-{stat.st_size}"'
+            body = path.read_bytes()
+        except OSError:
+            etag, body = None, None
+        conditional = self.headers.get("If-None-Match")
+        if etag is not None and conditional == etag:
+            request_log.open("a").write(f"{self.path}|conditional|304\n")
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
+        if body is None:
+            request_log.open("a").write(f"{self.path}|missing\n")
+            self.send_response(404)
+            self.end_headers()
+            return
+        request_log.open("a").write(
+            f"{self.path}|{'conditional' if conditional else 'plain'}|200\n")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        if etag is not None:
+            self.send_header("ETag", etag)
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *_args):
         pass
@@ -306,7 +337,7 @@ VENDOR_DEP=$(find "$VENDOR" -mindepth 1 -maxdepth 1 -type d -name 'fixture-dep*'
 printf 'pub fn value() -> usize { 999 }\n' >"$VENDOR_DEP/src/lib.rs"
 if run_self "$DIR_APP" >"$TMP/tamper.out" 2>"$TMP/tamper.err"; then
     bad "self unexpectedly succeeded after directory source tampering"
-elif rg -q 'sha256 校验失败' "$TMP/tamper.err"; then
+elif rg -q 'sha256 verification failed' "$TMP/tamper.err"; then
     ok "directory source rejects tampering via per-file checksum"
 else
     bad "directory source tampering diagnosis unclear"
@@ -371,11 +402,57 @@ else
 fi
 if run_self "$LOOP_APP" >"$TMP/loop-self.out" 2>"$TMP/loop-self.err"; then
     bad "replacement cycle unexpectedly accepted by self"
-elif rg -q 'source replacement 形成环' "$TMP/loop-self.err"; then
+elif rg -q 'source replacement cycle' "$TMP/loop-self.err"; then
     ok "the self path clearly rejects the replacement cycle"
 else
     bad "self diagnosis for the replacement cycle is unclear"
     tail -20 "$TMP/loop-self.err"
+fi
+
+# 8. A fresh solve revalidates the index copy it is about to trust, and asks conditionally, so a
+#    version published after that copy was written is visible to the next solve (E50).
+FRESH_APP="$TMP/fresh-app"
+make_app "$FRESH_APP" fresh-app $'\n[dependencies]\nfixture-dep = { version = "^1", registry = "alt" }' \
+    'fn main() { println!("{}", fixture_dep::value()); }'
+write_registry_config "$FRESH_APP"
+rm -f "$FRESH_APP/Cargo.lock"
+fresh_snapshot=$(run_self "$FRESH_APP" 2>"$TMP/fresh-snapshot.err")
+if [ "$fresh_snapshot" = 123 ]; then
+    ok "fresh solve resolves the version the snapshot holds"
+else
+    bad "fresh solve did not resolve the snapshot version: output=$fresh_snapshot"
+    tail -20 "$TMP/fresh-snapshot.err"
+fi
+# Publish 1.2.4 into the served index: a version the cached copy cannot know about.
+FRESH_STAGE="$TMP/stage/fixture-dep-1.2.4"
+mkdir -p "$FRESH_STAGE/src"
+printf '[package]\nname = "fixture-dep"\nversion = "1.2.4"\nedition = "2021"\n' \
+    >"$FRESH_STAGE/Cargo.toml"
+printf 'pub fn value() -> usize { 124 }\n' >"$FRESH_STAGE/src/lib.rs"
+tar -C "$TMP/stage" -czf "$REGISTRY/crates/fixture-dep/1.2.4.crate" fixture-dep-1.2.4
+FRESH_SUM=$(sha256sum "$REGISTRY/crates/fixture-dep/1.2.4.crate" | awk '{print $1}')
+printf '{"name":"fixture-dep","vers":"1.2.4","deps":[],"cksum":"%s","features":{},"yanked":false}\n' \
+    "$FRESH_SUM" >>"$REGISTRY/fi/xt/fixture-dep"
+rm -f "$FRESH_APP/Cargo.lock"
+fresh_published=$(run_self "$FRESH_APP" 2>"$TMP/fresh-published.err")
+if [ "$fresh_published" = 124 ]; then
+    ok "a version published after the snapshot is visible to the next fresh solve"
+else
+    bad "the fresh solve kept resolving the snapshot: output=$fresh_published"
+    tail -20 "$TMP/fresh-published.err"
+fi
+if rg -q -F 'fi/xt/fixture-dep|conditional|200' "$REQ_LOG"; then
+    ok "the revalidation carried the cached copy's validator"
+else
+    bad "the index request was not conditional: $(tail -3 "$REQ_LOG")"
+fi
+# Nothing changed since that fetch: the same question is answered 304, so the body is not downloaded again.
+rm -f "$FRESH_APP/Cargo.lock"
+fresh_again=$(run_self "$FRESH_APP" 2>"$TMP/fresh-again.err")
+if [ "$fresh_again" = 124 ] && rg -q -F 'fi/xt/fixture-dep|conditional|304' "$REQ_LOG"; then
+    ok "an unchanged index copy is answered 304 rather than downloaded"
+else
+    bad "the unchanged copy was not revalidated with a 304: output=$fresh_again log=$(tail -3 "$REQ_LOG")"
 fi
 
 # Warm-cache offline run + zero-Cargo-process audit. Stop the local registry first so the offline claim is real.
@@ -395,5 +472,19 @@ if [ -e "$MIRVM_CARGO_SENTINEL" ] || rg -q 'execve\("[^"]*/cargo"' "$TMP/self.ex
     bad "source-contract self path launched Cargo"
 else
     ok "source-contract self path: zero Cargo in execve"
+fi
+# The snapshot is deliberately kept offline: the solve makes no request and says the resolution may be
+# older than the registry, which is what makes an offline resolve reproducible.
+requests_before=$(wc -l <"$REQ_LOG")
+rm -f "$FRESH_APP/Cargo.lock"
+if PATH="$NO_CARGO:$PATH" MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
+    MIRVM_OFFLINE=1 MIRVM_DEPS=self MIRVM_LOG=info "$MIRVM" run "$FRESH_APP" \
+    >"$TMP/offline-fresh.out" 2>"$TMP/offline-fresh.err" \
+    && [ "$(cat "$TMP/offline-fresh.out")" = 124 ] \
+    && [ "$(wc -l <"$REQ_LOG")" -eq "$requests_before" ] \
+    && rg -q -F 'offline: the resolution uses cached index copies' "$TMP/offline-fresh.err"; then
+    ok "an offline solve keeps the snapshot, without a request, and says so"
+else
+    bad "offline snapshot policy not reported: $(tail -3 "$TMP/offline-fresh.err")"
 fi
 }
