@@ -53,12 +53,17 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   compiling 594 functions (`tier_baseline=594 tier_optimized=0`); with that cache warm 11.9–12.6 s
   (`cache_hits=594`). Its counters read `i=3260890 call_indirect=129729 call_terminate=232368
   tls_ref=130338` — about 3.5 µs per counted event, so the campaign's first question is what one
-  c2i/terminate crossing costs. Two levers that look obvious are measured and dead: raising the guest's
-  MIR optimization level costs 5-75% more retired instructions (MIR inlining multiplies the
-  interpreter's basic blocks, and each block pays its own dispatch and safe point), level 2 worse than
-  level 1; and `lto = "thin"` on the release profile is 5-13% slower on all four drivers even though the
-  guest-panic canaries stay green. Selective `#[inline]` on the small operand helpers is the version of
-  that idea that pays (E40's profile work).
+  c2i/terminate crossing costs. The campaign's own numbers, all as retired user instructions with the
+  JIT off (deterministic to five digits; the JIT-on count includes compilation work and moves 30% run
+  to run): the safe point's per-block syscall was 87.8% of a profile, and removing it took the drivers
+  from 230-258 s to 10.6 s (`flate2`), 236-245 s to 8.7 s (`brotli`) and 195-213 s to 7.7 s
+  (`tiny_skia`), with `fib32` 8.7 s to 2.6 s; selective `#[inline]` on the small operand helpers then
+  took the interpreter's work down another 11-13% (`flate2` 417.4 G to 364.8 G, `brotli` 416.4 G to
+  367.5 G, `tiny_skia` 347.0 G to 306.9 G, `rayon` 46.0 G to 41.0 G). Two levers that look obvious are
+  dead by the same meter: the guest's MIR level is already 1 (`-Zmir-opt-level=1` is a no-op; level 2
+  buys 2.5% for a MIR shape the differential's authority does not compile), and `lto = "thin"` changes
+  no work while costing 5-13% of wall time, with the guest-panic canaries still green. So more inlining
+  is not the lever; selective inlining is.
 
 ## Approved, awaiting construction
 
@@ -247,8 +252,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   boundary, frame setup and teardown) is attacked, and the items already on the list — T8's
   HostSyscall direct hot path, T9's stateless raw-syscall sites, T12's pool and writer parameters,
   E42's within-run tier signal, E14's allocation, D7's frontend cost — are re-ranked against those
-  profiles instead of followed in sequence. Correctness is the constraint, not a trade: every suite
-  stays green and the frozen surfaces stay byte-identical while the numbers move. Performance contracts
+  profiles instead of followed in sequence. The meter is retired user instructions under
+  `MIRVM_JIT=off`, which is deterministic run to run, with best-of-N wall time and the native builds as
+  the outside reference; a JIT-on instruction count is not a meter, because it includes cranelift's
+  compilation. Correctness is the constraint, not a trade: every suite stays green and the frozen
+  surfaces stay byte-identical while the numbers move. Performance contracts
   are never frozen on current numbers, and `fib32`'s ceiling is not relaxed to close the account.
   Full-process syscall/duration still needs an independent kernel raw-syscall stream; the old
   `MIRVM_SYSCALL_TRACE` is only a debt baseline.
