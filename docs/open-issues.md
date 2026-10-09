@@ -98,7 +98,13 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   block) and -31% on `fib(32)` with every function compiled (245 ms to 168 ms), with stdout
   byte-identical throughout. What remains is the call itself: an inline check in the compiled code (an
   engine-owned delivery word, which `Site::Frozen` already addresses, with the helper called only when
-  it says something is waiting) removes it from the common case at the same safe points.
+  it says something is waiting) removes it from the common case at the same safe points. The frontend
+  paid a stall that was not work either: a run whose cached index copies were present but whose
+  registry was unreachable spent the full 60 s download timeout on one revalidation before serving
+  them, 66-75 s per flate2 run against the 5 s of work in it. A revalidation now has a budget of its
+  own -- three seconds, because a cached copy always answers (`d15-cargoless-design.md` C14) -- and the
+  same runs take 9-18 s, with the warning that says the copies may be older than the registry
+  unchanged.
 
 ## Approved, awaiting construction
 

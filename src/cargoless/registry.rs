@@ -134,6 +134,11 @@ enum IndexFetch {
     Replaced(String),
 }
 
+/// How long one index revalidation may take before the copy on disk is served instead. It is twenty
+/// times a healthy round trip, and a check that runs out is not an error: the resolution is simply
+/// older than the registry, which the warning says.
+const REVALIDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The validators of the response that wrote a cached index file, kept beside it so the next read can
 /// ask a conditional question instead of downloading the file again.
 #[derive(Default)]
@@ -563,6 +568,15 @@ impl Registry {
             IndexValidators::default()
         };
         let mut request = self.agent.get(url);
+        if have {
+            // A revalidation can always serve the cached copy, so it gets a budget of its own: the
+            // agent's timeout is the download timeout, and an unreachable registry would otherwise
+            // stall a run for all of it before the copy on disk is read.
+            request = request
+                .config()
+                .timeout_global(Some(REVALIDATE_TIMEOUT))
+                .build();
+        }
         if let Some(token) = token {
             request = request.header("Authorization", token);
         }

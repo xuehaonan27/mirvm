@@ -76,8 +76,12 @@ Cargo.
   silent. The first revalidation that fails also stops the asking for the rest of the run: a registry
   that did not answer once will not answer for the next crate either, and a run whose registry is
   unreachable but whose offline flag is not set would otherwise pay one timeout per crate, silently.
-  The one warning states that the cached copies are what is being served now. A backend with no remote
-  to ask (a git or local registry, a directory) answers as freshly as it can and is not revalidated.
+  The one warning states that the cached copies are what is being served now. What a revalidation may
+  spend is also bounded on its own: it has a copy to fall back on, so it is given three seconds where
+  fetching a crate that has no copy keeps the download timeout. A registry that is unreachable
+  therefore costs a run one short wait rather than a full download timeout before the copy is read. A
+  backend with no remote to ask (a git or local registry, a directory) answers as freshly as it can
+  and is not revalidated.
 
 ## 2. Model
 
