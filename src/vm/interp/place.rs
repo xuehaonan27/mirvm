@@ -18,6 +18,16 @@ pub(crate) fn region_restore(ctx: *mut Ctx, base: usize) {
     r.restore(base);
 }
 #[inline]
+pub(crate) fn region_mark(ctx: *mut Ctx) -> usize {
+    let r: &ByteRegion = unsafe { &(*ctx).region };
+    r.mark()
+}
+#[inline]
+pub(crate) fn region_release(ctx: *mut Ctx, mark: usize) {
+    let r: &mut ByteRegion = unsafe { &mut (*ctx).region };
+    r.release(mark);
+}
+#[inline]
 pub(crate) fn slot_read(ctx: *mut Ctx, base: usize, s: Slot) -> u64 {
     let r: &ByteRegion = unsafe { &(*ctx).region };
     r.read(base, s)

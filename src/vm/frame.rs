@@ -84,6 +84,18 @@ impl ByteRegion {
         self.sp = base - self.base as usize;
     }
 
+    /// The current bump level, for a caller whose release must land exactly here rather than at
+    /// the aligned address `reserve` returned.
+    pub fn mark(&self) -> usize {
+        self.sp
+    }
+
+    /// Return to a `mark`. The bytes between are dead; nothing else has to be undone.
+    pub fn release(&mut self, mark: usize) {
+        debug_assert!(mark <= self.sp);
+        self.sp = mark;
+    }
+
     #[cfg(test)]
     pub(crate) fn used(&self) -> usize {
         self.sp

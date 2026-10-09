@@ -58,14 +58,29 @@ pub(super) fn run_blocks(
                 unwind,
                 role,
             } => {
-                let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
+                // The argument slots live in the operand region for the length of this call instead
+                // of in a fresh `Vec`: this arm runs once per guest call, so the allocation and free
+                // pair was the interpreter's hottest heap traffic. The region is a stack, so the
+                // callee's frame is reserved above this buffer and released after it returns, and an
+                // unwind restores the region to this frame's base anyway.
+                let indirect = usize::from(matches!(ret, RetDest::Indirect(_)));
+                let slots = aops.len() + indirect;
+                let mark = region_mark(ctx);
+                let arg_base = region_reserve(ctx, (slots * 8) as u32, 8);
+                let args_ptr = arg_base as *mut u64;
+                let mut at = 0usize;
                 if let RetDest::Indirect(dst) = ret {
-                    av.push(eval_place_addr(ctx, base, dst));
+                    unsafe { *args_ptr = eval_place_addr(ctx, base, dst) };
+                    at = 1;
                 }
-                av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
+                for op in aops {
+                    unsafe { *args_ptr.add(at) = eval_operand(ctx, base, op).0 };
+                    at += 1;
+                }
+                let av: &[u64] = unsafe { std::slice::from_raw_parts(args_ptr, slots) };
                 // If the callee panics, this frame cleans up along this edge.
                 edge.set(unwind.cleanup_edge());
-                let call = || guarding_terminate(unwind, || call_guest(ctx, *callee, &av));
+                let call = || guarding_terminate(unwind, || call_guest(ctx, *callee, av));
                 let (lo, hi) = match role {
                     CallRole::Normal => call(),
                     CallRole::MainPanicBoundary => {
@@ -73,6 +88,7 @@ pub(super) fn run_blocks(
                     }
                 };
                 edge.set(None);
+                region_release(ctx, mark);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, lo),
