@@ -1,7 +1,7 @@
 //! Per-thread signal mailboxes and the registration cells that feed them.
 
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use super::{DeferredSignalCallback, SIGNAL_SLOTS};
@@ -36,6 +36,13 @@ pub(crate) struct SignalRegistration {
     /// the target pthread may turn one of these counts into a lifecycle hold.
     pub(super) thread_pending: AtomicUsize,
     pending: [AtomicBool; SIGNAL_SLOTS],
+    /// The same slots as a bitmask, so the safe point's "is a delivery waiting?" costs one load per
+    /// registration instead of a scan of all `SIGNAL_SLOTS` flags: the block loop asks once per basic
+    /// block and compiled code once per loop back-edge, and a slot scan there was a quarter of the
+    /// engine's time on the corpus drivers. Set where a slot is set, cleared where one is taken.
+    /// Standard signals are 1..=31 and realtime signals are refused at installation, so the mask is
+    /// exact rather than conservative.
+    pending_mask: AtomicU32,
     next_owner: AtomicPtr<SignalRegistration>,
 }
 
@@ -67,6 +74,7 @@ impl SignalRegistration {
             kernel_frames: AtomicUsize::new(0),
             thread_pending: AtomicUsize::new(0),
             pending: [const { AtomicBool::new(false) }; SIGNAL_SLOTS],
+            pending_mask: AtomicU32::new(0),
             next_owner: AtomicPtr::new(ptr::null_mut()),
         }));
         register_thread_signal_registration(registration);
@@ -166,6 +174,8 @@ impl SignalRegistration {
         // Traditional signals coalesce while pending. Realtime signals are
         // rejected at installation because they require a real event queue.
         unsafe { self.pending.get_unchecked(signum as usize) }.store(true, Ordering::Release);
+        self.pending_mask
+            .fetch_or(1u32 << signum, Ordering::Release);
     }
 
     fn publish_thread_directed(&'static self, inbox: &'static ThreadSignalInbox, _signum: i32) {
@@ -676,6 +686,9 @@ impl SignalInbox {
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                registration
+                    .pending_mask
+                    .fetch_and(!(1u32 << signum), Ordering::AcqRel);
                 #[cfg(test)]
                 super::run_after_inbox_clear_hook(registration);
                 return Some(delivery);
@@ -693,6 +706,17 @@ impl SignalInbox {
                     .iter()
                     .any(|pending| pending.load(Ordering::Acquire))
         })
+    }
+
+    /// Whether a delivery is waiting, without the slot scan `has_pending` does.
+    ///
+    /// This is the question a safe point asks, and it is exact: the mask holds a bit for every slot
+    /// that holds a delivery, so a false answer cannot hide one, and `has_pending`'s extra
+    /// `thread_pending` clause -- a lifecycle hold, not a delivery -- is deliberately not part of it.
+    #[inline]
+    pub(crate) fn has_delivery(&self) -> bool {
+        self.registrations()
+            .any(|registration| registration.pending_mask.load(Ordering::Acquire) != 0)
     }
 }
 

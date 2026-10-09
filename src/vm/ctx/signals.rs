@@ -346,7 +346,7 @@ fn signals_maybe_pending(ctx: *mut Ctx) -> bool {
         return true;
     }
     let shared: &Shared = unsafe { (*ctx).shared() };
-    shared.control.signal_inbox.has_pending()
+    shared.control.signal_inbox.has_delivery()
 }
 
 fn current_physical_signal_mask() -> u64 {
