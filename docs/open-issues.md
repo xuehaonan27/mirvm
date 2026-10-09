@@ -77,9 +77,14 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
   tiny_skia 4342 -> 4551 ms), and the compiled-code safe point is a quarter of the engine's time:
   neutering it takes flate2's engine from 4711 ms to 3523 ms and tiny_skia's from 4342 ms to 3415 ms.
-  Its predicate is now one load per registration, so what remains of that quarter is the helper call
-  itself once per loop back-edge; attributing that needs the compiled bodies named in the profile, which
-  is what T11's perf map is for (they are anonymous addresses otherwise).
+  Its predicate is now one load per registration, and the perf map answered what the rest of it is:
+  with the compiled bodies named, a flate2 run's self time is 33.9% compiled bodies, 24.5% the
+  compiled-code safe point, 21.8% the interpreter, 18.0% host and frontend work and 1.6% compile and
+  link. The safe point is not doing anything expensive -- it is called **878 million times** in that
+  run (904 million for tiny_skia), about four cycles a call -- so what costs is the frequency, not the
+  body: the fix is an inline check in the compiled code (an engine-owned delivery word in the frozen
+  area, which `Site::Frozen` already addresses, with the helper called only when it says something is
+  waiting), which keeps the per-back-edge latency exactly and removes the call from the common case.
 
 ## Approved, awaiting construction
 
