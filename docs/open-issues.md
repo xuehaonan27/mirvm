@@ -44,7 +44,16 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   publish accounted for, against 140s with `MIRVM_JIT=off`, and the cost is linear in the iteration
   count. Its counters at 3000 iterations (`MIRVM_JIT_STATS=1`) read `c2i=3146740 alloc=42930
   call_terminate=974353 tls_ref=3503 call_indirect=13524 call_builtin=16070`, so the time is not in the
-  compiled bodies.
+  compiled bodies. The corpus drivers put the same fact on real workloads and against a native
+  reference: the pinned toolchain builds these four programs as ordinary binaries (`-O3`, byte-identical
+  stdout) in 34 ms (`flate2`), 35 ms (`brotli`), 10 ms (`tiny_skia`) and 6 ms (`rayon`), where mirvm
+  spends 290 s, 317 s, 273 s and 22 s through their cases — 3 700× to 27 000×. The cost is therefore
+  what one guest operation costs here, not the work the program asks for. On `rayon` the JIT does not
+  pay for itself either: `MIRVM_JIT=off` takes 10.6–11.7 s; JIT on with its artifact cache cold 22.7 s,
+  compiling 594 functions (`tier_baseline=594 tier_optimized=0`); with that cache warm 11.9–12.6 s
+  (`cache_hits=594`). Its counters read `i=3260890 call_indirect=129729 call_terminate=232368
+  tls_ref=130338` — about 3.5 µs per counted event, so the campaign's first question is what one
+  c2i/terminate crossing costs.
 
 ## Approved, awaiting construction
 
@@ -224,11 +233,18 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   `paths`, and `HOST_RUSTFLAGS` (`src/cargoless/rustflags.rs`). Cargo is never removed — it stays the
   explicit user fallback, the behavior judge and the continuous differential path, while cargoless
   stays the default.
-- **D16** `UNSCHEDULED`: the unified performance campaign. The mainline is the remaining HostSyscall
-  direct hot path, then the trace interpreter loop, then the stateless inline-asm raw syscall sites
-  (fork generations are closed), with perf capture in parallel, then the data ruling. Performance
-  contracts must not be frozen on current fixed-double-page/generic-helper numbers. Known RED: `fib32`
-  against its 80ms gate, which must not be relaxed to close the account (E40 records the measurement).
+- **D16** `APPROVED`: the unified performance campaign, now the whole execution path rather than the
+  syscall hot path first. The meters are the corpus drivers and `fib32` against native builds of the
+  same programs with the pinned toolchain, and E40 carries the numbers: 3 700× to 27 000× on the
+  drivers, with the JIT currently a net loss. The order is set by measurement rather than by the old
+  mainline: T11's profile command is the instrument and lands first, then the heaviest self-time in the
+  interpreter and in what one guest call costs (the c2i/terminate crossing, TLS, the packed-entry
+  boundary, frame setup and teardown) is attacked, and the items already on the list — T8's
+  HostSyscall direct hot path, T9's stateless raw-syscall sites, T12's pool and writer parameters,
+  E42's within-run tier signal, E14's allocation, D7's frontend cost — are re-ranked against those
+  profiles instead of followed in sequence. Correctness is the constraint, not a trade: every suite
+  stays green and the frozen surfaces stay byte-identical while the numbers move. Performance contracts
+  are never frozen on current numbers, and `fib32`'s ceiling is not relaxed to close the account.
   Full-process syscall/duration still needs an independent kernel raw-syscall stream; the old
   `MIRVM_SYSCALL_TRACE` is only a debt baseline.
 - **D17** `UNSCHEDULED`: `mirvm test` as a product command. Cargo test/bench/doctest parity is

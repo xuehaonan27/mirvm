@@ -131,7 +131,9 @@ fetches; `tests/README.md` documents the suites.
 - `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
   which is `repo-quality`'s 17 source checks.
 - Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
-- Timing gates: `load` 155ms against its 1000ms ceiling; `fib32` RED (E40).
+- Timing gates: `load` 155ms against its 1000ms ceiling; `fib32` RED (E40). The corpus drivers are
+  3 700× to 27 000× a native build of the same programs (E40), which is what D16's campaign is measured
+  against.
 
 The fast tier's failures are the four `cargo-diff` rows that report FAIL rather than SKIP when their
 materialized project directory is absent (`ecosystem`, `ffi_zlib`, `ripgrep_regex`, `warning_return`;
