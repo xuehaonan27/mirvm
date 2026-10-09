@@ -81,8 +81,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   narrow where that time is: the tier is not a lever (a script run writes no heat order, so every
   corpus run compiles baseline-tier code -- cranelift `opt_level="none"` -- and forcing every request
   to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
-  tiny_skia 4342 -> 4551 ms), and the remainder is dominated by two calls the compiled form makes on
-  every entry. The perf map's current reading of a warm flate2 run is 27.4% compiled bodies, 18.0% the
+  tiny_skia 4342 -> 4551 ms), the compile threshold is a small one rather than the structural answer
+  (with the pack cache warm, compiling every function at its first call and synchronously moves flate2
+  from 4.87-5.22 s to 4.62 s, so the interpreter's share is not what the threshold holds back), and
+  what is left is dominated by two calls the compiled form makes on every entry. The perf map's
+  current reading of a warm flate2 run is 27.4% compiled bodies, 18.0% the
   interpreter, 12.6% the compiled-code safe point, 8.3% the guest build, 7.3% the compiled entry's
   stack guard, 3.9% `call_guest`, 3.9% memory moves and the rest below 2%. The safe point was not
   doing anything expensive -- about four cycles a call -- so what cost was the frequency: it ran at
@@ -96,8 +99,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   tiny_skia 6.31 s to 5.30 s, paired best of six with the deps, IR and JIT caches dropped before each
   block) and -31% on `fib(32)` with every function compiled (245 ms to 168 ms), with stdout
   byte-identical throughout. What remains is the call itself: an inline check in the compiled code (an
-  engine-owned delivery word, which `Site::Frozen` already addresses, with the helper called only when
-  it says something is waiting) removes it from the common case at the same safe points. The frontend
+  engine-owned delivery word, with the helper called only when it says something is waiting) removes it
+  from the common case at the same safe points. The word has to be one per Engine rather than one per
+  thread, and a slow path that finds any delivery still pending anywhere in the Engine -- another
+  pthread's cell included -- must raise it again: a thread that clears a word whose event sits in
+  another pthread's cell is exactly the lost-wakeup case a boolean has no way to avoid. The frontend
   paid a stall that was not work either: a run whose cached index copies were present but whose
   registry was unreachable spent the full 60 s download timeout on one revalidation before serving
   them, 66-75 s per flate2 run against the 5 s of work in it. A revalidation now has a budget of its
