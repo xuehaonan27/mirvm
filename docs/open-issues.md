@@ -53,7 +53,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   compiling 594 functions (`tier_baseline=594 tier_optimized=0`); with that cache warm 11.9–12.6 s
   (`cache_hits=594`). Its counters read `i=3260890 call_indirect=129729 call_terminate=232368
   tls_ref=130338` — about 3.5 µs per counted event, so the campaign's first question is what one
-  c2i/terminate crossing costs.
+  c2i/terminate crossing costs. Two levers that look obvious are measured and dead: raising the guest's
+  MIR optimization level costs 5-75% more retired instructions (MIR inlining multiplies the
+  interpreter's basic blocks, and each block pays its own dispatch and safe point), level 2 worse than
+  level 1; and `lto = "thin"` on the release profile is 5-13% slower on all four drivers even though the
+  guest-panic canaries stay green. Selective `#[inline]` on the small operand helpers is the version of
+  that idea that pays (E40's profile work).
 
 ## Approved, awaiting construction
 
