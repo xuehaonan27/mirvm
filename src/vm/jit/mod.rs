@@ -42,6 +42,18 @@ mod unwind;
 
 #[cfg(feature = "cranelift")]
 pub(crate) use compiler::{start, stop};
+
+/// The interpreter's report of its own back edges, for the compile policy: a body whose work is a
+/// loop pays for interpretation once per iteration, whatever its call count says, so enough
+/// interpreted iterations ask for it to be compiled. Called with a batch, never per iteration, and
+/// free when the JIT is off.
+#[inline]
+pub(crate) fn note_interpreted_iterations(ctx: *mut crate::vm::ctx::Ctx, func: u32, count: u32) {
+    let shared = unsafe { (*ctx).shared() };
+    if shared.jit.enabled {
+        shared.jit.note_iterations(func, count);
+    }
+}
 /// Test-only view of the helper frequency table, so a test can prove a path ran
 /// rather than only that its effects match another path's.
 #[cfg(all(test, feature = "cranelift"))]

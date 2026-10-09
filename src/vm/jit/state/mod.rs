@@ -129,6 +129,11 @@ impl Heat {
 /// interpreting), and non-strict mode never writes it.
 pub const FAIL_SENTINEL: u64 = u64::MAX;
 
+/// Interpreted loop iterations of one function before the compile policy asks for it. A compiled body
+/// is worth some milliseconds of compilation, and interpreting a loop body pays that back after tens
+/// of thousands of iterations; a body that never reaches this stays interpreted.
+pub const ITERATION_REQUEST: u32 = 1 << 16;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JitCodeRange {
     pub start: u64,
@@ -199,6 +204,12 @@ pub struct JitState {
     /// is learned again every run — which is the hysteresis, since one run of evidence is not enough
     /// to rewrite it. The D16 measurement ledger owns any refinement (§2.6 of the JIT design).
     hot: std::sync::RwLock<std::collections::HashSet<u32>>,
+    /// Interpreted loop iterations, by function. The call counter answers "how often is this called",
+    /// which is the wrong question for a body whose work is a loop: one call can run a loop for the
+    /// whole program, and a body entered twice with a long loop pays for interpretation once per
+    /// iteration. The interpreter reports its back edges here in batches, and crossing the request
+    /// point asks for the function to be compiled.
+    iterations: Vec<AtomicU32>,
     /// `MIRVM_JIT_SYNC=1` verification mode: after queueing, wait for publication or the
     /// failure sentinel. With threshold 1 this turns "first call requests compilation"
     /// into "first call compiles and publishes synchronously", and a compilation failure
@@ -245,6 +256,7 @@ impl JitState {
             enabled,
             threshold,
             hot: std::sync::RwLock::new(std::collections::HashSet::new()),
+            iterations: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
             sync: crate::options::jit_sync(),
             queue: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
@@ -263,6 +275,34 @@ impl JitState {
         };
         hot.clear();
         hot.extend(order.iter().copied());
+    }
+
+    /// Record interpreted loop iterations for one function and ask for it to be compiled when the
+    /// count first crosses [`ITERATION_REQUEST`]. Batching is the caller's: one atomic per batch keeps
+    /// this off the interpreter's hot path. A request already answered is a no-op at the worker, so
+    /// the crossing is the only filter this needs.
+    pub fn note_iterations(&self, func: u32, count: u32) {
+        let Some(slot) = self.iterations.get(func as usize) else {
+            return;
+        };
+        let prev = slot.fetch_add(count, Ordering::Relaxed);
+        if prev < ITERATION_REQUEST && prev.saturating_add(count) >= ITERATION_REQUEST {
+            self.request_compile(func);
+        }
+    }
+
+    /// Ask the compile service for one function, at the tier the heat ledger names. False when no
+    /// service is listening: the JIT is off, the worker never started, died, or is a parent's that a
+    /// fork did not bring across.
+    pub fn request_compile(&self, func: u32) -> bool {
+        let Some(q) = self.queue.lock().unwrap().as_ref().cloned() else {
+            return false;
+        };
+        q.send(Request {
+            func,
+            tier: self.tier_for(func),
+        })
+        .is_ok()
     }
 
     /// Which tier a function's request should ask for: the optimized one exactly when a previous run

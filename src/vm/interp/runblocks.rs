@@ -24,6 +24,10 @@ pub(super) fn run_blocks(
     let body: &FuncBody = &module.funcs[func as usize];
 
     let mut blk = entry as usize;
+    // Back edges to count before the compile policy hears about them. One atomic per batch keeps the
+    // count off the loop's hot path; the count itself is a local.
+    const ITERATION_BATCH: u32 = 256;
+    let mut iterations = 0u32;
     loop {
         let current = blk;
         let block: &Block = &body.blocks[blk];
@@ -389,6 +393,11 @@ pub(super) fn run_blocks(
         // iteration of any loop reaches a poll, whatever order the blocks are laid out in.
         if blk <= current {
             crate::vm::ctx::drain_pending_signals(ctx);
+            iterations += 1;
+            if iterations == ITERATION_BATCH {
+                iterations = 0;
+                crate::vm::jit::note_interpreted_iterations(ctx, func, ITERATION_BATCH);
+            }
         }
     }
 }

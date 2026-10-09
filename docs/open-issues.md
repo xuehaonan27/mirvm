@@ -81,19 +81,27 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   narrow where that time is: the tier is not a lever (a script run writes no heat order, so every
   corpus run compiles baseline-tier code -- cranelift `opt_level="none"` -- and forcing every request
   to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
-  tiny_skia 4342 -> 4551 ms), the compile policy is worth double digits once the pack cache is warm
-  (with it warm, compiling every function at its first call and synchronously takes flate2 from
-  4.15-4.37 s to 3.62 s and its user instructions from 33.51 G to 28.95 G, -13.6%, where the same
-  experiment read 5% while the packs still had to be filled; dropping only the JIT cache, threshold 8
-  reads 4.02-4.15 s against the default's 4.22-6.28 s on flate2, so it is not the cold penalty it looks
-  like). On the four drivers with warm packs the same change reads (user instructions, best of three)
-  flate2 43.04 G to 27.90 G, brotli 45.14 G to 36.99 G, tiny_skia 35.08 G to 31.39 G and rayon 17.12 G
-  to 26.32 G: a large win for the first three and a loss for rayon, whose functions are small and
-  short-lived. The readings are entangled with what the store happens to hold -- the same default
-  configuration read 33.51 G and 43.04 G in two sessions -- so a policy ruling (E42 and D16 intend an
-  adaptive one rather than a constant) needs one controlled store state per policy first; no default is
-  changed on this evidence. `MIRVM_JIT_STATS`' `cache_prelinked`/`cache_misses` say what a run did. The
-  compiled form's per-entry
+  tiny_skia 4342 -> 4551 ms), the compile policy is the biggest lever the campaign has found after the
+  safe point, and it had to stop being a single call count to take it. A lower count is a win for three
+  drivers and a loss for rayon, whether the count is 8, 1, or "loopy bodies after their second call":
+  measured wall, best of five, alternating in one session, the second-call rule moved flate2 4118 -> 3197
+  ms, brotli 5994 -> 3554 ms and tiny_skia 4423 -> 3813 ms while rayon went 1489 -> 1612 ms, because
+  rayon's sort is thousands of single-shot small loop bodies and compiling them costs more than
+  interpreting them. What separates the two is not the call count but the work: a body whose loop the
+  interpreter runs for tens of thousands of iterations is worth compiling however rarely it is called.
+  The interpreter now reports its back edges to `JitState` in batches of 256 and crossing 65536
+  interpreted iterations raises the same request the call threshold raises (asked once, since a request
+  the worker already answered is a no-op). That keeps the three wins and leaves rayon where it was:
+  flate2 4433 -> 3453 ms, brotli 4059 -> 3630 ms, tiny_skia 4669 -> 3788 ms, rayon 1466 -> 1505 ms, with
+  `flate2`, `brotli`, `tiny_skia`, `rayon`, `jit-stats`, `fib32-jit-cache`, `recursion-stack-overflow`,
+  `signal`, `tsan` and `quality` green and the library suite at 468/0/1.
+  Earlier readings of the same question are worth recording because they misled: with warm packs,
+  compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
+  (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT
+  cache dropped, threshold 8 read 4.02-4.15 s against the default's 4.22-6.28 s; and the four-driver
+  instruction readings are entangled with what the store happens to hold (the same default configuration
+  read 33.51 G and 43.04 G in two sessions). `MIRVM_JIT_STATS`' `cache_prelinked`/`cache_misses` say what
+  a run did. The compiled form's per-entry
   calls are where the rest sat: the perf map read a warm flate2 run as 27.4% compiled bodies, 18.0% the
   interpreter, 12.6% the compiled-code safe point, 8.3% the guest build, 7.3% the compiled entry's
   stack guard, 3.9% `call_guest`, 3.9% memory moves and the rest below 2% before either call was

@@ -249,6 +249,17 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    raises while it is interpreted asks for the tier the heat ledger gives it (`JitState::tier_for`).
    `fib32-jit-cache` asserts the split: a cold run is all baseline, a warm one links from the store and
    compiles the functions the heat order names at the optimized tier.
+   Two questions ask for a compilation, and the second one is why the policy is not a single call count:
+   a function whose call counter crosses the threshold, and a function the interpreter has taken
+   `ITERATION_REQUEST` back edges in. The call count is the right question for a body whose work is its
+   calls, and the wrong one for a body whose work is a loop — the entry function of a program is called
+   once and can loop for the whole run — so the interpreter reports its back edges to `JitState` in
+   batches and enough of them raise the same request. The batch keeps the report off the hot path, and
+   the iteration count is what distinguishes work worth compiling from a body that is merely entered
+   often: on the corpus drivers, compiling a body after its second call moved flate2, brotli and
+   tiny_skia by -22%/-41%/-14% of wall time but cost rayon 8%, because its sort is thousands of
+   single-shot small loop bodies, while the iteration rule keeps those three (-22%/-11%/-19%) and
+   leaves rayon where it was.
    The policy has no within-run upgrade, and measuring says why: a request is raised once while a
    function is interpreted, and publishing the baseline entry — pre-linked or compiled — means its later
    calls go through the PLT slot, where no counter observes them. So the ledger's unit of evidence is one

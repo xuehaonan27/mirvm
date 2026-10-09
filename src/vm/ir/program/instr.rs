@@ -559,6 +559,35 @@ pub enum Terminator {
     Trap(Box<str>),
 }
 
+impl Terminator {
+    /// Append every block this terminator can transfer control to, in no particular order.
+    ///
+    /// The match is exhaustive on purpose: a terminator added without an arm here would silently
+    /// drop an edge from every walk over the graph, the safe point's loop analysis and the compile
+    /// policy's included.
+    pub fn successors(&self, out: &mut Vec<Bb>) {
+        match self {
+            Self::Goto(bb) => out.push(*bb),
+            Self::SwitchInt {
+                targets, otherwise, ..
+            } => {
+                out.extend(targets.iter().map(|(_, bb)| *bb));
+                out.push(*otherwise);
+            }
+            Self::Call { target, .. }
+            | Self::CallBuiltin { target, .. }
+            | Self::CallForeign { target, .. }
+            | Self::CallIndirect { target, .. }
+            | Self::InlineAsm { target, .. } => out.push(*target),
+            Self::Return
+            | Self::Unreachable
+            | Self::Resume
+            | Self::TerminateAbort
+            | Self::Trap(_) => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
