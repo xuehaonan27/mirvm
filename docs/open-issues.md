@@ -81,13 +81,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   narrow where that time is: the tier is not a lever (a script run writes no heat order, so every
   corpus run compiles baseline-tier code -- cranelift `opt_level="none"` -- and forcing every request
   to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
-  tiny_skia 4342 -> 4551 ms), and the compiled-code safe point is a quarter of the engine's time:
-  neutering it takes flate2's engine from 4711 ms to 3523 ms and tiny_skia's from 4342 ms to 3415 ms.
-  Its predicate is now one load per registration, and the perf map answered what the rest of it is:
-  with the compiled bodies named, a flate2 run's self time is 33.9% compiled bodies, 24.5% the
-  compiled-code safe point, 21.8% the interpreter, 18.0% host and frontend work and 1.6% compile and
-  link. The safe point was not doing anything expensive -- about four cycles a call -- so what cost was
-  the frequency: it ran at every block entry, **878 million times** in that flate2 run (904 million for
+  tiny_skia 4342 -> 4551 ms), and the remainder is dominated by two calls the compiled form makes on
+  every entry. The perf map's current reading of a warm flate2 run is 27.4% compiled bodies, 18.0% the
+  interpreter, 12.6% the compiled-code safe point, 8.3% the guest build, 7.3% the compiled entry's
+  stack guard, 3.9% `call_guest`, 3.9% memory moves and the rest below 2%. The safe point was not
+  doing anything expensive -- about four cycles a call -- so what cost was the frequency: it ran at
+  every block entry, **878 million times** in that flate2 run (904 million for
   tiny_skia), 24.5% of the engine's self time. It now runs only where the contract puts it, at a loop
   back edge and at a function return (`modeb-mirvmar-design.md` §2.7), which is **261.7 million** calls
   in the same run (263.8 million for tiny_skia, 7.0 million against 38.8 million for `fib(32)`) -- the
@@ -223,6 +222,17 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   `intrinsics` does. Closes with that split and a `repo-quality` check that `src/lower/` spells no x86
   register or mnemonic: `platform boundary` matches `asm!(`/`libc::`/`cfg(target_*)` and cannot see a
   string.
+- **E52** `UNSCHEDULED`: a large dependency closure reaches the code regions' fixed addresses. The
+  frozen dependency spline starts at `0x6A00_0000_0000` and steps 16 GiB per image, while the three
+  code-region families sit inside that span (`DELTA_CODE_ADDR` `0x6C00`, `BASE_CODE_ADDR` `0x6D00`,
+  `IMAGE_CODE_SPLINE` `0x6E00`, `src/os_arch/linux_x86_64/addrspace.rs`), so the 129th dependency
+  image's frozen region is mapped where the delta's entry stubs live, the 193rd where the base's do and
+  the 257th where the dependency code spline does; verification then refuses the image. Both splines
+  claim 1300 slots, which cannot fit the 0x68–0x7F hole at that step in any order, so closing this needs
+  a ruling on the numbers (a smaller step, a smaller count, or one interleaved slot family per image)
+  rather than a nudge. `datafusion_sql` and `miden_prove` (both gate cases) reproduce it as
+  `image entry stub 0:0 link address 0x6d0000000000 overlaps frozen memory`, exit 70, identically before
+  and after the safe-point work.
 
 ## Distribution and product
 
