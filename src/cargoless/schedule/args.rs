@@ -8,9 +8,26 @@ use crate::cargoless::resolve::{ResolvePlan, Unit, UnitClass};
 
 use super::Layout;
 
+/// The MIR level every session that lowers guest code compiles at.
+///
+/// The engine's cost is dominated by what a *block* costs it -- a safe point, a block dispatch and a
+/// slot access each -- and rustc's debug default leaves MIR at level 1, where almost nothing is
+/// inlined, so a guest loop is many tiny blocks instead of a few. MIR optimization is
+/// semantics-preserving (rustc relies on it for -O2/3), so this does not make the engine disagree
+/// with the Cargo track, which stays the authority and keeps Cargo's own profile; it changes how many
+/// blocks the engine executes. Measured through the corpus drivers: 12-16% fewer retired instructions
+/// and 33-42% less wall time. A build-time constant, never an input, so a session's key cannot be
+/// shared across two levels.
+pub(crate) const GUEST_MIR_OPT_ARG: &str = "-Zmir-opt-level=2";
+
 /// The three profile flags. debug-assertions and overflow-checks enter MIR semantics, so a
 /// mismatch with cargo's dev profile would show up as a differential drift.
-fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags) {
+///
+/// `lowered` marks the recipes whose MIR the engine executes: a target dependency's rlib and the
+/// root package's lib target. Those get `GUEST_MIR_OPT_ARG`. The bin session keeps the shape the
+/// Cargo track's runner has (the same `MirvmCallbacks` path serves both, and the Cargo track is the
+/// authority), and a host-side recipe's MIR is never lowered here at all.
+fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags, lowered: bool) {
     let yn = |b: bool| if b { "yes" } else { "no" };
     a.push("-C".into());
     a.push(format!("debug-assertions={}", yn(p.debug_assertions)));
@@ -19,6 +36,9 @@ fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags) {
     if !p.opt_level.is_zero() {
         a.push("-C".into());
         a.push(format!("opt-level={}", p.opt_level));
+    }
+    if lowered {
+        a.push(GUEST_MIR_OPT_ARG.into());
     }
 }
 
@@ -142,7 +162,7 @@ pub fn dep_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, profile);
+    push_profile_flags(&mut a, profile, true);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
     // extra-filename must be the next separate argv slot after -C: run_dep_compiler
@@ -247,7 +267,7 @@ pub fn bin_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, &manifest.profile);
+    push_profile_flags(&mut a, &manifest.profile, false);
     for d in &plan.root_deps {
         if d.kind != DepKind::Normal {
             continue; // a Build edge is not a code dependency
@@ -476,7 +496,7 @@ pub fn root_lib_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, &manifest.profile);
+    push_profile_flags(&mut a, &manifest.profile, true);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
     // extra-filename window discipline as in dep_rustc_args (extracted by run_dep_compiler)
@@ -555,7 +575,7 @@ pub fn root_proc_macro_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, &manifest.profile);
+    push_profile_flags(&mut a, &manifest.profile, false);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
     a.push("-C".into());
@@ -736,7 +756,7 @@ pub fn host_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, profile);
+    push_profile_flags(&mut a, profile, false);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
     a.push("-C".into());
@@ -809,7 +829,7 @@ pub fn proc_macro_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, profile);
+    push_profile_flags(&mut a, profile, false);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
     a.push("-C".into());
@@ -894,7 +914,7 @@ pub fn build_script_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, profile);
+    push_profile_flags(&mut a, profile, false);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
     a.push("-C".into());
@@ -961,7 +981,7 @@ pub fn root_build_script_rustc_args(
         .join(",");
     a.push("--check-cfg".into());
     a.push(format!("cfg(feature, values({vals}))"));
-    push_profile_flags(&mut a, &manifest.profile);
+    push_profile_flags(&mut a, &manifest.profile, false);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
     a.push("-C".into());

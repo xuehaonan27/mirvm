@@ -645,6 +645,7 @@ pub(super) fn run_main(
         "--crate-type=bin".to_string(),
         "--sysroot".to_string(),
         sysroot,
+        crate::cargoless::schedule::GUEST_MIR_OPT_ARG.to_string(),
     ];
     let mut program_argv = vec![input];
     program_argv.extend(program_args);

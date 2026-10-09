@@ -89,6 +89,7 @@ pub(super) fn build_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
         "--crate-type=bin".to_string(),
         "--sysroot".to_string(),
         sysroot,
+        crate::cargoless::schedule::GUEST_MIR_OPT_ARG.to_string(),
     ];
     // The base image key is digest(build_id, sysroot stamp) and never sees these arguments, so the
     // frontend flag can go straight in. Applying it here matters as much as in the runner: a

@@ -44,7 +44,13 @@ Cargo.
   construct named; mirvm never silently falls back to Cargo.
 - **C9 dev-dependencies are never solved**, and mirvm never runs tests.
 - **C10 profile semantics are pinned** to Cargo's dev profile: `debug-assertions=on` and
-  `overflow-checks=on`. These two flags enter MIR semantics, so a mismatch is differential drift.
+  `overflow-checks=on`. These two flags enter MIR semantics, so a mismatch is differential drift. The
+  MIR *optimization* level is not one of them -- it preserves semantics -- and it is mirvm's own choice:
+  the engine pays per block (a safe point, a block dispatch, a slot access each), so a guest loop of
+  many tiny blocks costs far more than the few blocks an inlined one would. Every recipe whose MIR the
+  engine executes (a target dependency's rlib, the root package's lib, the base image, a plain-file
+  session) therefore compiles at `-Zmir-opt-level=2`; the bin session keeps the shape the Cargo track's
+  runner has, because that track is the authority, and a host-side recipe's MIR is never lowered here.
 - **C11 fingerprint v1**: hash of the manifest subtree, lock version set, features, rustflags,
   build.rs rerun-if output, rustc version and source-tree dep-info. No Cargo fingerprint compatibility
   is needed.
