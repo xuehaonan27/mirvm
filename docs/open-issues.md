@@ -184,6 +184,21 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   delta), and residue that names no unit is ~78% of a small closure's manifest bytes, all of it in
   whichever unit comes first. Open: the binding-into-L2 move, and where that residue lives (the
   adaptive base of D9). Analysis in [dep-sharing-design.md](designs/dep-sharing-design.md) §7.
+- **E51** `UNSCHEDULED`: the inline-asm wrapper's x86 vocabulary lives in the lowering layer and nothing
+  enforces the boundary that keeps it off another CPU. `src/lower/asm.rs` renders the `fn(*mut u8)`
+  wrapper around a guest `asm!` body — prologue and epilogue text, slot loads and stores, the
+  `xmm`/`ymm`/`zmm` move spelling — so those CPU words sit under `src/lower/` rather than on the
+  architecture axis, and what keeps them from being emitted for another CPU is not a `#[cfg]` guard
+  but the two sites that can produce asm text: `lower::func::asm` refuses an `asm_arch` that is not
+  `X86_64`, and `lower::global_asm::ensure_host_arch` compares rustc's spelling against
+  `arch::asm_text::NAME`.
+  Register allocation and the wrapper's *sequence* must stay there — they are functions of rustc's
+  `InlineAsmReg`/`llvm.x86` tables and of `prefix_and_suffix`, which the leaf `src/arch/` must not name
+  — but the wrapper's text is the CPU's share and can be supplied from the axis (slot offset plus a
+  scalar/vector kind in, text out), with the aarch64 arm answering unreachable bodies the way
+  `intrinsics` does. Closes with that split and a `repo-quality` check that `src/lower/` spells no x86
+  register or mnemonic: `platform boundary` matches `asm!(`/`libc::`/`cfg(target_*)` and cannot see a
+  string.
 
 ## Distribution and product
 

@@ -1,10 +1,10 @@
 //! The GAS text an x86_64 assembler reads.
 //!
-//! Only the vocabulary that is the CPU's lives here: which syntax directive wraps a body, how the
-//! assembler is asked for the unaligned packed forms below, and the two instruction forms mirvm
-//! rewrites into. *How* those pieces are sequenced stays with the materializer in `src/lower/`,
-//! because the sequence follows rustc's `prefix_and_suffix` and its bytes are a cache key — a
-//! second architecture supplies the same names with its own text and leaves the sequencing alone.
+//! Only the vocabulary that is the CPU's lives here: the name this architecture answers to when an
+//! architecture is refused, and the syntax directive that wraps a body. *How* those pieces are
+//! sequenced stays with the materializer in `src/lower/`, because the sequence follows rustc's
+//! `prefix_and_suffix` and its bytes are a cache key — a second architecture supplies the same names
+//! with its own text and leaves the sequencing alone.
 
 /// The architecture as rustc spells it in [`rustc_target::asm::InlineAsmArch`]'s `Debug`, for a
 /// refusal message that names what this build does support.

@@ -11,9 +11,12 @@
 //! - Acceptance Surface: Hardware intrinsic execution body (the true form
 //!   behind the llvm.x86.* boundary), machine code byte emission (stub),
 //!   single-issue instruction primitives (int3).
-//! - Not accepted: Register allocation for `lower/asm.rs` is coupled with the
-//!   llvm.x86 name table (rustc type coupling) – reserve the lower field and
-//!   document it (decision-history §7.16).
+//! - Not accepted: Register allocation and the wrapper sequence for inline asm
+//!   (`src/lower/asm.rs`), which are functions of rustc's `InlineAsmReg`/`llvm.x86`
+//!   tables and so of a rustc type this leaf must not name. The CPU's share of that
+//!   text is here (`asm_text`), and the two sites that can produce asm text refuse an
+//!   architecture this build is not before the generator runs
+//!   (`lower::func::asm`, `lower::global_asm::ensure_host_arch`).
 //!
 //! # Architecture Selection
 //! `x86_64/` and `aarch64/` are the implementations, each with the same prerequisites as the
