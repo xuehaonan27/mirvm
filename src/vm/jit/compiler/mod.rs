@@ -156,6 +156,7 @@ pub fn start(shared: &std::sync::Arc<Shared>) {
     if !shared.jit.enabled {
         return;
     }
+    super::install_if_asked();
     shared.jit.stopping.store(false, Ordering::Release);
     let (tx, rx): (Sender<Request>, Receiver<Request>) = std::sync::mpsc::channel();
     *shared.jit.queue.lock().unwrap() = Some(tx);

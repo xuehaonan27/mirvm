@@ -300,6 +300,8 @@ entries! {
     dev  jit_debug       env("MIRVM_JIT_DEBUG")       default("off") => reads(bool, |o| o.jit_debug);
     /// Dump CLIF for functions whose compilation fails.
     dev  jit_debug_dump  env("MIRVM_JIT_DEBUG_DUMP")  default("off") => reads(bool, |o| o.jit_debug_dump);
+    /// Write the process perf map (`/tmp/perf-<pid>.map`) so a sampler can name compiled guest bodies.
+    dev  perf_map        env("MIRVM_PERF_MAP")        default("off") => reads(bool, |o| o.perf_map);
     /// Publish what each compiled function's artifact links back to, not the module's own code.
     dev  jit_reload      env("MIRVM_JIT_RELOAD")      default("off") => reads(bool, |o| o.jit_reload);
     /// Measure each compiled or linked function (body bytes, code bytes, micros) and print the ledger at exit.
@@ -567,6 +569,7 @@ struct Options {
     encoded_rustflags_append: Option<String>,
     jit_debug: bool,
     jit_debug_dump: bool,
+    perf_map: bool,
     jit_reload: bool,
     jit_ledger: bool,
     debug_bldrs: bool,
@@ -620,6 +623,7 @@ impl Options {
                 .filter(|value| !value.is_empty()),
             jit_debug: flag("jit_debug"),
             jit_debug_dump: flag("jit_debug_dump"),
+            perf_map: flag("perf_map"),
             jit_reload: flag("jit_reload"),
             jit_ledger: flag("jit_ledger"),
             debug_bldrs: flag("debug_bldrs"),
@@ -1111,6 +1115,7 @@ mod tests {
         let _ = super::pack_no_mc();
         let _ = super::jit_debug();
         let _ = super::jit_debug_dump();
+        let _ = super::perf_map();
         let _ = super::debug_bldrs();
         let _ = super::debug_unify();
         let _ = super::deps_audit_keep();

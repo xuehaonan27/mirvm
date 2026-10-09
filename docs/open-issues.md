@@ -94,10 +94,13 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   sites. Depends on T8; closes with differential agreement on RFLAGS, GPRs, red zone, stack, full
   vector state and raw return semantics.
 - **T11** `APPROVED`: Linux perf capture — a profile command and a thin script, first version
-  user-space/IP-only/inherit. The perf-map plumbing exists (`src/vm/jit/state/perfmap.rs`, currently
-  reached only through the internal hooks); what is missing is the command, the script and a fork reset
-  for the registry. Permissions, lost samples and missing maps must fail loudly or be marked
-  incomplete; rerun fib and the D16 real workloads.
+  user-space/IP-only/inherit. The map is wired: `MIRVM_PERF_MAP=1` installs `/tmp/perf-<pid>.map` where
+  the JIT starts and writes the published ranges on the process-exit path (the CLI's `exit_process`,
+  which deliberately never closes the Engine, and `close_shared` on the embedding path), so a sampler
+  names compiled guest bodies — 265 of them in a flate2 profile, 34% of the run's self time. What is
+  missing is the command and the thin script that drive `perf record`/`perf report` and say what a
+  missing map or lost samples mean, the map's reset across `fork` (a child inherits the parent's file
+  name and pid), and a rerun of fib and the D16 real workloads through it.
 - **T12** `APPROVED`: adaptive page pool and writer parameters. Under one memory budget, measure
   4/16/64 KiB pages, 24/32B Exit, return gap, drop, guest cycles, RSS and writer CPU, then implement
   4→64 KiB auto-scaling and rule on batch/checksum. The pool is fixed at 4 KiB and 16/64 KiB are

@@ -362,15 +362,34 @@ pub(super) fn stop_registry(registry: &Mutex<PerfMapRegistry>) -> PerfMapStatus 
 
 /// Start the process-level perf-map, creating only the empty file for this session; the
 /// ranges are written by `stop_perf_map` on the controlling thread.
-// TODO: wire this into the CLI.
-#[allow(dead_code)]
 pub fn install_perf_map(path: impl AsRef<Path>) -> io::Result<PerfMapStatus> {
     install_registry(perf_registry(), path.as_ref())
 }
 
-#[allow(dead_code)]
 pub fn stop_perf_map() -> PerfMapStatus {
     stop_registry(perf_registry())
+}
+
+/// Install the process perf map when `MIRVM_PERF_MAP` asks for it. Once per process: the map names
+/// one file, and a second Engine's install is refused by the registry anyway.
+pub fn install_if_asked() {
+    static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !crate::options::perf_map() || INSTALLED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let path = std::env::temp_dir().join(format!("perf-{}.map", crate::os::process::getpid()));
+    let _ = install_perf_map(&path);
+}
+
+/// Write the ranges the profile needs and stop. The process-exit path calls this where the Engine
+/// does not close (the CLI leaks it deliberately), and close calls it on the embedding path; both
+/// are once per process, and the second is a no-op.
+pub fn stop_if_installed() {
+    static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !crate::options::perf_map() || STOPPED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let _ = stop_perf_map();
 }
 
 #[allow(dead_code)]
