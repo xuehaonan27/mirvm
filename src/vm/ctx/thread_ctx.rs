@@ -110,11 +110,10 @@ impl Ctx {
 }
 
 pub(super) fn current_thread_contexts(ctx: *mut Ctx) -> *mut ThreadContexts {
-    let Some(key) = CTX_KEY.get().copied() else {
+    let Some(contexts) = thread_contexts() else {
         crate::vm::unwind::engine_abort("signal delivery happened outside an Engine activation");
     };
-    let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
-    if contexts.is_null() || unsafe { (*contexts).current != ctx } {
+    if unsafe { (*contexts).current != ctx } {
         crate::vm::unwind::engine_abort("signal delivery does not belong to the current Engine");
     }
     contexts
@@ -263,14 +262,51 @@ pub(super) static CTX_KEY: OnceLock<crate::os::thread::TlsKey> = OnceLock::new()
 pub(super) static THREAD_CONTEXT_EXITING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// This thread's registry, cached so the hot paths do not pay a `pthread_getspecific` call and a
+/// `OnceLock` load on every guest call and every compiled-code safe point.
+///
+/// The pthread key remains the owner of the lifetime: the cache is written where the registry is
+/// created or found (`attach`, `activate`) and cleared immediately before the registry is freed, in
+/// the last teardown round of the key's destructor. A reader that finds no cache entry takes the
+/// pthread path, which is also the answer for a thread that has not entered the engine.
+#[thread_local]
+static TLS_CONTEXTS: std::sync::atomic::AtomicPtr<ThreadContexts> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[inline]
+fn cached_thread_contexts() -> *mut ThreadContexts {
+    TLS_CONTEXTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[inline]
+pub(super) fn set_cached_thread_contexts(contexts: *mut ThreadContexts) {
+    TLS_CONTEXTS.store(contexts, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The pthread-key lookup: the authority for a thread that has not cached anything yet, and for the
+/// teardown rounds that run while the key is being cleared.
+fn keyed_thread_contexts() -> *mut ThreadContexts {
+    let Some(key) = CTX_KEY.get().copied() else {
+        return std::ptr::null_mut();
+    };
+    (unsafe { crate::os::thread::tls_get(key) }) as *mut ThreadContexts
+}
+
+/// This thread's registry, cache first. `None` when the thread has not entered an Engine.
+#[inline]
+fn thread_contexts() -> Option<*mut ThreadContexts> {
+    let cached = cached_thread_contexts();
+    if !cached.is_null() {
+        return Some(cached);
+    }
+    let keyed = keyed_thread_contexts();
+    (!keyed.is_null()).then_some(keyed)
+}
+
 pub(crate) fn current_thread_is_in_final_tsd_pass(key: TlsKey) -> bool {
-    let Some(ctx_key) = CTX_KEY.get().copied() else {
+    let Some(contexts) = thread_contexts() else {
         return false;
     };
-    let contexts = unsafe { crate::os::thread::tls_get(ctx_key) } as *mut ThreadContexts;
-    if contexts.is_null() {
-        return false;
-    }
     unsafe {
         (*contexts)
             .final_tsd_cursor
@@ -283,22 +319,17 @@ pub(crate) fn current_thread_is_in_final_tsd_pass(key: TlsKey) -> bool {
 /// consulting plain entries. Plain is the answer outside any
 /// activation, so the default path never reserves a register.
 pub(crate) fn current_code_domain() -> super::super::jit::CodeDomain {
-    let Some(ctx_key) = CTX_KEY.get().copied() else {
+    let Some(contexts) = thread_contexts() else {
         return super::super::jit::CodeDomain::Plain;
     };
-    let contexts = unsafe { crate::os::thread::tls_get(ctx_key) } as *mut ThreadContexts;
-    if contexts.is_null() {
-        return super::super::jit::CodeDomain::Plain;
-    }
     unsafe { (*contexts).domain }
 }
 
 pub(crate) fn current_thread_final_tsd_pass_is_armed() -> bool {
-    let Some(ctx_key) = CTX_KEY.get().copied() else {
+    let Some(contexts) = thread_contexts() else {
         return false;
     };
-    let contexts = unsafe { crate::os::thread::tls_get(ctx_key) } as *mut ThreadContexts;
-    !contexts.is_null() && unsafe { (*contexts).final_tsd_cursor.is_some() }
+    unsafe { (*contexts).final_tsd_cursor.is_some() }
 }
 
 /// Only the thread-exit TSD round's test reads this, and that test is the one scenario this
@@ -528,6 +559,8 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
             crate::telemetry::capture::retire_current_thread();
         }
         crate::os::thread::tls_set(key, std::ptr::null_mut());
+        // The registry dies here; the cache that pointed at it must not outlive it.
+        set_cached_thread_contexts(std::ptr::null_mut());
         drop(Box::from_raw(contexts));
     }
 }
@@ -573,19 +606,17 @@ pub fn attach(shared: &Arc<Shared>) -> *mut Ctx {
             p as *mut ThreadContexts
         };
         (*contexts).thread_inbox = super::super::signal::current_thread_inbox_handle();
+        set_cached_thread_contexts(contexts);
         (*contexts).attach(shared)
     }
 }
 
 pub fn current() -> *mut Ctx {
-    let Some(key) = CTX_KEY.get().copied() else {
-        panic!("JIT helper called before Engine activation");
+    let contexts = match thread_contexts() {
+        Some(contexts) => contexts,
+        None if CTX_KEY.get().is_none() => panic!("JIT helper called before Engine activation"),
+        None => panic!("JIT helper called before thread attach"),
     };
-    let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
-    assert!(
-        !contexts.is_null(),
-        "JIT helper called before thread attach"
-    );
     let ctx = unsafe { (*contexts).current };
     assert!(
         !ctx.is_null(),

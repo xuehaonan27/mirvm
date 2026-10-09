@@ -133,6 +133,7 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         // The handle is set once per pthread, from the inbox the line above made current: the
         // exit drain reads it from here because thread-local storage is already gone by then.
         (*contexts).thread_inbox = super::super::signal::current_thread_inbox_handle();
+        super::thread_ctx::set_cached_thread_contexts(contexts);
         let previous = (*contexts).current;
         let previous_activation = (*contexts).current_activation;
         let previous_domain = (*contexts).domain;
