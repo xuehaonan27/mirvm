@@ -68,10 +68,16 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   -7.2%/-7.4%/-9.8% on the three drivers, and the per-guest-call cost on the fib series 1505 -> 1369
   instructions), and the thread's registry is cached in `#[thread_local]` storage instead of a
   `pthread_getspecific` plus `OnceLock` per compiled-code safe point and per guest call (-27% and -26%
-  wall time on flate2 and tiny_skia with the shipped configuration). The meters now read: `flate2`
-  8.65 s, `brotli` 6.84 s, `tiny_skia` 5.05 s cold through the driver (from 230-258 s, 236-245 s and
-  195-213 s), `fib32` 509 ms in its case (from 8.7 s, still RED against the 80 ms ceiling), against
-  native builds of the same programs at 34 ms, 35 ms and 10 ms. Two more answers from this campaign
+  wall time on flate2 and tiny_skia with the shipped configuration). The largest single win is not in
+  the engine at all: the guest's MIR. The engine pays per *block*, and rustc's debug default leaves MIR
+  at level 1 with almost nothing inlined, so a hot loop is many tiny blocks; every recipe whose MIR the
+  engine executes now compiles at `-Zmir-opt-level=2` (C10 records why the semantics-carrying profile
+  flags stay pinned while this one is mirvm's own). Paired, best of three, stdout byte-identical:
+  flate2 7910 -> 4981 ms, brotli 9135 -> 6506 ms, tiny_skia 8038 -> 5603 ms, rayon 1099 -> 861 ms. The
+  meters now read: `flate2` 5.33 s, `brotli` 5.43 s, `tiny_skia` 4.92 s and `rayon` 0.96 s cold through
+  the driver (from 230-258 s, 236-245 s, 195-213 s and 19-28 s), `fib32` 443 ms in its case (from
+  8.7 s, still RED against the 80 ms ceiling), against native builds of the same programs at 34 ms,
+  35 ms, 10 ms and 6 ms -- a gap of ~150x to ~500x where the campaign started at 3 700x to 27 000x. Two more answers from this campaign
   narrow where that time is: the tier is not a lever (a script run writes no heat order, so every
   corpus run compiles baseline-tier code -- cranelift `opt_level="none"` -- and forcing every request
   to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
