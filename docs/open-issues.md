@@ -99,6 +99,28 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   ceiling), since the loop it spends its time in is a body called once and interpreted for the whole run,
   while the all-compiled reading is unchanged (232 -> 231 ms) and the deterministic interpreter meter
   (JIT off) moves by less than 1% (flate2 309.49 G -> 307.10 G, tiny_skia 228.55 G -> 227.70 G).
+  Five measured refutations stand between that point and the compiled call path, and each is worth
+  recording so it is not retried. Asking the iteration signal for the *optimized* tier is mixed, not a
+  win: brotli and tiny_skia improve (-10%/-6% of user instructions) while flate2 loses 5% and rayon more,
+  because the optimized build costs more to make and the function it makes better is often executed too
+  few times to pay for it. The program's entry function cannot be reached by any threshold -- the
+  interpreter is inside the body it is already executing, so a count of calls or of iterations only ever
+  compiles it for a call that never comes -- but compiling it eagerly is *worse*, not better: flate2's
+  user instructions rise from 30.5 G to 31.9 G (+4%), so the interpreter's per-block dispatch is
+  competitive for that body while a compiled entry pays its guard and its safe point on every call, and
+  the `@entry` marking came back out. Asking for every function at the optimized tier is worth 7-9% of
+  wall time (flate2 3835 -> 3508 ms, brotli 4348 -> 4035 ms) but breaks `fib32-jit-cache`, whose cold leg
+  requires baseline build. A tail call from the guarded wrapper into the fast body -- one call and one
+  frame less per compiled call -- broke `jit-stats`, `fib32-jit-cache`, `recursion-stack-overflow` and
+  `quality` and inflated user instructions tenfold (32.7 G to 319 G): the wrapper's frame is not free to
+  disappear while its published entry and CFA program are what the link and the unwinder depend on. And
+  polling the *return* only for bodies that enter other code is worth -7% to -10% of flate2's user
+  instructions (32.7 G to 29.4-30.3 G) but seven signal embed tests pin every body's return as a safe
+  point (`blocked_host_raise_runs_once_at_the_target_pthreads_next_safe_point` and its six siblings), so
+  it is a contract change rather than an optimization. Those readings are user instructions with the JIT
+  on and each binary's packs warmed first, which is comparable only while the compiled set is unchanged;
+  where a change moves the set (the tier experiments) the wall time is the reading that counts, and the
+  two disagreed exactly there -- which is why the tier question is recorded as mixed rather than won.
   Earlier readings of the same question are worth recording because they misled: with warm packs,
   compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
   (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT
