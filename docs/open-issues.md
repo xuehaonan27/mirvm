@@ -98,13 +98,19 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   tiny_skia 235.67 G to 228.65 G), -16% to -22% of the drivers' wall time (flate2 6.30 s to 4.89 s,
   tiny_skia 6.31 s to 5.30 s, paired best of six with the deps, IR and JIT caches dropped before each
   block) and -31% on `fib(32)` with every function compiled (245 ms to 168 ms), with stdout
-  byte-identical throughout. What remains is the call itself: an inline check in the compiled code (an
-  engine-owned delivery word, with the helper called only when it says something is waiting) removes it
-  from the common case at the same safe points. The word has to be one per Engine rather than one per
-  thread, and a slow path that finds any delivery still pending anywhere in the Engine -- another
-  pthread's cell included -- must raise it again: a thread that clears a word whose event sits in
-  another pthread's cell is exactly the lost-wakeup case a boolean has no way to avoid. The frontend
-  paid a stall that was not work either: a run whose cached index copies were present but whose
+  byte-identical throughout. The call itself is gone too: a compiled safe point loads an Engine-owned
+  delivery word that a publication raises and the drain lowers (`modeb-mirvmar-design.md` §2.7 has the
+  ordering that keeps the ask exact), which took `mirvm_poll_signals` out of the profile entirely
+  (below 0.05%, from 12.6%) and cut a whole run's user instructions by 12% on flate2 (37.44 G to
+  32.97 G), 18% on tiny_skia (43.94 G to 35.92 G) and 11.5% on `fib(32)` with every function compiled
+  (1.227 G to 1.086 G; its cycles 421 M to 381 M) -- wall clock cannot resolve that on a host whose own
+  load varies by half. The word has to be one per Engine rather than one per thread, and a slow path
+  that finds any delivery still pending anywhere in the Engine -- another pthread's cell included --
+  must raise it again: a thread that lowers a word whose event sits in another pthread's cell is
+  exactly the lost-wakeup case a boolean cannot avoid. The largest per-entry overhead left is the
+  compiled entry's stack guard, 12.5% of the shorter run: its limit is a per-thread datum, so the same
+  trick does not reach it while compiled code names nothing per thread. The frontend paid a stall that
+  was not work either: a run whose cached index copies were present but whose
   registry was unreachable spent the full 60 s download timeout on one revalidation before serving
   them, 66-75 s per flate2 run against the 5 s of work in it. A revalidation now has a budget of its
   own -- three seconds, because a cached copy always answers (`d15-cargoless-design.md` C14) -- and the

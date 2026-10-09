@@ -74,6 +74,8 @@ pub(crate) enum Target {
     Link(u32),
     /// A location inside the resident decoded body.
     Body(Body),
+    /// The loading Engine's compiled-code safe-point word.
+    Delivery,
     /// A symbol of the import whitelist, or another symbol of this entry.
     Named(Box<str>),
     /// An offset inside this symbol's own code.
@@ -167,6 +169,7 @@ impl Ordinals {
             Site::Stub(id) => Target::Stub(self.ordinal(ir::frag::Target::Asm(*id))?),
             Site::Tls(id) => Target::Tls(self.ordinal(ir::frag::Target::Tls(*id))?),
             Site::Body(part) => Target::Body(*part),
+            Site::Delivery => Target::Delivery,
         })
     }
 }
@@ -571,6 +574,8 @@ pub(crate) fn target_value(
             _ => None,
         },
         Target::Body(part) => body_value(shared, func, part),
+        Target::Delivery => Some(shared.control.signal_inbox.delivery_word()
+            as *const std::sync::atomic::AtomicU32 as u64),
         Target::Named(_) | Target::Local(_) => None,
     }
 }

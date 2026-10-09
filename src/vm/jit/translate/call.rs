@@ -47,11 +47,43 @@ impl Translator<'_, '_> {
         self.b.inst_results(call)[0]
     }
 
+    /// The compiled safe point. The Engine's delivery word decides whether the drain helper runs, so
+    /// the common case is one atomic load and a branch instead of a call: the word is raised by every
+    /// publication and lowered by the drain, which is what lets compiled code ask the question itself.
+    /// A publication raises it after the delivery is visible, so a stale zero cannot hide one.
+    ///
+    /// The load is atomic (cranelift's CLIF atomics are SeqCst) rather than a plain load, which
+    /// matters beyond ordering: another thread raises the word, and a plain load can be hoisted out
+    /// of the loop this safe point ends.
     pub(super) fn poll_signals(&mut self) {
+        let addr = reloc::emit_site(
+            self.module,
+            self.values,
+            self.b,
+            self.func,
+            Site::Delivery,
+            self.shared.control.signal_inbox.delivery_word() as *const std::sync::atomic::AtomicU32
+                as u64,
+            &mut self.sites,
+        );
+        let word = self
+            .b
+            .ins()
+            .atomic_load(types::I32, MemFlagsData::trusted(), addr);
+        let zero = self.b.ins().iconst(types::I32, 0);
+        let pending = self.b.ins().icmp(IntCC::NotEqual, word, zero);
+        // The continuation is created first so it follows this block in the layout and the common
+        // (not pending) case falls through; the helper call sits in a block of its own.
+        let cont = self.b.create_block();
+        let slow = self.b.create_block();
+        self.b.ins().brif(pending, slow, &[], cont, &[]);
+        self.b.switch_to_block(slow);
         let fref = self
             .module
             .declare_func_in_func(self.poll_signals, self.b.func);
         self.b.ins().call(fref, &[]);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
     }
 
     /// Emit the exception table for a `try_call`: tag 0 goes to a pad block whose

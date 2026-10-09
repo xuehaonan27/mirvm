@@ -85,12 +85,22 @@ impl Drop for SignalDrainGuard {
 /// Deliver registered signals in ordinary VM state. Each round first takes one traditional signal
 /// pending set; new signals produced by the handler enter the next round. Rounds are bounded, and
 /// remaining events are left for the next safe point -- a loop back edge or a return.
+///
+/// The engine's delivery word is what decides whether to enter: a publication raises it after the
+/// delivery is visible, so the lowered word below cannot hide one. Lowering happens *before* the
+/// drain, so a raise that lands after it leaves the word raised for the next safe point instead of
+/// being lost, and a drain that leaves a delivery pending anywhere -- a target pthread's cell is the
+/// one it cannot take itself -- raises it again.
 #[inline]
 pub(crate) fn drain_pending_signals(ctx: *mut Ctx) {
-    if !signals_maybe_pending(ctx) {
+    let shared: &Shared = unsafe { (*ctx).shared() };
+    let inbox = &shared.control.signal_inbox;
+    if !inbox.delivery_pending() {
         return;
     }
+    inbox.lower_for_drain();
     drain_pending_signals_with_mode(ctx, false);
+    inbox.raise_if_pending();
 }
 
 /// Close has already detached these registrations from the kernel. Events in

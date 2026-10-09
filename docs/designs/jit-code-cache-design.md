@@ -226,7 +226,9 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    entry written by one process segfaulted the next one that called through it. The guest `TlsId` was
    the other: a per-program number rather than an address, so an entry written for one program named
    another program's thread-local — the wrong slot while the reader's table was long enough to hold the
-   id, and a bounds panic in `semantics::tls` once it was shorter. Three fences now hold the property:
+   id, and a bounds panic in `semantics::tls` once it was shorter. An Engine-owned address is a site
+   for the same reason: the safe point's delivery word is a datum of the Engine rather than of the
+   fragment, so the entry records the site and the loader derives the loading Engine's word. Three fences now hold the property:
    `an_indirect_native_signature_is_recorded_and_replayed` asserts the captured code carries no such
    address and that the replay recovers this process's signature from the body,
    `an_entry_depends_on_the_body_and_not_on_the_program` compiles the same body into two programs that

@@ -176,6 +176,7 @@ impl SignalRegistration {
         unsafe { self.pending.get_unchecked(signum as usize) }.store(true, Ordering::Release);
         self.pending_mask
             .fetch_or(1u32 << signum, Ordering::Release);
+        self.control.signal_inbox.raise_delivery();
     }
 
     fn publish_thread_directed(&'static self, inbox: &'static ThreadSignalInbox, _signum: i32) {
@@ -191,6 +192,7 @@ impl SignalRegistration {
         {
             exit_now(i32::from(crate::diag::exit::SOFTWARE))
         }
+        self.control.signal_inbox.raise_delivery();
     }
 }
 
@@ -609,12 +611,52 @@ impl SignalDeliveryGuard {
 
 pub(crate) struct SignalInbox {
     registrations: AtomicPtr<SignalRegistration>,
+    /// Raised by every publication of a delivery and lowered by the safe point that drains, so
+    /// compiled code can ask "is a drain needed?" with one load and a branch instead of a call into
+    /// the helper. The raise comes *after* the delivery it announces, which is what makes it safe
+    /// for a drain to lower the word before it drains: a raise that lands after the lowering is
+    /// either a delivery that drain takes or one that leaves the word raised for the next safe
+    /// point. A drain that still finds a delivery pending anywhere in this Engine -- a target
+    /// pthread's cell above all, which it cannot take itself -- raises it again.
+    delivery_word: AtomicU32,
 }
 
 impl SignalInbox {
     pub(crate) const fn new() -> Self {
         Self {
             registrations: AtomicPtr::new(ptr::null_mut()),
+            delivery_word: AtomicU32::new(0),
+        }
+    }
+
+    /// Raise the safe point's word, once the delivery it announces is visible.
+    #[inline]
+    fn raise_delivery(&self) {
+        self.delivery_word.store(1, Ordering::Release);
+    }
+
+    /// Whether a safe point has anything to drain: the question compiled code asks inline.
+    #[inline]
+    pub(crate) fn delivery_pending(&self) -> bool {
+        self.delivery_word.load(Ordering::Acquire) != 0
+    }
+
+    /// The word's address, for the compiled-code site that loads it.
+    pub(crate) fn delivery_word(&self) -> &AtomicU32 {
+        &self.delivery_word
+    }
+
+    /// Lower the word for a drain that is about to run.
+    #[inline]
+    pub(crate) fn lower_for_drain(&self) {
+        self.delivery_word.store(0, Ordering::Release);
+    }
+
+    /// Raise the word again when a delivery is still pending anywhere in this Engine.
+    #[inline]
+    pub(crate) fn raise_if_pending(&self) {
+        if self.has_pending() {
+            self.raise_delivery();
         }
     }
 

@@ -187,7 +187,13 @@ Rules:
    cannot arrive at a different moment depending on which one runs a body: a straight run of blocks
    carries bounded work and polls nothing, while a cycle always contains the block of least index
    among its members, whose in-cycle predecessor comes no earlier, so some block of every loop polls
-   and a running thread reaches a safepoint within one iteration of its tightest loop.
+   and a running thread reaches a safepoint within one iteration of its tightest loop. A thread asks
+   whether to drain with one load of an Engine-owned delivery word, which every publication raises
+   *after* the delivery it announces is visible. A safe point lowers that word before it drains, which
+   is what makes the ask exact: a raise that lands after the lowering either belongs to a delivery the
+   drain takes or leaves the word raised for the next safe point, and a drain that leaves a delivery
+   pending anywhere in the Engine — a target pthread's cell, which it cannot take itself — raises the
+   word again. Lowering after the drain instead would let a raise that arrives during it be erased.
 4. Each host thread's `Ctx` is the execution context that thread uses when entering the Engine. The
    Engine registers `CtxSlot` by weak reference, and once all leases have exited the finalizer clears
    each slot, so a host thread that never exits does not keep holding guest TLS, the virtual frame

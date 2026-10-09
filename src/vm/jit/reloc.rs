@@ -2,8 +2,9 @@
 //!
 //! Machine code may only bake an address this process can name again: a helper of the import
 //! whitelist, a function id the program owns, a guest TLS id, a frozen-region address, an asm-stub
-//! entry, a PLT slot, or an interior of the resident decoded body. Every one of them is recorded where
-//! it is baked, and the record is what a stored entry replays once the code has been dropped.
+//! entry, a PLT slot, an interior of the resident decoded body, or the Engine's safe-point word. Every
+//! one of them is recorded where it is baked, and the record is what a stored entry replays once the
+//! code has been dropped.
 //!
 //! The *offset* comes from the backend rather than from a parallel bookkeeping pass: a site is emitted
 //! as a named `global_value`, so cranelift records a relocation exactly where the immediate lands, the
@@ -40,6 +41,10 @@ pub(crate) enum Site {
     },
     /// A pointer into the resident decoded body (see [`Body`]).
     Body(Body),
+    /// The Engine's compiled-code safe-point word: what a compiled safe point loads to decide
+    /// whether the drain helper runs. It belongs to the Engine rather than to the program, so a
+    /// stored entry links to the word of the Engine that loads it.
+    Delivery,
 }
 
 /// Which interior of the resident decoded body a [`Site::Body`] names.
