@@ -94,7 +94,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   the worker already answered is a no-op). That keeps the three wins and leaves rayon where it was:
   flate2 4433 -> 3453 ms, brotli 4059 -> 3630 ms, tiny_skia 4669 -> 3788 ms, rayon 1466 -> 1505 ms, with
   `flate2`, `brotli`, `tiny_skia`, `rayon`, `jit-stats`, `fib32-jit-cache`, `recursion-stack-overflow`,
-  `signal`, `tsan` and `quality` green and the library suite at 468/0/1.
+  `signal`, `tsan` and `quality` green and the library suite at 468/0/1. The default-configuration
+  `fib32` case is where the rule shows most: 3576 -> 890 ms in one session (still RED against its 80 ms
+  ceiling), since the loop it spends its time in is a body called once and interpreted for the whole run,
+  while the all-compiled reading is unchanged (232 -> 231 ms) and the deterministic interpreter meter
+  (JIT off) moves by less than 1% (flate2 309.49 G -> 307.10 G, tiny_skia 228.55 G -> 227.70 G).
   Earlier readings of the same question are worth recording because they misled: with warm packs,
   compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
   (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT
