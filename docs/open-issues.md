@@ -84,11 +84,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   tiny_skia 4342 -> 4551 ms), the compile policy is worth double digits once the pack cache is warm
   (with it warm, compiling every function at its first call and synchronously takes flate2 from
   4.15-4.37 s to 3.62 s and its user instructions from 33.51 G to 28.95 G, -13.6%, where the same
-  experiment read 5% while the packs still had to be filled; cold, it costs seconds instead), so the
-  follow-up there is to reach the warm-cache benefit without the cold compile: prelink past the heat
-  order, or look the store up when a function is first called, and `MIRVM_JIT_STATS`'
-  `cache_prelinked`/`cache_misses` are what say whether a run did. The compiled form's per-entry calls
-  are where the rest sat: the perf map read a warm flate2 run as 27.4% compiled bodies, 18.0% the
+  experiment read 5% while the packs still had to be filled; cold, it costs seconds instead). A lower
+  threshold is not the cold penalty it looks like: with only the JIT cache dropped, threshold 8 reads
+  4.02-4.15 s against the default's 4.22-6.28 s on flate2, so the next step is that measurement on all
+  four drivers before ruling on a policy E42 and D16 intend to be adaptive rather than a constant;
+  `MIRVM_JIT_STATS`' `cache_prelinked`/`cache_misses` say what a run did. The compiled form's per-entry
+  calls are where the rest sat: the perf map read a warm flate2 run as 27.4% compiled bodies, 18.0% the
   interpreter, 12.6% the compiled-code safe point, 8.3% the guest build, 7.3% the compiled entry's
   stack guard, 3.9% `call_guest`, 3.9% memory moves and the rest below 2% before either call was
   attacked. The safe point was not doing anything expensive -- about four cycles a call -- so what cost
