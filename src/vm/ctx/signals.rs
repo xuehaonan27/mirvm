@@ -102,6 +102,15 @@ fn drain_pending_signals_with_mode(ctx: *mut Ctx, closing: bool) {
     if unsafe { (*ctx).signal_draining } {
         return;
     }
+    // This is the interpreter's safe point, so it runs once per basic block, and the round below
+    // reads the host thread mask -- a `rt_sigprocmask` syscall -- before it can know whether any
+    // signal was accepted at all. Both inboxes answer that question with flag reads, and with
+    // nothing accepted the round could not have made progress in any case: both takes return
+    // `None`, `progressed` stays false, and the loop breaks. So the syscall and the per-slot walk
+    // are asked only when a delivery exists that a mask could select.
+    if !signals_maybe_pending(ctx) {
+        return;
+    }
     unsafe { (*ctx).signal_draining = true };
     let _draining = SignalDrainGuard { ctx };
     let contexts = current_thread_contexts(ctx);
@@ -317,6 +326,20 @@ pub(crate) fn raise_signal(ctx: *mut Ctx, signum: i32) -> i32 {
 
 fn current_thread_signal_mask(contexts: *mut ThreadContexts) -> u64 {
     unsafe { (*contexts).signal_mask | current_physical_signal_mask() }
+}
+
+/// Whether either inbox holds an accepted delivery, without reading the host mask.
+///
+/// The thread inbox's flag is the very bit its take checks, so a false answer means its take cannot
+/// return a delivery. The engine inbox's query is conservative -- it also reports a registration that
+/// a target pthread still holds -- which costs the mask read, never a delivery.
+#[inline]
+fn signals_maybe_pending(ctx: *mut Ctx) -> bool {
+    if crate::vm::signal::current_thread_inbox_handle().has_pending() {
+        return true;
+    }
+    let shared: &Shared = unsafe { (*ctx).shared() };
+    shared.control.signal_inbox.has_pending()
 }
 
 fn current_physical_signal_mask() -> u64 {
