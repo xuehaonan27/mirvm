@@ -126,6 +126,17 @@ the execution (the purity compile still runs) and the gate reports it as a SKIP 
 PASS. The harness needs `MIRVM_BUILD_ID` at compile time (the capture module reads it with
 `env!`); the suite supplies zeros.
 
+## When a shared source gains a crate-root name
+
+The harness compiles `src/vm` (and the layers it names) source-for-source, so a `crate::` path a
+shared source starts using has to exist in this crate too. `src/error.rs` is the case that bit: after
+the layers moved onto one error root, its `From` impls named five product modules, and the harness
+stopped compiling at all. Two places absorb that: `main.rs` declares the std-only crate-root modules
+(`diag`, `error`, `out`, `options`, `store`), and `product_errors.rs` stubs the product-only ones —
+the conversion has to exist, the value never has to. Run the case after touching `src/error.rs`,
+`src/diag/**` or the option register; a compile failure there is invisible to `make test`, because
+this case is in the `smoke` profile.
+
 ## Adding a case
 
 1. Add `src/cases/<area>.rs` with `pub(crate) fn run_<id>() -> bool` that prints exactly one

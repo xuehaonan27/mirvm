@@ -49,6 +49,12 @@ pub(crate) use product_adapters::lower;
 mod utils; // content hash, pure Rust (source-shared)
 #[path = "../../../../../src/diag/mod.rs"]
 mod diag; // the diagnostic vocabulary the engine emits through: std only, so it stays shareable
+#[path = "../../../../../src/error.rs"]
+mod error; // the failure root every layer returns through: std + diag only, source-shared
+#[path = "../../../../../src/out.rs"]
+mod out; // the writer the engine's report paths name for product stdout: std only, source-shared
+mod product_errors; // the product error modules `src/error.rs` converts from, stubbed here
+pub(crate) use product_errors::{cargo_shim, cli, image, pack, sysroot};
 mod native; // native layer: the symbol reader and the byte layouts are pure Rust (see native/mod.rs)
 #[path = "../../../../../src/store/mod.rs"]
 mod store; // the family register the engine reads its scratch dirs from (pure Rust, source-shared)
