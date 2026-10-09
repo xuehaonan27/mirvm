@@ -115,16 +115,19 @@ Measured on this tree against the Linux x86_64 release build, with network acces
 fetches; `tests/README.md` documents the suites.
 
 - `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 499 pass, 1 fail, 1 ignored. The suite gives each case a
-  thread, so on a loaded shared host a timing-sensitive case can fail without a defect: the run behind
-  these numbers failed `final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` at a
-  load average near 190, and of three isolated reruns two passed and one failed. Which E48 case fails
-  moves between runs — the previous measurement had
-  `wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread` beside it.
+- `cargo test --locked --all-features`: 501 pass, 0 fail, 1 ignored. E48's flakes were three
+  mechanisms rather than one budget, and each is repaired: a test that armed a capture session in the
+  shared process froze every Engine a concurrent test created to the trace domain, so a plain-domain
+  test read a slot set nothing publishes to; waits whose subject is a child process used 2–5 s
+  constants of their own instead of the suite's one hang bound (`CHILD_HANG_TIMEOUT`, 60 s); and a
+  compiler wrapper written and then executed by the same process answered `ETXTBSY` while another
+  test's `fork` still held the descriptor. The suite's thread count is libtest's — the machine's
+  available parallelism, 64 here by cgroup quota — so it is not a constant the suite owns.
 - `make test` (the fast tier, 77 cases): 73 pass / 4 fail.
-- `make smoke` (fast + smoke, 123 cases): 116 pass / 7 fail; which rayon-family and `cargo-diff` rows
-  fail moves between runs, because one is wall-clock (E47) and the other depends on whether a project
-  directory was materialized (G2), so an earlier run measured 112 pass / 8 fail.
+- `make smoke` (fast + smoke, 123 cases): its three own failures were the E47 cases, and each of the
+  three is green through its case now (measurements below); the tier as a whole was not re-run, and
+  the rows it still counts are the four `cargo-diff` cases that report FAIL rather than SKIP when
+  their materialized project directory is absent (G2). An earlier full run measured 116 pass / 7 fail.
 - `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
   which is `repo-quality`'s 17 source checks.
 - Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
@@ -134,8 +137,12 @@ The fast tier's failures are the four `cargo-diff` rows that report FAIL rather 
 materialized project directory is absent (`ecosystem`, `ffi_zlib`, `ripgrep_regex`, `warning_return`;
 G2).
 
-The smoke tier adds three: E47's rayon-family wall-clock timeouts (`flate2`, `brotli`, `tiny_skia`).
-`rayon` finishes inside its own budget. `png_round` and `wasmtime_wat` are green: the first reaches
+The three E47 cases were red because the corpus budget was set before their work was measured. Each
+now runs inside a budget its own measurement supports, through the case, on the verify host at load
+60–120: `flate2` 290 s, `brotli` 317 s, `tiny_skia` 273 s, against 400 s each. The drivers themselves
+cost about the same cold and warm (rayon 19/28 s, flate2 230/231 s, brotli 236/245 s, tiny_skia
+213/195 s), so the time is guest work and not the front end. `rayon` finishes inside its own budget.
+`png_round` and `wasmtime_wat` are green: the first reaches
 the 512-bit carryless multiply, which the intrinsic queue now implements, and the second is a guest
 that returns from `main` with its workers parked in guest code, which the process-exit path leaves
 running rather than waiting for ([engine-lifecycle.md](designs/engine-lifecycle.md) §4.1). `tokei` is

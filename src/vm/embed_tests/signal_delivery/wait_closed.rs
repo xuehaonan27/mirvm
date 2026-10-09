@@ -64,7 +64,7 @@ fn wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread() {
             published_tx.send(()).unwrap();
 
             let wait_result = result_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
+                .recv_timeout(crate::CHILD_HANG_TIMEOUT)
                 .expect("wait_closed blocked on its current pthread's target signal");
             assert_eq!(
                 wait_result,
@@ -98,7 +98,7 @@ fn wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start current-pthread signal wait_closed subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + crate::CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

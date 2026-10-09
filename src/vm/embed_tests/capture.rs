@@ -3,13 +3,16 @@
 
 use super::*;
 
-/// Why one JIT leg did not publish, for the failure report: whether the call reached the JIT at all
-/// (`counted`), whether a compile service was there to take the request, and whether the engine was
-/// on its way down. The check itself can only see the slot, so a red run has to state the rest.
+/// Why one JIT leg did not publish, for the failure report: which code domain the Engine froze to,
+/// whether the call reached the JIT at all (`counted`), whether a compile service was there to take
+/// the request, and whether the engine was on its way down. The check itself can only see the slot,
+/// so a red run has to state the rest: a `domain=Trace` here means the engine publishes into the
+/// trace slot set, and a session armed in this process by another test is what puts it there.
 fn jit_state(engine: &Engine) -> String {
     let jit = &engine.shared().jit;
     format!(
-        "enabled={} threshold={} sync={} counted={} queue={} worker={} stopping={}",
+        "domain={:?} enabled={} threshold={} sync={} counted={} queue={} worker={} stopping={}",
+        engine.shared().domain,
         jit.enabled,
         jit.threshold,
         jit.sync,
@@ -254,10 +257,11 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("Engine capture subprocess did not finish within five seconds");
+            panic!("Engine capture subprocess did not finish");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
     assert!(status.success());
     std::fs::remove_file(output).unwrap();
 }
+

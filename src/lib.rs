@@ -29,6 +29,19 @@ extern crate rustc_span;
 extern crate rustc_symbol_mangling;
 extern crate rustc_target;
 
+/// The bound a test gives a child process before it calls the child a hang.
+///
+/// A child builds one Engine per scenario, and building one publishes a private code image through
+/// this platform's loader: measured on a macos aarch64 host, each new image costs 0.2-0.5 s to load,
+/// because the kernel validates it through the security daemon, against well under a millisecond
+/// for the same load on Linux. A child that runs four Engines therefore takes seconds there, and in
+/// a parallel suite it competes with the tests around it. This bounds a hang, not a latency: a wait
+/// whose subject is another thread or process has a cost that moves with the host's load, so it is
+/// sized past the slow platform's cost for work that finished, and every such wait in the suite
+/// uses this one bound instead of a constant of its own.
+#[cfg(test)]
+pub(crate) const CHILD_HANG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub(crate) mod arch;
 pub mod cargo_shim;
 pub(crate) mod cargoless;

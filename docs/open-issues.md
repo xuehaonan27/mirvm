@@ -45,45 +45,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   count. Its counters at 3000 iterations (`MIRVM_JIT_STATS=1`) read `c2i=3146740 alloc=42930
   call_terminate=974353 tls_ref=3503 call_indirect=13524 call_builtin=16070`, so the time is not in the
   compiled bodies.
-- **E47** `OPEN`: three rayon-family corpus cases are RED on the Linux verify host — `flate2`, `brotli`
-  and `tiny_skia` time out at the case budget, while `rayon` finishes inside its own. The cost is
-  wall-clock and scales with the work the case does, not a trap or a wrong answer. The smoke tier runs
-  them and counts them, so they are RED in every `make smoke` and `make gate`.
-- **E48** `OPEN`: the library suite is not reproducible on a loaded host, and whichever case fails reddens
-  `quality` with it. The verify host is shared and the suite gives each case a thread, so ~495 cases,
-  each free to start engines, worker threads and subprocesses, meet at once. Four witnesses, each
-  passing repeatedly in isolation and none reproducible on demand:
-  1. `capture::host_syscall_variants_preserve_libc_result_and_errno` reported
-     `plain/jit/success: function did not compile (enabled/ threshold/ sync/ counted/ queue/ worker/
-     stopping)`. "It ran interpreted" is not a reading the current dispatch path allows: with
-     `sync = true` and `threshold = 1`, `call_guest` counts the call, sends the request and then spins
-     until the packed slot holds an entry or `FAIL_SENTINEL`, so it cannot fall through to
-     `interp_frame` with the slot still 0. A 0 slot after `run_export` therefore means the call never
-     reached that spin — the export was missing, or `ExecutionLease::acquire` refused because the Engine
-     was already Closing — or the spin reached `JIT strict release timeout` and raised an EngineFault,
-     since `engine_abort` raises a fault rather than aborting the process. Every one of those leaves a
-     second entry in the same failure list, `…/success: result=…`, which the original record did not
-     quote: **that line is the discriminator between the candidates and is what to capture next.** 228
-     runs of this case under synthetic load did not reproduce it.
-  2. `signal_delivery::sigwaitinfo::external_siginfo_handler_can_wait_for_another_threads_engine_close`
-     failed its child's two-second deadline for entering an external `SA_SIGINFO` handler
-     (`sigwaitinfo.rs:270: external SA_SIGINFO handler was not entered`), surfacing to the parent as
-     `sigwaitinfo.rs:280: Engine close thread panicked` and `sigwaitinfo.rs:328: external handler and
-     Engine close did not make progress independently`. Ten isolated runs took 0.18s each. The deadline
-     is now 30s, with the parent's 60s `CHILD_HANG_TIMEOUT` still the real bound.
-  3. `tsd::final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback` failed once in a full
-     `cargo test --locked --all-features` and passed 3/3 in isolation (0.21–0.86s).
-  4. `signal_delivery::wait_closed::wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread`
-     failed in that same full run and passed 3/3 in isolation (0.15–0.19s).
-  5. `native::tests::cache_key_separates_c_compiler_identities`, seen once at load average 36–57 while
-     the lib suite took 37s instead of its usual 9s. Same signature as the rest: not reproducible
-     outside a loaded host.
-
-  One tree's library suite measured 498/0, 497/1 and 496/2 across runs. What is missing is the mechanism: which of these
-  is a real scheduler-dependent engine step, which is only a budget too tight for a loaded host, and
-  whether the suite should size its own thread count and deadlines from the machine instead of from
-  constants.
-
 
 ## Approved, awaiting construction
 

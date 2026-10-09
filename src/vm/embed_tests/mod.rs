@@ -53,15 +53,9 @@ unsafe extern "C-unwind" fn lifecycle_blocking_entry() {
     }
 }
 
-/// How long a child-process signal test may take before its parent calls it a hang.
-///
-/// A child builds one Engine per scenario, and building one publishes a private code image through
-/// this platform's loader: measured on the macos aarch64 host, each new image costs 0.2-0.5 s to
-/// load, because the kernel validates it through the security daemon, against well under a
-/// millisecond for the same load on Linux. A child that runs four Engines therefore takes seconds
-/// here, and in a parallel suite it competes with the tests around it. This bounds a hang, not a
-/// latency, so it is sized past the slow platform's cost for work that finished.
-const CHILD_HANG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The suite's one hang bound for a wait whose subject is another thread or process; the crate root
+/// owns it because the telemetry tests wait on children too.
+pub(crate) use crate::CHILD_HANG_TIMEOUT;
 
 fn wait_for_owner_signal_pending(engine: &Engine) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);

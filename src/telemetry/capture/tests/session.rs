@@ -97,7 +97,7 @@ fn nonreturning_thread_syscall_releases_the_capture_root() {
         .env(CHILD_ENV, &output)
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + crate::CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -105,7 +105,7 @@ fn nonreturning_thread_syscall_releases_the_capture_root() {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("captured SYS_exit subprocess did not finish within five seconds");
+            panic!("captured SYS_exit subprocess did not finish");
         }
         std::thread::sleep(Duration::from_millis(10));
     };

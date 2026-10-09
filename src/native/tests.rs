@@ -452,6 +452,95 @@ fn non_pic_archive_fails_during_materialization() {
     );
 }
 
+/// Whether the kernel refused an `execve` because the program was still being written.
+///
+/// `ETXTBSY` means a process still holds the file open for writing. The kernel drops that access
+/// only when the last reference to the open file goes away, and a child another thread forked while
+/// the file was being written inherits a reference that it holds until it execs.
+fn cc_is_text_file_busy(error: &crate::native::artifact::archive::Error) -> bool {
+    std::error::Error::source(error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy)
+}
+
+/// Materialize with a compiler this test wrote moments ago, retrying the kernel's "text file busy".
+///
+/// The wrapper scripts `make_cc_wrapper` writes are executed by the same process that writes them,
+/// so a `fork` made by any other test running in parallel puts a reference to the just-written file
+/// into a child that holds it until it execs, and our `execve` of the wrapper answers `ETXTBSY` for
+/// that window. Only that answer is retried — the window is a fork-to-exec gap — and any other
+/// failure panics with its own diagnosis.
+fn materialize_with_written_cc(dir: &Path, archive: &Path, cc: &Path) -> PathBuf {
+    for _ in 0..2000 {
+        match materialize_for_target_in(
+            archive,
+            dir,
+            "x86_64-unknown-linux-gnu",
+            cc,
+            &[],
+            None,
+        ) {
+            Ok(path) => return path,
+            Err(error) if cc_is_text_file_busy(&error) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) => panic!("materialize with {} failed: {error}", cc.display()),
+        }
+    }
+    panic!("the compiler {} stayed busy", cc.display());
+}
+
+/// The retry above, forced: a write descriptor held open on the wrapper makes every `execve` of it
+/// answer `ETXTBSY` until it is closed, which is the state a concurrent `fork` leaves the suite in.
+/// The materialization runs on its own thread, so the descriptor is still held while it fails, and
+/// is released only after it has had time to retry at least once; without the retry it would have
+/// panicked before the release.
+///
+/// Linux only, because the refusal is: measured, this platform runs a program whose file is open for
+/// writing in the spawning process without complaint, so the forced condition does not exist there
+/// and a green run would say nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_wrapper_still_being_written_is_retried() {
+    let temp = TempDir::new("cc-busy");
+    let archive = make_archive(
+        temp.path(),
+        "unsigned long mirvm_cc_busy_probe(void) { return 23UL; }\n",
+    );
+    let cc = make_cc_wrapper(temp.path(), "cc-busy", "mirvm test cc busy");
+    let cache = temp.path().join("cache");
+    let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let holder = {
+        let (cc, held, release) = (cc.clone(), held.clone(), release.clone());
+        std::thread::spawn(move || {
+            let file = std::fs::OpenOptions::new().append(true).open(&cc).unwrap();
+            held.store(true, Ordering::SeqCst);
+            while !release.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            drop(file);
+        })
+    };
+    while !held.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let materialize = {
+        let (cc, cache, archive) = (cc.clone(), cache.clone(), archive.clone());
+        std::thread::spawn(move || {
+            let path = materialize_with_written_cc(&cache, &archive, &cc);
+            result_tx.send(path).unwrap();
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    release.store(true, Ordering::SeqCst);
+    let path = result_rx.recv().expect("the retry did not materialize");
+    materialize.join().unwrap();
+    holder.join().unwrap();
+    assert!(path.is_file(), "materialized artifact is missing");
+}
+
 #[test]
 fn cache_key_separates_c_compiler_identities() {
     let temp = TempDir::new("cc-key");
@@ -463,24 +552,8 @@ fn cache_key_separates_c_compiler_identities() {
     let cc_b = make_cc_wrapper(temp.path(), "cc-b", "mirvm test cc B");
     let cache = temp.path().join("cache");
 
-    let first = materialize_for_target_in(
-        &archive,
-        &cache,
-        "x86_64-unknown-linux-gnu",
-        &cc_a,
-        &[],
-        None,
-    )
-    .unwrap();
-    let second = materialize_for_target_in(
-        &archive,
-        &cache,
-        "x86_64-unknown-linux-gnu",
-        &cc_b,
-        &[],
-        None,
-    )
-    .unwrap();
+    let first = materialize_with_written_cc(&cache, &archive, &cc_a);
+    let second = materialize_with_written_cc(&cache, &archive, &cc_b);
     assert_ne!(
         first, second,
         "C compiler identity must participate in cache key"

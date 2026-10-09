@@ -175,7 +175,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + crate::CHILD_HANG_TIMEOUT;
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
@@ -281,7 +281,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
             super::super::super::ctx::set_thread_exit_inbox_empty_hook(Box::new(move || {
                 empty_tx.send(()).unwrap();
                 publish_rx.recv().unwrap();
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let deadline = std::time::Instant::now() + crate::CHILD_HANG_TIMEOUT;
                 while !super::super::super::signal::current_thread_inbox_handle().has_pending() {
                     assert!(
                         std::time::Instant::now() < deadline,

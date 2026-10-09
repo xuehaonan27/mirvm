@@ -306,8 +306,37 @@ fn failed_finalizer_execution_rolls_back_the_active_count() {
 /// entering guest after arming pick up trace. Getting this backwards would
 /// silently move a running guest into a domain whose bodies expect recorder
 /// state the running frame does not have.
+///
+/// The session is a process-wide singleton, so the arming half runs in a child of its own: arming it
+/// in the shared test process would move every Engine a concurrently running test creates into the
+/// trace domain, and that test would then read a slot set nothing publishes to. That is exactly how
+/// `embed_tests::capture::host_syscall_variants_preserve_libc_result_and_errno` used to fail, so no
+/// test in the suite arms a session outside a child.
 #[test]
 fn code_domain_is_frozen_at_engine_creation() {
+    const CHILD: &str = "MIRVM_DOMAIN_FREEZE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let name = "vm::ctx::tests::code_domain_is_frozen_at_engine_creation";
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--test-threads=1"])
+            .env(CHILD, "1")
+            .spawn()
+            .expect("failed to start the domain-freeze child");
+        let deadline = std::time::Instant::now() + crate::CHILD_HANG_TIMEOUT;
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "the domain-freeze child failed");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the domain-freeze child did not finish");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     use crate::vm::jit::CodeDomain;
 
     // No session armed here, so this Engine is born plain and stays plain.
@@ -328,13 +357,8 @@ fn code_domain_is_frozen_at_engine_creation() {
             &path,
             crate::telemetry::capture::STARTER_BYTES,
         ),
-    );
-    let Ok(session) = session else {
-        // Another parallel test owns the process-wide session; the frozen
-        // domain of an already-created Engine is what matters and is asserted
-        // above, so skip the arming half rather than fight the global.
-        return;
-    };
+    )
+    .expect("the child owns the process-wide session");
     // Arming after creation cannot migrate the Engine that already exists.
     assert_eq!(
         plain.domain,
