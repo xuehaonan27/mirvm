@@ -63,7 +63,15 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   dead by the same meter: the guest's MIR level is already 1 (`-Zmir-opt-level=1` is a no-op; level 2
   buys 2.5% for a MIR shape the differential's authority does not compile), and `lto = "thin"` changes
   no work while costing 5-13% of wall time, with the guest-panic canaries still green. So more inlining
-  is not the lever; selective inlining is.
+  is not the lever; selective inlining is. Three more steps landed on the same meter: a guest call's
+  argument slots come from the operand region instead of a `Vec` (one malloc and free per call;
+  -7.2%/-7.4%/-9.8% on the three drivers, and the per-guest-call cost on the fib series 1505 -> 1369
+  instructions), and the thread's registry is cached in `#[thread_local]` storage instead of a
+  `pthread_getspecific` plus `OnceLock` per compiled-code safe point and per guest call (-27% and -26%
+  wall time on flate2 and tiny_skia with the shipped configuration). The meters now read: `flate2`
+  8.65 s, `brotli` 6.84 s, `tiny_skia` 5.05 s cold through the driver (from 230-258 s, 236-245 s and
+  195-213 s), `fib32` 509 ms in its case (from 8.7 s, still RED against the 80 ms ceiling), against
+  native builds of the same programs at 34 ms, 35 ms and 10 ms.
 
 ## Approved, awaiting construction
 
