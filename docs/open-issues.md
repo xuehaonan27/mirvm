@@ -71,7 +71,15 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   wall time on flate2 and tiny_skia with the shipped configuration). The meters now read: `flate2`
   8.65 s, `brotli` 6.84 s, `tiny_skia` 5.05 s cold through the driver (from 230-258 s, 236-245 s and
   195-213 s), `fib32` 509 ms in its case (from 8.7 s, still RED against the 80 ms ceiling), against
-  native builds of the same programs at 34 ms, 35 ms and 10 ms.
+  native builds of the same programs at 34 ms, 35 ms and 10 ms. Two more answers from this campaign
+  narrow where that time is: the tier is not a lever (a script run writes no heat order, so every
+  corpus run compiles baseline-tier code -- cranelift `opt_level="none"` -- and forcing every request
+  to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
+  tiny_skia 4342 -> 4551 ms), and the compiled-code safe point is a quarter of the engine's time:
+  neutering it takes flate2's engine from 4711 ms to 3523 ms and tiny_skia's from 4342 ms to 3415 ms.
+  Its predicate is now one load per registration, so what remains of that quarter is the helper call
+  itself once per loop back-edge; attributing that needs the compiled bodies named in the profile, which
+  is what T11's perf map is for (they are anonymous addresses otherwise).
 
 ## Approved, awaiting construction
 
