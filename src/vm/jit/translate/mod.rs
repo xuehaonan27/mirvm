@@ -351,9 +351,26 @@ impl Translator<'_, '_> {
         }
         self.b.ins().jump(blocks[0], &[]);
 
+        // A safe point sits where control can go backwards, plus every return (`term`). A straight
+        // run of blocks carries bounded work, and a cycle always contains the block of least index
+        // among its members, whose in-cycle predecessor comes no earlier -- so that block is marked
+        // here and every iteration of any loop polls, whatever order the blocks are laid out in.
+        let mut poll_here = vec![false; body.blocks.len()];
+        let mut succ = Vec::new();
+        for (bi, blk) in body.blocks.iter().enumerate() {
+            succ.clear();
+            successors(&blk.term, &mut succ);
+            for target in &succ {
+                if *target as usize <= bi {
+                    poll_here[*target as usize] = true;
+                }
+            }
+        }
         for (bi, blk) in body.blocks.iter().enumerate() {
             self.b.switch_to_block(blocks[bi]);
-            self.poll_signals();
+            if poll_here[bi] {
+                self.poll_signals();
+            }
             self.block = bi as u32;
             for (item, st) in blk.stmts.iter().enumerate() {
                 self.item = item as u32;
@@ -361,6 +378,34 @@ impl Translator<'_, '_> {
             }
             self.term(func, body, &blk.term, &blocks);
         }
+    }
+}
+
+/// Append every block a terminator can transfer control to, in no particular order.
+///
+/// The match is exhaustive on purpose: a terminator added without an arm here would let the safe
+/// point analysis miss a loop and leave signals pending for as long as that loop runs.
+fn successors(t: &Terminator, out: &mut Vec<ir::Bb>) {
+    match t {
+        Terminator::Goto(bb) => out.push(*bb),
+        Terminator::SwitchInt {
+            targets, otherwise, ..
+        } => {
+            out.extend(targets.iter().map(|(_, bb)| *bb));
+            out.push(*otherwise);
+        }
+        Terminator::Call { target, .. }
+        | Terminator::CallBuiltin { target, .. }
+        | Terminator::CallForeign { target, .. }
+        | Terminator::CallIndirect { target, .. }
+        | Terminator::InlineAsm { target, .. } => out.push(*target),
+        // These leave this frame or the run: `Return` polls in `term`, `Resume` continues in a
+        // caller frame that has its own safe points, and the others do not return to guest code.
+        Terminator::Return
+        | Terminator::Unreachable
+        | Terminator::Resume
+        | Terminator::TerminateAbort
+        | Terminator::Trap(_) => {}
     }
 }
 

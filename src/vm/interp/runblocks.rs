@@ -25,7 +25,7 @@ pub(super) fn run_blocks(
 
     let mut blk = entry as usize;
     loop {
-        crate::vm::ctx::drain_pending_signals(ctx);
+        let current = blk;
         let block: &Block = &body.blocks[blk];
         for stmt in &block.stmts {
             exec_stmt(ctx, base, stmt);
@@ -382,6 +382,13 @@ pub(super) fn run_blocks(
                 engine_abort(&format!("reached Unreachable (fn {})", body.name))
             }
             Terminator::Trap(reason) => engine_abort(&format!("TRAP: {reason} (fn {})", body.name)),
+        }
+        // A safe point sits where control can go backwards, plus every return. A straight run of
+        // blocks carries bounded work, and a cycle always contains the block of least index among
+        // its members, whose in-cycle predecessor comes no earlier -- so that block polls and every
+        // iteration of any loop reaches a poll, whatever order the blocks are laid out in.
+        if blk <= current {
+            crate::vm::ctx::drain_pending_signals(ctx);
         }
     }
 }

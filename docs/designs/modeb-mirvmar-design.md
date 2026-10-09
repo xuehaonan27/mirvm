@@ -182,7 +182,12 @@ Rules:
    global-final-round raw key cursor, and only then blocks catchable signals, rechecks and closes the
    inbox. While the current thread still has its own target events, `wait_closed` returns
    `ActiveOnCurrentThread` instead of sleeping on itself. Queries and `oldact` always return the guest
-   handler address and never leak the kernel stub.
+   handler address and never leak the kernel stub. A safepoint is a loop back edge or a function
+   return, and the interpreter and the compiled form poll at exactly those two places so a signal
+   cannot arrive at a different moment depending on which one runs a body: a straight run of blocks
+   carries bounded work and polls nothing, while a cycle always contains the block of least index
+   among its members, whose in-cycle predecessor comes no earlier, so some block of every loop polls
+   and a running thread reaches a safepoint within one iteration of its tightest loop.
 4. Each host thread's `Ctx` is the execution context that thread uses when entering the Engine. The
    Engine registers `CtxSlot` by weak reference, and once all leases have exited the finalizer clears
    each slot, so a host thread that never exits does not keep holding guest TLS, the virtual frame

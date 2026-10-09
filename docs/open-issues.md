@@ -86,11 +86,19 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   Its predicate is now one load per registration, and the perf map answered what the rest of it is:
   with the compiled bodies named, a flate2 run's self time is 33.9% compiled bodies, 24.5% the
   compiled-code safe point, 21.8% the interpreter, 18.0% host and frontend work and 1.6% compile and
-  link. The safe point is not doing anything expensive -- it is called **878 million times** in that
-  run (904 million for tiny_skia), about four cycles a call -- so what costs is the frequency, not the
-  body: the fix is an inline check in the compiled code (an engine-owned delivery word in the frozen
-  area, which `Site::Frozen` already addresses, with the helper called only when it says something is
-  waiting), which keeps the per-back-edge latency exactly and removes the call from the common case.
+  link. The safe point was not doing anything expensive -- about four cycles a call -- so what cost was
+  the frequency: it ran at every block entry, **878 million times** in that flate2 run (904 million for
+  tiny_skia), 24.5% of the engine's self time. It now runs only where the contract puts it, at a loop
+  back edge and at a function return (`modeb-mirvmar-design.md` §2.7), which is **261.7 million** calls
+  in the same run (263.8 million for tiny_skia, 7.0 million against 38.8 million for `fib(32)`) -- the
+  compiled form and the interpreter poll at exactly the same dynamic points, so the two counts agree to
+  the call. That is -2.9%/-3.0% of the interpreter's retired instructions (flate2 318.97 G to 309.82 G,
+  tiny_skia 235.67 G to 228.65 G), -16% to -22% of the drivers' wall time (flate2 6.30 s to 4.89 s,
+  tiny_skia 6.31 s to 5.30 s, paired best of six with the deps, IR and JIT caches dropped before each
+  block) and -31% on `fib(32)` with every function compiled (245 ms to 168 ms), with stdout
+  byte-identical throughout. What remains is the call itself: an inline check in the compiled code (an
+  engine-owned delivery word, which `Site::Frozen` already addresses, with the helper called only when
+  it says something is waiting) removes it from the common case at the same safe points.
 
 ## Approved, awaiting construction
 

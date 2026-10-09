@@ -1,5 +1,5 @@
-//! Terminator lowering: the exhaustive `ir::Terminator` match, including the unwind edges and
-//! the signal poll each back edge carries. `impl Translator` sub-block; the struct is in
+//! Terminator lowering: the exhaustive `ir::Terminator` match, including the unwind edges and the
+//! safe point every return carries. `impl Translator` sub-block; the struct is in
 //! `super`.
 
 use super::*;

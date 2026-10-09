@@ -84,7 +84,7 @@ impl Drop for SignalDrainGuard {
 
 /// Deliver registered signals in ordinary VM state. Each round first takes one traditional signal
 /// pending set; new signals produced by the handler enter the next round. Rounds are bounded, and
-/// remaining events are left for the next block entry or return safepoint.
+/// remaining events are left for the next safe point -- a loop back edge or a return.
 #[inline]
 pub(crate) fn drain_pending_signals(ctx: *mut Ctx) {
     if !signals_maybe_pending(ctx) {
@@ -109,7 +109,7 @@ fn drain_pending_signals_with_mode(ctx: *mut Ctx, closing: bool) {
     if !signals_maybe_pending(ctx) {
         return;
     }
-    // This is the interpreter's safe point, so it runs once per basic block, and the round below
+    // A safe point runs on every loop back edge and every function return, and the round below
     // reads the host thread mask -- a `rt_sigprocmask` syscall -- before it can know whether any
     // signal was accepted at all. Both inboxes answer that question with flag reads, and with
     // nothing accepted the round could not have made progress in any case: both takes return
