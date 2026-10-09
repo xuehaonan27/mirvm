@@ -111,6 +111,10 @@ pub struct Registry {
     revalidated: std::cell::RefCell<std::collections::BTreeSet<String>>,
     /// Whether the run has already said that a resolution came from cached copies.
     snapshot_noted: std::cell::Cell<bool>,
+    /// Set by the first revalidation that fails. A registry that did not answer once will not answer
+    /// for the next crate either, and each attempt costs a timeout, so the rest of the run serves
+    /// cached copies instead of asking again; the warning that is printed here says so.
+    revalidation_stopped: std::cell::Cell<bool>,
 }
 
 /// How hard an index read works not to serve a copy the registry has moved past.
@@ -223,6 +227,7 @@ impl Registry {
             index_cache: std::cell::RefCell::new(BTreeMap::new()),
             revalidated: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             snapshot_noted: std::cell::Cell::new(false),
+            revalidation_stopped: std::cell::Cell::new(false),
         })
     }
 
@@ -403,7 +408,9 @@ impl Registry {
     /// where the pinned Cargo on the same machine had just resolved 0.2.190 (E50). The question is
     /// conditional, so an unchanged crate costs one `304`; an offline run cannot ask and serves the
     /// snapshot, which is what makes an offline solve reproducible. Later reads in the same process
-    /// serve the copy this one checked.
+    /// serve the copy this one checked. The first revalidation that fails stops the asking for the
+    /// rest of the run — an unreachable registry must not cost one timeout per crate — and the one
+    /// warning that reports it says the copies are being served instead.
     pub fn index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
         self.read_index(source, name, Freshness::Once)
     }
@@ -413,7 +420,7 @@ impl Registry {
     /// A caller that must not trust an earlier check — the lock reader, asking whether a version the
     /// lock names exists at all — says so here. Offline mode cannot revalidate and falls back to the
     /// snapshot; a backend with no remote to ask (a local registry or a directory) has nothing to
-    /// revalidate from.
+    /// revalidate from; and a revalidation that has already failed this run is not repeated.
     pub fn refresh_index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
         self.read_index(source, name, Freshness::Always)
     }
@@ -438,10 +445,13 @@ impl Registry {
                 self.ensure_download_config(&mut endpoint)?;
                 let file = self.index_file(source, name)?;
                 let have = file.is_file();
-                let ask = match freshness {
+                let freshness_wants = match freshness {
                     Freshness::Always => true,
                     Freshness::Once => !checked,
                 };
+                // A crate with no cached copy must still be fetched when revalidation has stopped:
+                // the request is then the only source of the file, not a freshness check.
+                let ask = freshness_wants && !(have && self.revalidation_stopped.get());
                 if !ask {
                     Self::read_index_file(&file)?
                 } else if self.offline {
@@ -480,6 +490,7 @@ impl Registry {
                         }
                         Err(why) if have => {
                             let why = why.to_string();
+                            self.revalidation_stopped.set(true);
                             self.note_snapshot(name, Some(&why));
                             Self::read_index_file(&file)?
                         }
@@ -599,8 +610,8 @@ impl Registry {
             ),
             Some(why) => crate::diag_warn!(
                 Resolver,
-                "index revalidation failed for {name} ({why}); using the cached copy, so the \
-                 resolution may be older than the registry"
+                "index revalidation failed for {name} ({why}); cached index copies are served for \
+                 the rest of this run, so the resolution may be older than the registry"
             ),
         }
     }

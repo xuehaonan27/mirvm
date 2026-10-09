@@ -67,8 +67,11 @@ Cargo.
   checked. Offline mode cannot ask and keeps the snapshot, which is what makes an offline resolve
   reproducible; it says so once per run at `info` (the user asked for offline), while a revalidation
   that failed says so at `warning`, so a resolution that may be older than the registry is never
-  silent. A backend with no remote to ask (a git or local registry, a directory) answers as freshly as
-  it can and is not revalidated.
+  silent. The first revalidation that fails also stops the asking for the rest of the run: a registry
+  that did not answer once will not answer for the next crate either, and a run whose registry is
+  unreachable but whose offline flag is not set would otherwise pay one timeout per crate, silently.
+  The one warning states that the cached copies are what is being served now. A backend with no remote
+  to ask (a git or local registry, a directory) answers as freshly as it can and is not revalidated.
 
 ## 2. Model
 

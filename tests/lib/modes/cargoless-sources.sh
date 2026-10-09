@@ -100,8 +100,11 @@ printf '%s\n' \
 PORT_FILE="$TMP/registry.port"
 AUTH_LOG="$TMP/registry-auth.log"
 REQ_LOG="$TMP/registry-requests.log"
+# Created to make the server answer index requests with 503, which is how an unreachable registry
+# looks to the resolver without stopping the process that serves it.
+FAIL_FILE="$TMP/registry-fail"
 : >"$REQ_LOG"
-"$PYTHON" - "$REGISTRY" "$PORT_FILE" "$AUTH_LOG" "$REQ_LOG" <<'PY' &
+"$PYTHON" - "$REGISTRY" "$PORT_FILE" "$AUTH_LOG" "$REQ_LOG" "$FAIL_FILE" <<'PY' &
 import http.server
 import os
 import pathlib
@@ -111,6 +114,7 @@ root = pathlib.Path(sys.argv[1])
 port_file = pathlib.Path(sys.argv[2])
 auth_log = pathlib.Path(sys.argv[3])
 request_log = pathlib.Path(sys.argv[4])
+fail_file = pathlib.Path(sys.argv[5])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     # One ETag per file version, so a cached copy can be revalidated with a conditional request and
@@ -121,6 +125,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path != "/config.json" and token != "secret-token":
             request_log.open("a").write(f"{self.path}|unauthorized\n")
             self.send_response(401)
+            self.end_headers()
+            return
+        # An index path with the failure marker up: the registry is there, but it is not answering
+        # for index files. The config and the .crate files keep working, so only revalidation fails.
+        if fail_file.exists() and self.path != "/config.json" \
+                and not self.path.startswith("/crates/"):
+            request_log.open("a").write(f"{self.path}|server-error|503\n")
+            self.send_response(503)
             self.end_headers()
             return
         path = root / self.path.lstrip("/")
@@ -454,6 +466,26 @@ if [ "$fresh_again" = 124 ] && rg -q -F 'fi/xt/fixture-dep|conditional|304' "$RE
 else
     bad "the unchanged copy was not revalidated with a 304: output=$fresh_again log=$(tail -3 "$REQ_LOG")"
 fi
+
+# One failed revalidation stops the asking. The registry keeps serving the config and the .crate
+# files but answers index requests with 503, which a fresh solve meets once per crate it must
+# revalidate — unless the first failure ends the asking, in which case the solve resolves from the
+# copies it holds and says so once. The first index request after the marker is what is counted.
+touch "$FAIL_FILE"
+rm -f "$FRESH_APP/Cargo.lock"
+requests_before=$(rg -c 'fi/xt/' "$REQ_LOG" || true)
+failed_revalidation=$(run_self "$FRESH_APP" 2>"$TMP/revalidation-failed.err")
+requests_after=$(rg -c 'fi/xt/' "$REQ_LOG" || true)
+attempts=$(( ${requests_after:-0} - ${requests_before:-0} ))
+if [ "$failed_revalidation" = 124 ] && [ "$attempts" -eq 1 ] \
+    && rg -q -F 'cached index copies are served for the rest of this run' "$TMP/revalidation-failed.err"; then
+    ok "the first failed revalidation stops asking for the rest of the run"
+else
+    bad "a failed revalidation was retried per crate: output=$failed_revalidation attempts=$attempts"
+    tail -5 "$TMP/revalidation-failed.err"
+    return 1
+fi
+rm -f "$FAIL_FILE"
 
 # Warm-cache offline run + zero-Cargo-process audit. Stop the local registry first so the offline claim is real.
 kill "$SERVER_PID" 2>/dev/null || true
