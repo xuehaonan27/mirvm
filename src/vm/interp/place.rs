@@ -30,6 +30,7 @@ pub(crate) fn slot_write(ctx: *mut Ctx, base: usize, s: Slot, v: u64) {
 
 /// Evaluates a place expression to a true address (the core of place evaluation; the frame
 /// base is already a true address, so all arithmetic is on raw addresses).
+#[inline]
 pub(crate) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
     let mut addr = match expr.base {
         PlaceBase::Local(off) => base as u64 + off as u64,
@@ -70,6 +71,7 @@ pub(crate) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u
     addr
 }
 
+#[inline]
 pub(crate) fn eval_operand(ctx: *mut Ctx, base: usize, op: &Operand) -> (u64, Width) {
     match op {
         Operand::Slot(s) => (slot_read(ctx, base, *s), s.width),
@@ -90,6 +92,7 @@ pub(crate) fn eval_operand(ctx: *mut Ctx, base: usize, op: &Operand) -> (u64, Wi
     }
 }
 
+#[inline]
 pub(crate) fn place_write(ctx: *mut Ctx, base: usize, p: &ScalarPlace, v: u64) {
     match p {
         ScalarPlace::Slot(s) => slot_write(ctx, base, *s, v),

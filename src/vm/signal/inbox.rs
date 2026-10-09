@@ -272,6 +272,7 @@ impl ThreadSignalInbox {
         }
     }
 
+    #[inline]
     fn has_pending(&self) -> bool {
         let mut cell = self.cells.load(Ordering::Acquire);
         while !cell.is_null() {
@@ -437,6 +438,7 @@ impl ThreadInboxHandle {
     }
 
     /// Whether any slot of this inbox holds an accepted delivery.
+    #[inline]
     pub(crate) fn has_pending(self) -> bool {
         self.inbox().is_some_and(ThreadSignalInbox::has_pending)
     }
@@ -468,6 +470,7 @@ impl ThreadInboxHandle {
 }
 
 /// The calling pthread's inbox, for the paths that run while its thread-local storage is valid.
+#[inline]
 pub(crate) fn current_thread_inbox_handle() -> ThreadInboxHandle {
     ThreadInboxHandle(THREAD_SIGNAL_INBOX.load(Ordering::Acquire).cast())
 }
@@ -681,6 +684,7 @@ impl SignalInbox {
         }
     }
 
+    #[inline]
     pub(crate) fn has_pending(&self) -> bool {
         self.registrations().any(|registration| {
             registration.thread_pending.load(Ordering::Acquire) != 0

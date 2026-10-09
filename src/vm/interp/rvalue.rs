@@ -12,6 +12,7 @@ use crate::vm::semantics::arith::{
 use crate::vm::semantics::simd;
 use crate::vm::semantics::tls::tls_addr;
 
+#[inline]
 pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
     match rv {
         Rvalue::Use(op) => eval_operand(ctx, base, op).0,
