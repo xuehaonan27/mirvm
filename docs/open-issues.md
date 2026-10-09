@@ -81,16 +81,19 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   narrow where that time is: the tier is not a lever (a script run writes no heat order, so every
   corpus run compiles baseline-tier code -- cranelift `opt_level="none"` -- and forcing every request
   to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
-  tiny_skia 4342 -> 4551 ms), the compile threshold is a small one rather than the structural answer
-  (with the pack cache warm, compiling every function at its first call and synchronously moves flate2
-  from 4.87-5.22 s to 4.62 s, so the interpreter's share is not what the threshold holds back), and
-  what is left is dominated by two calls the compiled form makes on every entry. The perf map's
-  current reading of a warm flate2 run is 27.4% compiled bodies, 18.0% the
+  tiny_skia 4342 -> 4551 ms), the compile policy is worth double digits once the pack cache is warm
+  (with it warm, compiling every function at its first call and synchronously takes flate2 from
+  4.15-4.37 s to 3.62 s and its user instructions from 33.51 G to 28.95 G, -13.6%, where the same
+  experiment read 5% while the packs still had to be filled; cold, it costs seconds instead), so the
+  follow-up there is to reach the warm-cache benefit without the cold compile: prelink past the heat
+  order, or look the store up when a function is first called, and `MIRVM_JIT_STATS`'
+  `cache_prelinked`/`cache_misses` are what say whether a run did. The compiled form's per-entry calls
+  are where the rest sat: the perf map read a warm flate2 run as 27.4% compiled bodies, 18.0% the
   interpreter, 12.6% the compiled-code safe point, 8.3% the guest build, 7.3% the compiled entry's
-  stack guard, 3.9% `call_guest`, 3.9% memory moves and the rest below 2%. The safe point was not
-  doing anything expensive -- about four cycles a call -- so what cost was the frequency: it ran at
-  every block entry, **878 million times** in that flate2 run (904 million for
-  tiny_skia), 24.5% of the engine's self time. It now runs only where the contract puts it, at a loop
+  stack guard, 3.9% `call_guest`, 3.9% memory moves and the rest below 2% before either call was
+  attacked. The safe point was not doing anything expensive -- about four cycles a call -- so what cost
+  was the frequency: it ran at every block entry, **878 million times** in that flate2 run (904 million
+  for tiny_skia), 24.5% of the engine's self time. It now runs only where the contract puts it, at a loop
   back edge and at a function return (`modeb-mirvmar-design.md` §2.7), which is **261.7 million** calls
   in the same run (263.8 million for tiny_skia, 7.0 million against 38.8 million for `fib(32)`) -- the
   compiled form and the interpreter poll at exactly the same dynamic points, so the two counts agree to
