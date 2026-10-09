@@ -472,14 +472,7 @@ fn cc_is_text_file_busy(error: &crate::native::artifact::archive::Error) -> bool
 /// failure panics with its own diagnosis.
 fn materialize_with_written_cc(dir: &Path, archive: &Path, cc: &Path) -> PathBuf {
     for _ in 0..2000 {
-        match materialize_for_target_in(
-            archive,
-            dir,
-            "x86_64-unknown-linux-gnu",
-            cc,
-            &[],
-            None,
-        ) {
+        match materialize_for_target_in(archive, dir, "x86_64-unknown-linux-gnu", cc, &[], None) {
             Ok(path) => return path,
             Err(error) if cc_is_text_file_busy(&error) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));

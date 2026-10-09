@@ -264,4 +264,3 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
     assert!(status.success());
     std::fs::remove_file(output).unwrap();
 }
-
