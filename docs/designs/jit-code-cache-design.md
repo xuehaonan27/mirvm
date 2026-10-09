@@ -206,6 +206,10 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    it compiles, links a hit, registers the stored CFA programs as FDEs at the loaded addresses and
    publishes the same two entries a compile would; a miss compiles, stages the entry and publishes the
    batch as one pack when it is worth a file, and `MIRVM_NO_JIT_CACHE=1` bypasses the whole family.
+   Whatever a session still holds when it ends is published too: the CLI's exit path joins the compile
+   worker for that reason, because it deliberately skips the close path that stops the worker, and a
+   program too small to reach the batch size mid-run would otherwise leave the store without the code
+   the next run is supposed to link.
    `fib32-jit-cache` is the standing case: cold stores, warm reuses at least one entry, the bypassed
    run compiles, a corrupted pack is refused rather than used, and all four agree on stdout. The
    counters behind that last leg (`cache_hits`/`cache_misses`/`cache_refused`, dumped with the helper

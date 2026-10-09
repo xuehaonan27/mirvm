@@ -653,6 +653,12 @@ impl Engine {
             drop(lease);
         }
         shared.module.funcs.flush_heat_order();
+        // The compiler service holds entries it has not published yet, and it publishes them when it
+        // stops. `std::mem::forget` below skips the close path that would stop it, so a small program
+        // -- one that never reaches the batch size mid-run -- would leave the store without the code
+        // the next run is supposed to reuse.
+        #[cfg(feature = "cranelift")]
+        super::super::jit::stop(&shared);
         #[cfg(feature = "cranelift")]
         super::super::jit::stop_if_installed();
         std::mem::forget(self);
