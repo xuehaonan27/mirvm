@@ -130,6 +130,16 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   count rises because its compilation runs on the worker thread while its wall time does not move
   (1575 -> 1465 ms in one session, flat in another), and with only the JIT cache dropped the cold
   readings did not regress (flate2 3701-7779 -> 3529-6096 ms, rayon 1586-1690 -> 1520-1535 ms).
+  A full re-profile through the new `make profile` shows where each workload's time now sits, one warm
+  run each: flate2 56% compiled guest bodies, 9.9% the compiled entry's stack guard, 6.7% memory moves,
+  5.7% image load and verify, 5.1% interpreter and 3.7% guest call dispatch; tiny_skia 24% compiled
+  bodies against 11.5% stack guard; brotli 28% against 8.2% (its own run paid a 39% guest build,
+  because a rebuilt mirvm invalidates the dependency cache it reads); rayon 36.5% guest call dispatch
+  and 19.1% interpreter against 5.8% compiled bodies, so its parallel sort still runs mostly
+  interpreted; and `fib(32)` 39.8% image load and verify against 18.9% compiled bodies, so that case's
+  distance to its ceiling is startup, not the recursion. The profile re-ranks what is left: the
+  compiled entry's stack guard for the three long drivers, whatever keeps rayon's functions out of the
+  compiled set, and startup (load and verify) for `fib32`.
   Earlier readings of the same question are worth recording because they misled: with warm packs,
   compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
   (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT
