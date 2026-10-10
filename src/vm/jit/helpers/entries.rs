@@ -23,31 +23,49 @@ pub(crate) extern "C" fn mirvm_exception_is_engine_fault(exception: u64) -> u64 
     u64::from(unsafe { crate::vm::unwind::raw_is_engine_fault(exception as *mut u8) })
 }
 
+/// The stack a compiled entry must leave: the guest frame the bytecode asks for plus room for
+/// backend spills and the diagnostic path itself. The inline check in a plain guarded entry compares
+/// against the same margin.
+pub(crate) const STACK_GUARD_MARGIN: usize = 256 << 10;
+
+/// The one message a JIT stack overflow reports, so the inline check and the helper agree byte for
+/// byte with what the smoke case pins.
+pub(crate) fn stack_overflow(func: u64) -> ! {
+    let (_, shared) = active();
+    let name = shared
+        .module
+        .funcs
+        .get(func as usize)
+        .map(|body| &*body.name)
+        .unwrap_or("<unknown>");
+    crate::vm::unwind::engine_abort(&format!(
+        "guest stack overflow (JIT compiled frame hit safety margin before entry; fn {name})"
+    ));
+}
+
 /// Called by the published fast-entry wrapper before entering a compiled body.
 /// The wrapper has no explicit stack slots, so this check runs before the
-/// body's Cranelift prologue reserves its guest frame.
+/// body's Cranelift prologue reserves its guest frame. A plain entry inlines this comparison
+/// against the floor the pinned register holds and calls [`mirvm_jit_stack_overflow`] instead; this
+/// helper stays for the trace domain, whose register holds the recorder rather than the `Ctx`.
 pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, frame_bytes: u64) {
-    let (ctx, shared) = active();
+    let (ctx, _shared) = active();
     let floor = unsafe { (*ctx).stack_floor };
     if floor == 0 {
         return;
     }
     let marker = 0u8;
     let sp = &marker as *const u8 as usize;
-    // Keep room for backend spills and the diagnostic path itself in addition
-    // to the explicit guest frame represented in the bytecode.
-    let need = (frame_bytes as usize).saturating_add(256 << 10);
+    let need = (frame_bytes as usize).saturating_add(STACK_GUARD_MARGIN);
     if sp <= floor.saturating_add(need) {
-        let name = shared
-            .module
-            .funcs
-            .get(func as usize)
-            .map(|body| &*body.name)
-            .unwrap_or("<unknown>");
-        crate::vm::unwind::engine_abort(&format!(
-            "guest stack overflow (JIT compiled frame hit safety margin before entry; fn {name})"
-        ));
+        stack_overflow(func);
     }
+}
+
+/// The overflow path of the inline check: compiled code branches here only when the register-held
+/// floor says the entry would cross the margin.
+pub(crate) extern "C-unwind" fn mirvm_jit_stack_overflow(func: u64) {
+    stack_overflow(func);
 }
 
 /// Compiled-code safe point. This runs in ordinary VM state, never in the

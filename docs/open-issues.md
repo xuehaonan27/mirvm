@@ -167,11 +167,23 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   and restore the old value -- which is exactly what the trace trampoline does -- and without that the
   TSD-at-thread-exit case hung (`final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback`).
   With both fixed the Linux side is green (20 targeted cases pass, `quality` and `tsan` included) but
-  the local macOS suite still hangs in the panic/signal tests, so what remains for that step is the
-  *unwinding* path: a guest panic may leave the entry without running its epilogue, and the attempt's
-  `try_call` pad (restore the register, resume the exception, mirroring the trace trampoline) was not
-  enough to make macOS green before the round ended. The change was reverted rather than landed: the
-  measurement and the two traps are recorded here so the next attempt starts from them.
+  the local macOS suite still hangs in the panic/signal tests, and the *unwinding* path is why: a guest
+  panic leaves the entry without running its epilogue. A `try_call` pad that restores the register and
+  resumes the exception -- the trace trampoline's shape -- did not fix macOS either (it turned the
+  hang into `drop of the panic payload panicked`), and on Linux the pad *broke* cases the plain call
+  had passed (`flate2`, `brotli`, `tiny_skia`, `recursion-stack-overflow`, `fib32-jit-cache`,
+  `jit_abi_probe`, `jit_unwind_probe`, `quality`), so it came back out. The step landed as a
+  **pair-gated** switch instead: `os_arch::PLAIN_CODE_PINS_CTX` is true for Linux x86_64, whose
+  emitted CFI and unwinder carry a pinned `Ctx` across compiled frames, and false for macOS aarch64,
+  whose Mach-O loader half is still an open item, so there the packed entry keeps its `(args, ret)`
+  shape and the guarded entry keeps asking the helper. On Linux the win is the same with no pad:
+  instructions flate2 30.20 G -> 22.26 G (-26%), brotli 40.89 G -> 30.77 G (-25%), tiny_skia 30.09 G
+  -> 23.82 G (-21%), wall best-of-five flate2 3594 -> 3152 ms and brotli 3938 -> 3483 ms (-12% each),
+  tiny_skia 4091 -> 4021 ms, rayon 1717 -> 1783 ms, the guard's profile share 17.74% gone, and the
+  JIT-cold reading 6850 -> 4105 ms. What the revert proved is worth keeping: a frame unwound through
+  is destroyed rather than returned into and the frames above it are restored by the unwinder, so the
+  boundary only has to restore the register on the normal path -- which is why the pad was not only
+  unnecessary but harmful.
   The interpreter's arithmetic mirrors were the one place the campaign's earlier selective-`#[inline]`
   pass had not reached (`sext` and the memory helpers had it; `int_bin`, `int_cmp`, `int_ovf`,
   `int_saturating`, `bit_un`, `host_ord` and the f128 pair did not), and marking them changes the

@@ -5,6 +5,14 @@
 use super::*;
 
 impl<'a> Compiler<'a> {
+    /// Whether this compiler's domain pins the context register: plain code where the pair can
+    /// carry a pinned `Ctx` across compiled frames
+    /// ([`crate::os_arch::PLAIN_CODE_PINS_CTX`]), never trace code (its register is the recorder,
+    /// which that domain's own trampoline manages).
+    fn plain_pins_ctx(&self) -> bool {
+        self.domain == CodeDomain::Plain && crate::os_arch::PLAIN_CODE_PINS_CTX
+    }
+
     /// Capture one wrapper symbol's artifact. A wrapper is built here rather than by the translator,
     /// so it carries only the sites this file emits into it — the id the stack guard takes, whose
     /// value is the entry's own function.
@@ -462,12 +470,13 @@ impl<'a> Compiler<'a> {
         let mut cctx = self.module.make_context();
         cctx.func.signature = sig;
         {
+            // Read before the builder borrows the context and the variable table.
+            let plain = self.plain_pins_ctx();
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             let params = b.block_params(entry).to_vec();
-            let guard = self.module.declare_func_in_func(self.stack_guard, b.func);
             // The guard's first argument is this function's id, and an id is a program's number: it
             // goes through the site vocabulary so a stored entry replays it as the entry's own id.
             let fv = reloc::emit_site(
@@ -481,8 +490,45 @@ impl<'a> Compiler<'a> {
             );
             let explicit = u64::from(body.frame_size)
                 .saturating_add(u64::from(body.frame_align.saturating_sub(16)));
-            let frame = b.ins().iconst(types::I64, explicit as i64);
-            b.ins().call(guard, &[fv, frame]);
+            if plain {
+                // The plain domain pins this thread's `Ctx` (the packed entry sets it), so the floor
+                // is a register read and the check is a load, an add, a compare and a branch; the
+                // helper runs only when this entry would cross the margin. A floor of zero means no
+                // guest stack limit, and the limit then sits far below any real stack address, so
+                // the same comparison answers that case too.
+                let ctx = b.ins().get_pinned_reg(types::I64);
+                let floor =
+                    b.ins()
+                        .load(types::I64, MemFlagsData::trusted(), ctx, STACK_FLOOR_OFFSET);
+                let sp_slot = b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                let sp = b.ins().stack_addr(types::I64, sp_slot, 0);
+                let need = b.ins().iconst(
+                    types::I64,
+                    explicit.saturating_add(STACK_GUARD_MARGIN as u64) as i64,
+                );
+                let limit = b.ins().iadd(floor, need);
+                let crossing = b.ins().icmp(IntCC::UnsignedLessThanOrEqual, sp, limit);
+                let overflow = b.create_block();
+                let cont = b.create_block();
+                b.ins().brif(crossing, overflow, &[], cont, &[]);
+                b.switch_to_block(overflow);
+                let report = self
+                    .module
+                    .declare_func_in_func(self.stack_overflow, b.func);
+                b.ins().call(report, &[fv]);
+                b.ins().trap(TrapCode::STACK_OVERFLOW);
+                b.switch_to_block(cont);
+            } else {
+                // The trace domain's register holds the recorder rather than the `Ctx`, so its
+                // entries ask the helper, which reads the current thread's context itself.
+                let guard = self.module.declare_func_in_func(self.stack_guard, b.func);
+                let frame = b.ins().iconst(types::I64, explicit as i64);
+                b.ins().call(guard, &[fv, frame]);
+            }
             let target = self.module.declare_func_in_func(fast, b.func);
             let call = b.ins().call(target, &params);
             let results = b.inst_results(call).to_vec();
@@ -805,7 +851,16 @@ impl<'a> Compiler<'a> {
         ))
     }
 
-    /// Packed entry `(args: *const u64, ret: *mut u64)`: one interp i2c hop.
+    /// Packed entry: one interp i2c hop, and the one entry through which Rust enters a domain's
+    /// compiled code.
+    ///
+    /// The plain domain's signature is `(ctx: *mut Ctx, args: *const u64, ret: *mut u64)`: every Rust
+    /// caller (`dispatch::call_guest`, the thunks, `run_export`) reaches plain compiled code here and
+    /// nowhere else, so this is where the domain pins the current thread's `Ctx` in the register
+    /// Cranelift reserved for it. Everything it calls reads that register and never sets it. The
+    /// trace domain's signature stays `(args: *const u64, ret: *mut u64)` and it sets nothing: its own
+    /// trampoline pins the recorder and restores it afterwards, and the two conventions must not be
+    /// confused.
     pub(super) fn define_packed(
         &mut self,
         func: u32,
@@ -814,9 +869,11 @@ impl<'a> Compiler<'a> {
         fast: ClifFuncId,
     ) -> Option<(ClifFuncId, PendingJitSymbol)> {
         let _ = body;
+        let plain = self.plain_pins_ctx();
         let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
+        for _ in 0..if plain { 3 } else { 2 } {
+            sig.params.push(AbiParam::new(types::I64));
+        }
         let id = self
             .module
             .declare_function(&format!("p{func}"), Linkage::Local, &sig)
@@ -829,7 +886,23 @@ impl<'a> Compiler<'a> {
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             let ps = b.block_params(entry).to_vec();
-            let (argp, retp) = (ps[0], ps[1]);
+            // Cranelift does not preserve a pinned register across a call (it is this build's
+            // convention, not a callee-saved register), so this boundary -- the only one Rust enters
+            // plain compiled code through -- saves the value Rust had, pins the `Ctx`, and puts the
+            // old value back on the way out. The trace domain's trampoline does the same for the
+            // recorder it pins.
+            let saved = if plain {
+                let saved = b.ins().get_pinned_reg(types::I64);
+                b.ins().set_pinned_reg(ps[0]);
+                Some(saved)
+            } else {
+                None
+            };
+            let (argp, retp) = if plain {
+                (ps[1], ps[2])
+            } else {
+                (ps[0], ps[1])
+            };
             let mut args: Vec<Value> = Vec::with_capacity(abi.nparams);
             for i in 0..abi.nparams {
                 args.push(
@@ -839,20 +912,28 @@ impl<'a> Compiler<'a> {
             }
             let fref = self.module.declare_func_in_func(fast, b.func);
             let call = b.ins().call(fref, &args);
+            let results: Vec<Value> = b.inst_results(call).to_vec();
             // Both (lo, hi) slots are always written, so shapes with sret/nrets = 0
             // store zero.
             let r0 = if abi.nrets >= 1 {
-                b.inst_results(call)[0]
+                results[0]
             } else {
                 b.ins().iconst(types::I64, 0)
             };
             let r1 = if abi.nrets >= 2 {
-                b.inst_results(call)[1]
+                results[1]
             } else {
                 b.ins().iconst(types::I64, 0)
             };
             b.ins().store(MemFlagsData::trusted(), r0, retp, 0);
             b.ins().store(MemFlagsData::trusted(), r1, retp, 8);
+            // The pinned register is this build's convention, not a callee-saved one, so the value
+            // Rust had goes back before this boundary returns. A frame that unwinds past here is
+            // destroyed rather than returned into, and the frames above it restore their own
+            // registers through the unwinder, so the normal path is the one that needs this.
+            if let Some(saved) = saved {
+                b.ins().set_pinned_reg(saved);
+            }
             b.ins().return_(&[]);
             b.seal_all_blocks();
             b.finalize();
@@ -886,6 +967,12 @@ impl<'a> Compiler<'a> {
         ))
     }
 }
+
+/// Where the stack floor sits in `Ctx`, for the plain guarded entry's inline check. The offset is
+/// this build's own layout, and an entry is only ever reused by the build that made it (the jit-key
+/// carries the build id), so a register read of this offset cannot outlive the layout it was
+/// compiled against.
+const STACK_FLOOR_OFFSET: i32 = std::mem::offset_of!(crate::vm::ctx::Ctx, stack_floor) as i32;
 
 /// The perf-map ranges of linked code: the addresses the link produced, not the module's, with the
 /// same roles and sizes so a profiler reads the running code.

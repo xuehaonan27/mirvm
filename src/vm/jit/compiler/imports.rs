@@ -53,6 +53,7 @@ pub(crate) fn whitelist() -> &'static std::collections::HashMap<&'static str, us
             mirvm_call_builtin,
             mirvm_alloc,
             mirvm_jit_stack_guard,
+            mirvm_jit_stack_overflow,
             mirvm_poll_signals,
             mirvm_host_syscall_trace,
             mirvm_bin128_ovf,
@@ -267,6 +268,12 @@ impl<'a> Compiler<'a> {
         let stack_guard = module
             .declare_function("mirvm_jit_stack_guard", Linkage::Import, &sig_sg)
             .unwrap();
+        // The inline guard's slow path: one argument (this function's id), no return.
+        let mut sig_so = module.make_signature();
+        sig_so.params.push(AbiParam::new(types::I64));
+        let stack_overflow = module
+            .declare_function("mirvm_jit_stack_overflow", Linkage::Import, &sig_so)
+            .unwrap();
         let poll_signals = module
             .declare_function(
                 "mirvm_poll_signals",
@@ -313,6 +320,7 @@ impl<'a> Compiler<'a> {
             simd_stmt,
             simd_rv,
             stack_guard,
+            stack_overflow,
             poll_signals,
             host_syscall_trace,
             pending_unwind: Vec::new(),

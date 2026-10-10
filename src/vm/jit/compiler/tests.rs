@@ -52,30 +52,22 @@ fn both_code_domains_compile_the_same_body() {
     }
 }
 
-/// The trace domain is a separate ISA because pinning a register is an ISA-wide
-/// decision. Plain code must keep the pinned register allocatable and carry no recorder state,
-/// so the two domains cannot share one `Flags`.
+/// The trace domain always pins its recorder; the plain domain pins the thread's `Ctx` exactly
+/// where the pair can carry it across compiled frames, so the two domains are separate ISAs
+/// wherever the pin is used at all.
 #[test]
-fn trace_domain_enables_the_pinned_register_and_plain_does_not() {
-    let trace = domain_flags(Tier::Optimized, true);
-    assert!(
-        trace.enable_pinned_reg(),
-        "trace domain must enable the pinned register ({})",
-        crate::arch::PINNED_REG
+fn the_pinned_register_follows_the_pair_and_the_domain() {
+    let plain = isa_for(CodeDomain::Plain, Tier::Optimized);
+    assert_eq!(
+        plain.flags().enable_pinned_reg(),
+        crate::os_arch::PLAIN_CODE_PINS_CTX,
+        "plain code pins the context only where the pair can carry it"
     );
-
-    // The plain domain must stay exactly as it is: no pinned register, so
-    // plain code keeps r15 free and costs nothing for collection.
-    let mut plain_builder = settings::builder();
-    plain_builder.set("opt_level", "speed").unwrap();
-    plain_builder.set("unwind_info", "true").unwrap();
-    plain_builder
-        .set("preserve_frame_pointers", "true")
-        .unwrap();
-    let plain = settings::Flags::new(plain_builder);
+    let trace = isa_for(CodeDomain::Trace, Tier::Optimized);
     assert!(
-        !plain.enable_pinned_reg(),
-        "plain domain must not reserve a register for collection"
+        trace.flags().enable_pinned_reg(),
+        "trace code must reserve {} for the recorder",
+        crate::arch::PINNED_REG
     );
 
     // The trace ISA must build on this host with the reservation actually in

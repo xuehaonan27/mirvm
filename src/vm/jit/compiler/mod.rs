@@ -89,8 +89,11 @@ struct Compiler<'a> {
     /// re-match and call the shared `semantics::simd` body.
     simd_stmt: ClifFuncId,
     simd_rv: ClifFuncId,
-    /// Checks stack headroom before a compiled body allocates its frame.
+    /// Checks stack headroom before a compiled body allocates its frame. The trace domain calls it;
+    /// the plain domain inlines the comparison and calls `stack_overflow` instead.
     stack_guard: ClifFuncId,
+    /// The inline check's slow path: report the overflow and abort.
+    stack_overflow: ClifFuncId,
     /// Deferred async-signal delivery at compiled block boundaries.
     poll_signals: ClifFuncId,
     /// The trace domain's syscall site helper. The caller passes the recorder it read

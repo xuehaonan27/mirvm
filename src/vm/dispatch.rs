@@ -28,11 +28,20 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     if jit.enabled {
         let call_compiled = |entry: u64| -> (u64, u64) {
             // i2c: the packed entry (published fast -> packed, and the Acquire load has
-            // already seen every preceding write)
-            type Packed = extern "C-unwind" fn(*const u64, *mut u64);
-            let f: Packed = unsafe { std::mem::transmute(entry as usize) };
+            // already seen every preceding write). Where the pair can carry a pinned context across
+            // compiled frames, the plain packed entry takes this thread's `Ctx` first and pins it in
+            // the register Cranelift reserved, so compiled code reaches the stack floor without a
+            // TLS lookup; elsewhere the entry keeps the plain `(args, ret)` shape.
             let mut ret = [0u64; 2];
-            f(args.as_ptr(), ret.as_mut_ptr());
+            if crate::os_arch::PLAIN_CODE_PINS_CTX {
+                type PackedWithCtx = extern "C-unwind" fn(*mut Ctx, *const u64, *mut u64);
+                let f: PackedWithCtx = unsafe { std::mem::transmute(entry as usize) };
+                f(ctx, args.as_ptr(), ret.as_mut_ptr());
+            } else {
+                type Packed = extern "C-unwind" fn(*const u64, *mut u64);
+                let f: Packed = unsafe { std::mem::transmute(entry as usize) };
+                f(args.as_ptr(), ret.as_mut_ptr());
+            }
             (ret[0], ret[1])
         };
         // Strict failure sentinel (MIRVM_JIT_SYNC): an admissible function that failed to

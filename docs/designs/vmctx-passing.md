@@ -41,6 +41,19 @@
    target pthread, and both establish a new activation at an ordinary safepoint. Any passage below
    that lists signals alongside ordinary callbacks is the earlier argument, not the current
    implementation.
+9. **The plain domain takes the R half where the pair can carry it.** Plain compiled code pins the
+   current thread's `Ctx` in the register Cranelift reserves (`crate::arch::PINNED_REG`) on a pair
+   whose answer to `os_arch::PLAIN_CODE_PINS_CTX` is true, and reads its stack floor from that
+   register instead of the TLS lookup `ctx::current` does. The packed entry is the only boundary Rust
+   enters plain code through, so it is where the pin is set: it saves the value Rust had, sets the
+   `Ctx`, and restores the old value before returning, because Cranelift does not preserve a pinned
+   register across a call — the trace domain's trampoline does the same for the recorder it pins. A
+   frame that unwinds past that boundary is destroyed rather than returned into, and frames above it
+   restore their own registers through the unwinder, so the normal path is the one that needs the
+   restore. Where the pair's JIT output and unwinder cannot carry a pinned context across compiled
+   frames (the Mach-O half of the loader is still open), the packed entry keeps its plain
+   `(args, ret)` shape and the guarded entry asks `mirvm_jit_stack_guard`, which reads the same floor
+   through TLS: the check is the same one, without the register.
 
 ## 2. Model
 
