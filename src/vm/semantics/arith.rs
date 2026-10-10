@@ -16,6 +16,7 @@ pub(crate) fn sext(bits: u64, w: Width) -> i64 {
     }
 }
 
+#[inline]
 pub(crate) fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u64 {
     let m = w.mask();
     let r = if signed {
@@ -70,15 +71,18 @@ pub(crate) fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u
 }
 
 /// f128 place bit read/write, safe for 16-byte unaligned access.
+#[inline]
 pub(crate) fn f128_read(p: u64) -> f128 {
     f128::from_bits(unsafe { (p as *const u128).read_unaligned() })
 }
+#[inline]
 pub(crate) fn f128_write(p: u64, v: f128) {
     unsafe { (p as *mut u128).write_unaligned(v.to_bits()) }
 }
 
 /// Frozen `MemOrd` to host `Ordering`: the guard order the guest asked for is the one
 /// executed.
+#[inline]
 pub(crate) fn host_ord(o: MemOrd) -> std::sync::atomic::Ordering {
     use std::sync::atomic::Ordering as O;
     match o {
@@ -91,6 +95,7 @@ pub(crate) fn host_ord(o: MemOrd) -> std::sync::atomic::Ordering {
 }
 
 /// Bitwise unary ops, shared by the BitUn rvalue and SIMD lanes.
+#[inline]
 pub(crate) fn bit_un(op: BitUnOp, v: u64, w: Width) -> u64 {
     match (op, w) {
         (BitUnOp::Popcount, _) => (v & w.mask()).count_ones() as u64,
@@ -114,6 +119,7 @@ pub(crate) fn bit_un(op: BitUnOp, v: u64, w: Width) -> u64 {
 }
 
 /// Saturating add/sub/mul, shared by the IntSat rvalue and SIMD SatAdd/SatSub.
+#[inline]
 pub(crate) fn int_saturating(op: OvfOp, signed: bool, av: u64, bv: u64, w: Width) -> u64 {
     let (v, ovf) = int_ovf(op, signed, av, bv, w);
     if !ovf {
@@ -141,6 +147,7 @@ pub(crate) fn int_saturating(op: OvfOp, signed: bool, av: u64, bv: u64, w: Width
     }
 }
 
+#[inline]
 pub(crate) fn int_cmp(cc: IntCc, signed: bool, a: u64, b: u64, w: Width) -> u64 {
     let ord = if signed {
         sext(a, w).cmp(&sext(b, w))
@@ -160,6 +167,7 @@ pub(crate) fn int_cmp(cc: IntCc, signed: bool, a: u64, b: u64, w: Width) -> u64 
 
 /// `*WithOverflow`: computes at 128 bits and decides overflow from the width and
 /// signedness.
+#[inline]
 pub(crate) fn int_ovf(op: OvfOp, signed: bool, a: u64, b: u64, w: Width) -> (u64, bool) {
     if signed {
         let (x, y) = (sext(a, w) as i128, sext(b, w) as i128);

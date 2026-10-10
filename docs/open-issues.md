@@ -150,6 +150,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   *throughput*, not its policy: one worker thread compiles ~200 functions during a run that lasts a
   second and a half, and every call made before a callee's publication pays the interpreter path. That
   is a parallel or cheaper compiler question, not a threshold one.
+  The interpreter's arithmetic mirrors were the one place the campaign's earlier selective-`#[inline]`
+  pass had not reached (`sext` and the memory helpers had it; `int_bin`, `int_cmp`, `int_ovf`,
+  `int_saturating`, `bit_un`, `host_ord` and the f128 pair did not), and marking them changes the
+  deterministic interpreter meter by -0.17% (flate2 307.22 G -> 306.69 G) and -0.08% (tiny_skia
+  227.76 G -> 227.57 G): real, but two orders of magnitude below the pass that reached the operand
+  helpers, which says compiler-unit inlining had already covered most of these call sites.
   Earlier readings of the same question are worth recording because they misled: with warm packs,
   compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
   (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT
