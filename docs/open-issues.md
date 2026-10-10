@@ -188,9 +188,13 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   names compiled guest bodies — 265 of them in a flate2 profile, 34% of the run's self time. A child
   forks into its own map: the fork path resets the process-wide install state and the registry session
   while keeping the inherited ranges, because the child's code is mapped at the same addresses and a
-  sampler reading `/tmp/perf-<child pid>.map` would otherwise find no file at all. What is missing is
-  the command and the thin script that drive `perf record`/`perf report` and say what a missing map or
-  lost samples mean, and a rerun of fib and the D16 real workloads through it.
+  sampler reading `/tmp/perf-<child pid>.map` would otherwise find no file at all. The command landed
+  as `make profile [P=<program>] [ARGS="..."]` (implementation `tests/lib/profile.sh`): it runs one
+  product run under `perf record -e cycles:u`, reports the heaviest symbols and the categories the
+  engine's work falls into, and says what a report with no `[JIT]` line means (a JIT-off run, a program
+  that published no code, or an unreadable map). What remains is the rerun of fib and the D16 real
+  workloads through it, and a stated meaning for lost samples (the report prints them; nothing reads
+  them yet).
 - **T12** `APPROVED`: adaptive page pool and writer parameters. Under one memory budget, measure
   4/16/64 KiB pages, 24/32B Exit, return gap, drop, guest cycles, RSS and writer CPU, then implement
   4→64 KiB auto-scaling and rule on batch/checksum. The pool is fixed at 4 KiB and 16/64 KiB are

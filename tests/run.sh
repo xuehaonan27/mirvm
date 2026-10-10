@@ -8,6 +8,7 @@
 #   ./tests/run.sh mode <mode> [args...]    every case using that mode
 #   ./tests/run.sh list [--mode M] [--tier T]
 #   ./tests/run.sh modes                    the available modes and their purpose
+#   ./tests/run.sh profile <program> [-- guest args...]   one run under perf, reported
 #   ./tests/run.sh inventory                manifest <-> data/ cross-check, no orphans, no scripts
 #   ./tests/run.sh validate                 every case's mode exists and declares the fields it uses
 #   ./tests/run.sh help
@@ -25,6 +26,8 @@ export TESTS_DIR LIB_DIR DATA_DIR REPO_ROOT
 # The shared library defines the field decoders and helpers the dispatcher also uses.
 # shellcheck source=/dev/null
 . "$LIB_DIR/harness.sh"
+# shellcheck source=/dev/null
+. "$LIB_DIR/profile.sh"
 
 TIERS="fast smoke gate manual"
 usage() {
@@ -331,6 +334,10 @@ case "$cmd" in
         select_rows mode "$mode"
         [ ${#SELECTED[@]} -gt 0 ] || { echo "ERROR no case uses mode: $mode" >&2; exit 64; }
         run_selected "$@"
+        ;;
+    profile)
+        [ $# -ge 1 ] || { usage >&2; exit 64; }
+        profile_main "$@"
         ;;
     list)
         filter_mode=""; filter_tier=""

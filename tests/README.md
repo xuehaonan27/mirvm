@@ -17,13 +17,21 @@ make list        # every case, with its mode and tier
 make modes       # the available run methods
 make case C=<id> [ARGS="..."]
 make mode M=<mode> [ARGS="..."]
+make profile [P=<program>] [ARGS="..."]   one run under perf, reported by symbol and category
+                                          (ARGS reaches the product, e.g. ARGS="--vm-call 'fib(32)'")
 make validate    # every case: the mode exists and declares the fields it uses
 make inventory   # manifest <-> data/: no orphans, no missing targets, no scripts under data/
 make projects    # fetch the data/projects submodules
 ```
 
 `make` is the interface and `tests/run.sh` is the implementation. `tests/run.sh` takes the same
-commands (`tier`, `case`, `mode`, `list`, `modes`, `validate`, `inventory`) if make is unavailable.
+commands (`tier`, `case`, `mode`, `profile`, `list`, `modes`, `validate`, `inventory`) if make is
+unavailable.
+
+`profile` is the one command that judges nothing: it runs the product once under `perf record`,
+reports the heaviest symbols and the categories the engine's own work falls into, and needs
+`MIRVM_PERF_MAP=1`-style naming — which it sets itself — to see compiled guest bodies at all. It is
+Linux-only, because the map it reads is `perf`'s own convention.
 
 `validate` and `inventory` build nothing, so a manifest typo or an unjustified asset costs seconds.
 The framework needs no particular bash version and no product to check itself: the
@@ -45,6 +53,7 @@ tests/
   lib/harness.sh          shared library: bootstrap, field access, execution, comparison, accounting
   lib/helpers/            tool scripts a mode hands to something else (the rustc proxies)
   lib/modes/<mode>.sh     one run method each -- the only place a method is named
+  lib/profile.sh          the profile command's implementation (an instrument, not a mode)
   data/programs/          guest programs mirvm runs (c_*, vmcall_*, probe_*, the differential set)
   data/projects/          real Cargo projects as pinned submodules
   data/fixtures/          fixture crates, oracles, inputs, the fake product and fake Cargo

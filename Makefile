@@ -6,13 +6,15 @@
 SHELL := /bin/bash
 RUN := ./tests/run.sh
 
-# C = case id (make list), M = mode (make modes), ARGS = extra arguments for it.
+# C = case id (make list), M = mode (make modes), ARGS = extra arguments for it,
+# P = program to profile (a path, or a name under tests/data/programs).
 C ?=
 M ?=
 ARGS ?=
+P ?= c_flate2.rs
 
 .DEFAULT_GOAL := help
-.PHONY: help test fast smoke gate list modes case mode validate inventory projects clean
+.PHONY: help test fast smoke gate list modes case mode profile validate inventory projects clean
 
 help:
 	@echo 'make test                 daily commit check (the fast tier)'
@@ -22,6 +24,9 @@ help:
 	@echo 'make modes                the available run methods'
 	@echo 'make case C=<id> [ARGS="..."]'
 	@echo 'make mode M=<mode> [ARGS="..."]'
+	@echo 'make profile [P=<program>] [ARGS="..."]   one run under perf, reported by symbol and category'
+	@echo '                           ARGS reaches the product before the program (quote it for the shell;'
+	@echo '                           put guest arguments after a literal -- in ARGS)'
 	@echo 'make validate             manifest: every case names a mode that declares its fields'
 	@echo 'make inventory            manifest <-> data/ cross-check'
 	@echo 'make projects             fetch the data/projects submodules'
@@ -54,6 +59,11 @@ case:
 mode:
 	@test -n "$(M)" || { echo 'make mode M=<mode>  (make modes shows them)' >&2; exit 64; }
 	$(RUN) mode $(M) $(ARGS)
+
+# The profile is an instrument, not a check: it runs one program under perf and reports where the
+# time went. It needs a Linux host with perf, and it builds the product like any other target.
+profile:
+	$(RUN) profile "$(P)" $(ARGS)
 
 validate:
 	$(RUN) validate
