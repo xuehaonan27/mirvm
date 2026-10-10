@@ -150,6 +150,28 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   *throughput*, not its policy: one worker thread compiles ~200 functions during a run that lasts a
   second and a half, and every call made before a callee's publication pays the interpreter path. That
   is a parallel or cheaper compiler question, not a threshold one.
+  The compiled entry's stack guard was then attacked with the design's own answer -- the plain domain
+  pinning the current thread's `Ctx` in the register Cranelift reserves (`enable_pinned_reg`, a
+  `set_pinned_reg` in the packed entry, and the floor read with a register load instead of a TLS
+  lookup) -- and it measured as the campaign's largest engine-side win: warm and paired, user
+  instructions flate2 30.58/30.16 G -> 20.24/19.84 G (-34%), brotli 37.04/36.69 G -> 26.92/27.02 G
+  (-27%), tiny_skia 30.84/30.68 G -> 22.06/21.79 G (-29%), and wall best-of-five flate2 3248 -> 3013 ms,
+  brotli 3796 -> 3242 ms, tiny_skia 4009 -> 3554 ms, rayon flat (1511 -> 1516 ms), with the guard's own
+  profile share gone (11.74% -> not present) and the JIT-cold reading better (3632 -> 3317 ms). It also
+  broke two things the suite caught, and both are traps for the next attempt rather than incidental
+  bugs. First, a packed entry's signature is per domain: the trace trampoline calls the trace packed
+  entry as `(args, ret)`, so sharing the plain domain's new `(ctx, args, ret)` shape there broke the
+  capture path (`capture_session_records_automatic_host_syscall_rewrite`). Second, `enable_pinned_reg`
+  makes Cranelift treat the register as *not* callee-saved, so a Rust-to-compiled boundary that pins a
+  value and returns corrupts its Rust caller: the packed entry must save the register, pin the context
+  and restore the old value -- which is exactly what the trace trampoline does -- and without that the
+  TSD-at-thread-exit case hung (`final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback`).
+  With both fixed the Linux side is green (20 targeted cases pass, `quality` and `tsan` included) but
+  the local macOS suite still hangs in the panic/signal tests, so what remains for that step is the
+  *unwinding* path: a guest panic may leave the entry without running its epilogue, and the attempt's
+  `try_call` pad (restore the register, resume the exception, mirroring the trace trampoline) was not
+  enough to make macOS green before the round ended. The change was reverted rather than landed: the
+  measurement and the two traps are recorded here so the next attempt starts from them.
   The interpreter's arithmetic mirrors were the one place the campaign's earlier selective-`#[inline]`
   pass had not reached (`sext` and the memory helpers had it; `int_bin`, `int_cmp`, `int_ovf`,
   `int_saturating`, `bit_un`, `host_ord` and the f128 pair did not), and marking them changes the
