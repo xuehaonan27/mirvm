@@ -138,8 +138,18 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   and 19.1% interpreter against 5.8% compiled bodies, so its parallel sort still runs mostly
   interpreted; and `fib(32)` 39.8% image load and verify against 18.9% compiled bodies, so that case's
   distance to its ceiling is startup, not the recursion. The profile re-ranks what is left: the
-  compiled entry's stack guard for the three long drivers, whatever keeps rayon's functions out of the
+  compiled entry's stack guard for the three long drivers, what keeps rayon's functions out of the
   compiled set, and startup (load and verify) for `fib32`.
+  Rayon's share was then diagnosed rather than guessed. A per-function dispatch dump at exit shows what
+  the counters mean: they count the calls a function answers *before* its entry is published, so a
+  function reading 326k dispatches with a live slot was published late, not never -- and the run's real
+  cost is that publication latency. One rayon run receives 192 compilation requests, publishes 307
+  entries (304 of them prelinked) in 1.6 s and leaves the rest of its hot set interpreting; raising the
+  threshold to 10000 cuts requests to 138 and changes nothing (1576 ms against 1622 ms), lowering it to 1
+  raises them to 582 and changes nothing either (1693 ms). What is left there is the compile service's
+  *throughput*, not its policy: one worker thread compiles ~200 functions during a run that lasts a
+  second and a half, and every call made before a callee's publication pays the interpreter path. That
+  is a parallel or cheaper compiler question, not a threshold one.
   Earlier readings of the same question are worth recording because they misled: with warm packs,
   compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
   (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT
