@@ -370,10 +370,15 @@ pub fn stop_perf_map() -> PerfMapStatus {
     stop_registry(perf_registry())
 }
 
+/// Whether this process has already installed its map, and whether it has already written and
+/// stopped it. Process-wide, because the map names one file per process; [`reset_after_fork`] clears
+/// both for the child, whose pid — and therefore its file — is not the parent's.
+static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Install the process perf map when `MIRVM_PERF_MAP` asks for it. Once per process: the map names
 /// one file, and a second Engine's install is refused by the registry anyway.
 pub fn install_if_asked() {
-    static INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !crate::options::perf_map() || INSTALLED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
@@ -385,11 +390,37 @@ pub fn install_if_asked() {
 /// does not close (the CLI leaks it deliberately), and close calls it on the embedding path; both
 /// are once per process, and the second is a no-op.
 pub fn stop_if_installed() {
-    static STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !crate::options::perf_map() || STOPPED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
     let _ = stop_perf_map();
+}
+
+/// Re-establish the map in a forked child. The child inherits the parent's pid-named file and the
+/// "already installed" state, so without this its compiled code would be named in the parent's map
+/// -- which a sampler reading the child's own `/tmp/perf-<pid>.map` never opens. The inherited code
+/// is mapped at the same addresses in the child, so the ranges stay; only the session is dropped.
+pub fn reset_after_fork() {
+    if !crate::options::perf_map() {
+        return;
+    }
+    INSTALLED.store(false, std::sync::atomic::Ordering::Release);
+    STOPPED.store(false, std::sync::atomic::Ordering::Release);
+    reset_registry(perf_registry());
+    install_if_asked();
+}
+
+/// Drop one registry's session -- the file it was writing, its health and its progress -- keeping
+/// the ranges it holds. A later install then starts the map these ranges belong to.
+pub(super) fn reset_registry(registry: &Mutex<PerfMapRegistry>) {
+    with_registry(registry, |registry| {
+        registry.sink = None;
+        registry.health = PerfMapHealth::Inactive;
+        registry.path = None;
+        registry.written_ranges = 0;
+        registry.error = None;
+        registry.control = None;
+    });
 }
 
 #[allow(dead_code)]

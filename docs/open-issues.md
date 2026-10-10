@@ -185,10 +185,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   user-space/IP-only/inherit. The map is wired: `MIRVM_PERF_MAP=1` installs `/tmp/perf-<pid>.map` where
   the JIT starts and writes the published ranges on the process-exit path (the CLI's `exit_process`,
   which deliberately never closes the Engine, and `close_shared` on the embedding path), so a sampler
-  names compiled guest bodies — 265 of them in a flate2 profile, 34% of the run's self time. What is
-  missing is the command and the thin script that drive `perf record`/`perf report` and say what a
-  missing map or lost samples mean, the map's reset across `fork` (a child inherits the parent's file
-  name and pid), and a rerun of fib and the D16 real workloads through it.
+  names compiled guest bodies — 265 of them in a flate2 profile, 34% of the run's self time. A child
+  forks into its own map: the fork path resets the process-wide install state and the registry session
+  while keeping the inherited ranges, because the child's code is mapped at the same addresses and a
+  sampler reading `/tmp/perf-<child pid>.map` would otherwise find no file at all. What is missing is
+  the command and the thin script that drive `perf record`/`perf report` and say what a missing map or
+  lost samples mean, and a rerun of fib and the D16 real workloads through it.
 - **T12** `APPROVED`: adaptive page pool and writer parameters. Under one memory budget, measure
   4/16/64 KiB pages, 24/32B Exit, return gap, drop, guest cycles, RSS and writer CPU, then implement
   4→64 KiB auto-scaling and rule on batch/checksum. The pool is fixed at 4 KiB and 16/64 KiB are

@@ -3,7 +3,7 @@
 
 use super::{
     JitState, JitSymbolRange, JitSymbolRole, PerfMapHealth, PerfMapRegistry, install_registry,
-    stop_registry, with_registry,
+    reset_registry, stop_registry, with_registry,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -99,6 +99,27 @@ fn compiled_entry_publication_registers_all_roles_before_slots_become_visible() 
     assert!(map.contains("3000 29 mirvm::engine-17::func-3::packed::guest\\nname\n"));
     assert!(map.contains("4000 1d mirvm::engine-17::func-2::c2i::guest\\nname\n"));
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_reset_lets_a_forked_child_install_a_map_of_its_own() {
+    let registry = Mutex::new(PerfMapRegistry::default());
+    let parent = test_map_path("fork-parent");
+    let child = test_map_path("fork-child");
+    install_registry(&registry, &parent).unwrap();
+    // The inherited session refuses the child's file: this is what the reset exists for.
+    let refused = install_registry(&registry, &child);
+    assert!(
+        refused.is_err(),
+        "a child must not silently keep the parent's session: {refused:?}"
+    );
+
+    reset_registry(&registry);
+    let fresh = install_registry(&registry, &child).unwrap();
+    assert_eq!(fresh.health, PerfMapHealth::Active);
+    assert_eq!(fresh.path.as_deref(), Some(child.as_path()));
+    let _ = std::fs::remove_file(parent);
+    let _ = std::fs::remove_file(child);
 }
 
 #[test]

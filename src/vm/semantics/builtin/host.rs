@@ -46,6 +46,9 @@ pub(super) fn exec(ctx: *mut Ctx, builtin: &Builtin, av: &[u64]) -> u64 {
                 // the copied parent generation. This hook is store-only and
                 // runs before any JIT service is restarted.
                 crate::telemetry::capture::after_fork_child();
+                // The perf map is named after the process; the child needs its own file, or a
+                // sampler attached to it names none of its compiled code.
+                crate::vm::jit::reset_after_fork();
                 // In the child the compiler thread does not survive fork. The publish wait of
                 // the SYNC verification mode (MIRVM_JIT_SYNC) depends on a live compilation
                 // service, so restart it: inherited published code pages, slot tables and
