@@ -121,6 +121,15 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   on and each binary's packs warmed first, which is comparable only while the compiled set is unchanged;
   where a change moves the set (the tier experiments) the wall time is the reading that counts, and the
   two disagreed exactly there -- which is why the tier question is recorded as mixed rather than won.
+  The cheapest form of the code-quality lever did land: the *baseline* tier now builds at cranelift's
+  `speed_and_size` instead of `none`, which is not a tier-policy change (the name a run reports is
+  unchanged, so `fib32-jit-cache`'s cold leg is still all-baseline) but a change in what the tier a
+  program mostly runs is worth. Warm and paired with warm packs: user instructions flate2 33.03/32.79 G
+  -> 29.78/28.24 G, brotli 42.02/41.88 G -> 37.04/37.37 G, tiny_skia 33.98/33.58 G -> 31.49/32.03 G,
+  and the flate2 driver cases 3777-5346 ms -> 3304-3740 ms (best 3777 -> 3304). Rayon's instruction
+  count rises because its compilation runs on the worker thread while its wall time does not move
+  (1575 -> 1465 ms in one session, flat in another), and with only the JIT cache dropped the cold
+  readings did not regress (flate2 3701-7779 -> 3529-6096 ms, rayon 1586-1690 -> 1520-1535 ms).
   Earlier readings of the same question are worth recording because they misled: with warm packs,
   compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
   (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT

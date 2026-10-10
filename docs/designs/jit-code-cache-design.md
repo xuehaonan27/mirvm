@@ -136,7 +136,16 @@ deliberately adaptive rather than fixed (the tiering boundary of
 call-counter and jit-stats machinery plus the persisted heat order — decides per function which tier
 to request, and the cache makes a higher tier a one-time machine-wide cost instead of a per-run
 cost. The cache may hold several tiers of one fragment; dispatch publishes the best available.
-Thresholds and hysteresis are tuned from the D16 measurement ledger, not designed up front.
+Thresholds and hysteresis are tuned from the D16 measurement ledger, not designed up front. The two
+tiers' codegen is concrete: baseline builds at cranelift's `speed_and_size` and optimized at `speed`.
+The baseline was `none`, and the difference is measured rather than aesthetic — over the four corpus
+drivers `speed_and_size` cuts user instructions by 10-14% (flate2), 11% (brotli) and 6% (tiny_skia) and
+one session's flate2 driver cases by 12%, because what the baseline tier publishes is what a program
+actually runs for most of its life (`none` leaves every intermediate in a slot), while its compile cost
+stays below `speed`'s: only the JIT cache dropped, the cold readings did not regress. It is not free —
+rayon, whose sort is thousands of small functions and whose compilation happens on the worker thread,
+pays more instructions for the extra codegen while its wall time does not move — and that is exactly the
+reading that says a JIT-on instruction count cannot judge a policy that changes what gets compiled.
 
 ### 2.7 Collection
 
