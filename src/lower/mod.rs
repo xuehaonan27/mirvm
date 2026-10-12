@@ -88,6 +88,7 @@ pub mod asm;
 pub mod collect;
 pub mod frame;
 pub mod func;
+mod generic;
 pub mod global_asm;
 
 use std::collections::VecDeque;
@@ -492,7 +493,16 @@ fn lower_one<'tcx>(
     inst: Instance<'tcx>,
 ) -> ir::FuncBody {
     let started = purity.as_ref().map(|_| std::time::Instant::now());
-    let body = func::lower_instance(tcx, typing_env, inst, linker)
+    let body = linker
+        .generic_templates
+        .lower(tcx, typing_env, inst)
+        .map(|mut body| {
+            body.name = linker.image_symbol(inst).into();
+            body
+        });
+    let body = body
+        .map(Ok)
+        .unwrap_or_else(|| func::lower_instance(tcx, typing_env, inst, linker))
         .unwrap_or_else(|reason| func::trap_body(&linker.image_symbol(inst), &reason.to_string()));
     if let (Some(p), Some(t0)) = (purity.as_mut(), started) {
         p.record(tcx, inst, &body.name, t0.elapsed().as_nanos());

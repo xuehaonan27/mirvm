@@ -340,6 +340,21 @@ query execution, hashing, allocation and archive verification remain visible. Th
 supports the execution prototype below. No whole-program generic execution improvement or full
 test tier is established by the census.
 
+### Production generic template export
+
+Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for a bounded scalar and
+pointer/const subset. Each admitted definition is exported once; concrete bindings produce ordinary
+bytecode without a full MIR-body substitution per instance. Unsupported functions retain the original
+lowerer. The default remains eager, and runtime sharing, generic archives and promotion are not yet
+implemented. This is an integration boundary, not a demonstrated whole-program speedup.
+
+The `generic-templates` contract checks five actual Rust type/const instances against one template,
+including an aligned ZST, distinct element widths and const lengths. It also covers signed consts,
+negative pointer offsets, guest Clone/Drop/panic through eager fallback, and an invalid unentered
+instantiation. Eager interpretation, template-bound interpretation and synchronous JIT agree with
+native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
+diagnostics assert actual export and binding coverage so successful fallback cannot fake template use.
+
 ### Runtime generics prototype
 
 `experiments/runtime-generics` contains a reproducible, isolated prototype using the existing

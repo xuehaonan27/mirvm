@@ -185,8 +185,8 @@ Its separate witness experiment covers native Clone/Drop and C-unwind. The
 [prototype measurements](../current-status.md#runtime-generics-prototype) establish execution
 feasibility and show that short/native-call-heavy work can lose when promoted. They do not establish
 a serde/flate cold-start improvement or general guest trait/unwind coverage. Full frontend savings
-still require production eligibility/binding, eager fallback and reuse of validated installed
-products. OSR is tracked separately under T13.
+still require broader production template coverage and reuse of validated installed products.
+OSR is tracked separately under T13.
 
 ## 5. Proposed handoff
 

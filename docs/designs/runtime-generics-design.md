@@ -1,6 +1,6 @@
 # Shared generic execution and specialization
 
-> Status: Engineering direction selected; bounded prototype in `experiments/runtime-generics`.
+> Status: Production template export/binding is opt-in; shared execution remains an isolated prototype.
 > Owns generic execution products, promotion and integration gates. Frontend selection and semantic
 > validation remain in [frontend-boundary.md](frontend-boundary.md#41-runtime-generics); measurements
 > belong to [current-status.md](../current-status.md#runtime-generics-prototype). D7 and T13 in
@@ -14,6 +14,18 @@ instruction stream. Keep rustc's required rejection and instance discovery befor
 Export owned templates and bindings; release the compiler session before Engine runs. Cold
 instances share instructions, while profitable hot instances obtain concrete bytecode for the
 existing JIT. Unsupported functions retain ordinary eager lowering in the product integration.
+
+The production lowerer admits fixed scalar frames, scalar const parameters, integer operations and
+opaque-pointee offset/copy loops under `MIRVM_GENERIC_TEMPLATES=1` (unset disables it). One compiler
+session caches both eligible templates and rejected definitions. Only ordinary Item instances are
+eligible; the session's definition identity and semantic profile fix the cache key. Binding resolves
+type sizes and const values without instantiating a whole concrete MIR body. Unsupported frames,
+projections, calls, cleanup and caller-location ABIs retain eager lowering. Collection still performs
+required instance validation before export. The owned template carries ordinary IR dictionary reads
+and a positional schema; immediate specialization removes that hidden argument before the existing
+verifier, archive and runtime see the body. This stage neither persists templates nor shares runtime
+instructions. Its flag changes lowering strategy, not artifact semantics; an existing concrete image
+can satisfy either setting without entering the exporter.
 
 The execution prototype supports this architecture, not a whole-program speedup claim. Its real
 MIR exporter handles an opaque-pointee copy loop, and its witness/unwind experiments use native
@@ -99,9 +111,7 @@ are separate policy acceptance cases. Initial thresholds are an experiment, not 
 
 The next changes are ordered so that each produces a usable, reviewable boundary:
 
-1. **Production template export and binding.** Integrate a structural eligibility check at lowering,
-   cache templates by semantic definition identity, and compute descriptors without cloning a whole
-   concrete MIR body for admitted functions. Expand from the prototype's pointer/const loop to
+1. **Production template export and binding.** Extend the structural exporter from pointer/const loops to
    slice operations and resolved guest Clone/Drop, then layout-dependent locals/projections. Keep
    eager fallback and compile-time diagnostic parity, including an unentered invalid instance.
    Acceptance: one template serves multiple actual Rust types; exported runtime state owns no

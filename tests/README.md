@@ -58,6 +58,13 @@ main return types and allocators, program/native input isolation, profile separa
 reuse, edits, corrupt-cache recovery and publication failure. It uses fresh derived stores sharing
 the existing sysroot. `MIRVM_CONTRACT_HOME` selects that shared home.
 
+`make case C=generic-templates` compares structural generic export/binding with native and eager
+execution, checks positive template reuse across real types and consts, and exercises synchronous
+JIT, bound-image reload, unsupported guest cleanup and compile-time rejection of an unentered bad
+instance. It uses isolated derived stores and the same shared-home convention. The presence flag
+`MIRVM_GENERIC_TEMPLATES` only affects lowering misses; unset it for an eager control and use a fresh
+derived store when measuring exporter coverage.
+
 `validate` and `inventory` build nothing, so a manifest typo or an unjustified asset costs seconds.
 The framework needs no particular bash version and no product to check itself: the
 `framework-self-test` case drives the real dispatcher and the real modes with the fake product and
