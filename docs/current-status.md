@@ -387,11 +387,41 @@ The original
 addressable arguments agrees with native under synchronous JIT and bound-image reload, including
 aggregate parameters, pair returns and indirect returns through native callbacks.
 
-Whole-process rollout measurements use one release executable with the option unset/set, prepared
-std/dependency MIR, three alternating pairs and all derived products except the std base removed
-before each miss. Every timed sample must agree with native output; debug coverage is collected
-separately and the OS page cache is retained. Measured promotion/payback policy, consumer-independent
-preparation and further corpus-driven admission remain open under D7.
+Three alternating pairs on one release executable use prepared std/dependency MIR and remove all
+execution/sharing/JIT products except the std base before each miss. Every one of the 36 timed
+samples agrees with native output; debug coverage runs are separate and OS page caches are retained.
+The medians are:
+
+| Workload | Exported definitions / shared instances | Rejected definitions | Eager whole process / lower | Shared whole process / lower |
+|---|---:|---:|---:|---:|
+| serde JSON | 164 / 266 | 393 | 539.9 / 218.4 ms | 443.1 / 221.0 ms |
+| flate2, 2 KiB input | 111 / 149 | 342 | 524.4 / 190.5 ms | 555.9 / 191.3 ms |
+| generic matrix, one selected type | 168 / 249 | 369 | 365.5 / 167.2 ms | 372.8 / 184.8 ms |
+
+These samples do not establish a whole-program improvement. Serde's cold ranges overlap substantially
+(eager 419.2–554.7 ms, shared 438.8–581.6 ms), and three pairs cannot attribute the median difference
+to shared execution. Lowering remains slightly higher in serde/flate and 17.6 ms higher in the
+matrix. Bound-image-hit medians are 99.8/96.7 ms for serde and 151.6/153.9 ms for flate
+(eager/shared). The matrix's immediate repeat still enters the frontend and publishes its bound
+image; it is not a runtime-only hit. Its shared repeat range is 271.9–522.8 ms.
+
+Separate diagnostic runs request concrete forms for 0/266 serde, 9/149 flate and 0/249 matrix shared
+instances. This demonstrates deferred bytecode emission, not that all other preparation work has
+been removed. Export probes, concrete layout/call binding, verification and publication remain
+before entry. Default enablement remains off; consumer-independent dependency preparation and a
+measured work/payback policy remain under D7.
+
+A prepared serde cold-run CPU capture at 997 Hz has 682 samples and zero lost samples. An exclusive
+self-time grouping assigns about 27.1% of sampled cycles to compiler/metadata symbols, 18.0% to
+allocation, 12.0% to hashing/hash tables and 4.7% to bytecode verification. The generic export/bind
+call chain accounts for about 6.5% inclusively; that overlaps other groups and does not isolate
+negative probes from successful binding. CPU cycles exclude waits, and capture overhead is not part
+of the timing table. Metadata, allocation and hashing remain relevant next targets; eliminating
+instruction copies alone does not establish startup payback.
+
+The expanded generic program also agrees with native under trace capture and after standalone
+package publication/reload. Focused archive/manifest/verifier checks, all-target/all-feature Clippy,
+formatting and repository boundary checks pass. No full runtime test tier was run for this change.
 
 ### Runtime generics prototype
 

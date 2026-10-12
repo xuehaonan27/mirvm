@@ -258,7 +258,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     costs, add a work/payback policy through the existing compile service, and evaluate compiled
     shared templates. Extend dependency preparation to consumer-independent template products.
     Expand layout-dependent fields, aggregates and range/array-subslice coverage from corpus
-    evidence; measure rejected-definition probes. Require real workload cold/warm measurements,
+    evidence; separate rejected-definition probe, successful binding and repeated template
+    verification/serialization costs in CPU profiles. Require real workload cold/warm measurements,
     unchanged bound-image reuse and specialization payback before default enablement. Preserve
     guest trait/drop/unwind, concurrency, callbacks, fork, signal and trace contracts as admission
     grows. Retain Rust diagnostics, build-script/proc-macro, layout/ABI, std and input invalidation;
