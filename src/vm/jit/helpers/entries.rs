@@ -168,7 +168,7 @@ pub(crate) extern "C-unwind" fn mirvm_call_indirect(
     if null_ok != 0 && addr == 0 {
         return; // empty slot for a dyn virtual drop: no-op (same as the interpreter)
     }
-    let caller_name = &module.funcs[caller as usize].name;
+    let caller_name = module.funcs.header(caller as usize).unwrap().name();
     if addr == 0 {
         crate::vm::unwind::engine_abort(&format!(
             "indirect call through a null fn pointer (caller {caller_name})"
@@ -261,7 +261,7 @@ pub(crate) extern "C-unwind" fn mirvm_call_foreign(
     if let Some((attr, orig)) = stack_restore {
         crate::os::thread::attr_set_stack_size(attr, orig);
     }
-    let caller_name = &module.funcs[caller as usize].name;
+    let caller_name = module.funcs.header(caller as usize).unwrap().name();
     let r = r.unwrap_or_else(|reason| {
         crate::vm::unwind::engine_abort(&format!(
             "failed to load a required native library for foreign `{sym}` (fn {caller_name}): {reason}"

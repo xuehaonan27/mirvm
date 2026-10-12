@@ -180,7 +180,9 @@ pub struct Module {
 impl Module {
     pub fn ensure_function_names(&mut self) {
         if self.function_names.len() != self.funcs.len() {
-            self.function_names = self.funcs.iter().map(|body| body.name.clone()).collect();
+            self.function_names = (0..self.funcs.len())
+                .map(|id| self.funcs.header(id).unwrap().name().into())
+                .collect();
         }
     }
 

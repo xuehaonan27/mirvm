@@ -124,16 +124,28 @@ impl FuncTable {
     }
 
     pub fn get(&self, index: usize) -> Option<&FuncBody> {
+        let (storage, index) = self.part(index)?;
+        Some(match storage {
+            FuncStorage::Eager(funcs) => &funcs[index],
+            FuncStorage::Lazy(lazy) => lazy.get(index),
+        })
+    }
+
+    pub(crate) fn header(&self, index: usize) -> Option<FuncHeader<'_>> {
+        let (storage, index) = self.part(index)?;
+        Some(match storage {
+            FuncStorage::Eager(funcs) => FuncHeader::Owned(&funcs[index]),
+            FuncStorage::Lazy(lazy) => FuncHeader::Archived(lazy.archive.body(index)),
+        })
+    }
+
+    fn part(&self, index: usize) -> Option<(&FuncStorage, usize)> {
         if index >= self.len() {
             return None;
         }
         let part_index = self.parts.partition_point(|part| part.end <= index);
         let start = part_index.checked_sub(1).map_or(0, |i| self.parts[i].end);
-        let index = index - start;
-        Some(match &self.parts[part_index].storage {
-            FuncStorage::Eager(funcs) => &funcs[index],
-            FuncStorage::Lazy(lazy) => lazy.get(index),
-        })
+        Some((&self.parts[part_index].storage, index - start))
     }
 
     pub fn iter(&self) -> FuncIter<'_> {

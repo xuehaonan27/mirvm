@@ -89,7 +89,12 @@ impl<'a> Compiler<'a> {
                 crate::diag_debug!(
                     Jit,
                     "f{func} not admitted ({})",
-                    self.shared.module.funcs[func as usize].name
+                    self.shared
+                        .module
+                        .funcs
+                        .header(func as usize)
+                        .unwrap()
+                        .name()
                 );
             }
             return;
@@ -99,7 +104,7 @@ impl<'a> Compiler<'a> {
         if self.jit_cache && self.load_cached(func, body) {
             return;
         }
-        let abi = callee_abi(body).expect("admit already checked the shape");
+        let abi = callee_abi(ir::FuncHeader::Owned(body)).expect("admit already checked the shape");
         self.prewarm_callees(func, body);
 
         // Silent-failure discipline: a compile failure keeps the function interpreted
@@ -222,7 +227,8 @@ impl<'a> Compiler<'a> {
             } = &blk.term
                 && *callee != func
                 && !callees.iter().any(|(c, _)| c == callee)
-                && let Some(cabi) = callee_abi(&self.shared.module.funcs[*callee as usize])
+                && let Some(cabi) =
+                    callee_abi(self.shared.module.funcs.header(*callee as usize).unwrap())
                 && cabi.nparams == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
             {
                 callees.push((*callee, cabi));
@@ -321,7 +327,12 @@ impl<'a> Compiler<'a> {
             crate::diag_debug!(
                 Jit,
                 "f{func} ({}) published from a stored entry",
-                self.shared.module.funcs[func as usize].name
+                self.shared
+                    .module
+                    .funcs
+                    .header(func as usize)
+                    .unwrap()
+                    .name()
             );
         }
         self.shared
@@ -487,7 +498,7 @@ impl<'a> Compiler<'a> {
             );
             let need = b.ins().iconst(
                 types::I64,
-                super::super::guard::required_headroom(body) as i64,
+                super::super::guard::required_headroom(ir::FuncHeader::Owned(body)) as i64,
             );
             super::super::guard::emit(
                 &mut self.module,
@@ -545,7 +556,12 @@ impl<'a> Compiler<'a> {
             crate::diag_debug!(
                 Jit,
                 "f{func} ({}) meets compilation threshold but failed to be compiled",
-                self.shared.module.funcs[func as usize].name
+                self.shared
+                    .module
+                    .funcs
+                    .header(func as usize)
+                    .unwrap()
+                    .name()
             );
             jit.slots_for(self.domain).slots[func as usize].store(FAIL_SENTINEL, Ordering::Release);
         }
@@ -942,7 +958,7 @@ impl<'a> Compiler<'a> {
 /// The perf-map ranges of linked code: the addresses the link produced, not the module's, with the
 /// same roles and sizes so a profiler reads the running code.
 fn linked_ranges(shared: &Shared, func: u32, linked: &artifact::Linked) -> Vec<JitSymbolRange> {
-    let name = &shared.module.funcs[func as usize].name;
+    let name = shared.module.funcs.header(func as usize).unwrap().name();
     linked
         .symbols
         .iter()

@@ -79,8 +79,10 @@ passes its entry-selected body through block execution and cleanup instead of re
 Generic storage must retain that body and its descriptor for the activation's full lifetime. The
 research hook allows publication only between serial calls; it is not the production implementation.
 
-Separate metadata lookup from obtaining executable instructions. Frame/ABI/callee-header queries,
-archive verification and image merging must not accidentally specialize a body. Preserve the
+`FuncTable::header` borrows owned or archived ABI/frame metadata without initializing executable
+instructions. JIT call preparation, stack-headroom relocations, FFI marshalling and signal-handler
+shape checks use that boundary. Generic entries must preserve it: metadata lookup, archive
+verification and image merging must not accidentally specialize a body. Preserve the
 compiled caller's stack-headroom assumptions: a published callee form either fits the stable
 descriptor's checked frame contract or goes through a boundary that checks its own requirements.
 The current small-call fast path cannot silently inherit a different frame requirement.
@@ -120,7 +122,7 @@ The next changes are ordered so that each produces a usable, reviewable boundary
    Acceptance: one template serves multiple actual Rust types; exported runtime state owns no
    compiler references; all unsupported shapes execute through the current lowerer.
 2. **Per-Engine generic function entries.** Add explicit template/descriptor storage to FuncTable
-   and separate headers from instructions. Retain the pinned body and descriptor across the entire
+   behind its separate header and instruction accessors. Retain the pinned body and descriptor across the entire
    interpreted activation and cleanup chain when enabling concurrent promotion. Preserve function
    pointers and concrete ABI adapters, recursion, frame checks, native callbacks, close and fork. Acceptance: mixed
    shared/concrete/JIT execution, concurrent first publication, guest unwind, signals and plain/trace

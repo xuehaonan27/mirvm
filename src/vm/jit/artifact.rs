@@ -551,7 +551,7 @@ pub(crate) fn target_value(
         // The value the helpers take *is* the id.
         Target::OwnId => Some(u64::from(func)),
         Target::StackNeed(reference) => Some(super::guard::required_headroom(
-            shared.module.funcs.get(callee(reference)? as usize)?,
+            shared.module.funcs.header(callee(reference)? as usize)?,
         )),
         Target::FuncId(ordinal) => match ordinals.target(*ordinal)? {
             ir::frag::Target::Func(id) => Some(u64::from(id)),

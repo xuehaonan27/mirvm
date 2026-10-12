@@ -33,7 +33,13 @@ impl<'a> Compiler<'a> {
         symbols
             .into_iter()
             .map(|pending| {
-                let guest_name = &self.shared.module.funcs[pending.func as usize].name;
+                let guest_name = self
+                    .shared
+                    .module
+                    .funcs
+                    .header(pending.func as usize)
+                    .unwrap()
+                    .name();
                 let start = self.module.get_finalized_function(pending.id) as u64;
                 JitSymbolRange::new(
                     self.shared.id,

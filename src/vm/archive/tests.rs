@@ -44,6 +44,72 @@ fn load_once(module: &Module, instance: &Instance) -> Result<VerifiedArtifact, E
 }
 
 #[test]
+fn header_queries_preserve_lazy_bodies_across_archive_parts() {
+    let slot = |off, width| Slot { off, width };
+    let lo = slot(0, Width::W8);
+    let hi = slot(8, Width::W64);
+    let returns = [
+        RetAbi::Zst,
+        RetAbi::Scalar(lo),
+        RetAbi::Pair(lo, hi),
+        RetAbi::Indirect {
+            ret_off: 0,
+            size: 16,
+            sret_off: 16,
+        },
+    ];
+    let bodies: Vec<_> = returns
+        .into_iter()
+        .enumerate()
+        .map(|(i, ret)| FuncBody {
+            frame_size: 128,
+            frame_align: 64,
+            ret,
+            params: vec![
+                ParamAbi::Zst,
+                ParamAbi::Scalar(lo),
+                ParamAbi::Pair(lo, hi),
+                ParamAbi::Indirect { off: 32, size: 24 },
+            ],
+            caller_loc_off: (i % 2 != 0).then_some(64),
+            name: format!("header{i}").into(),
+            blocks: vec![Block {
+                stmts: Vec::new(),
+                term: Terminator::Return,
+            }],
+        })
+        .collect();
+    let archived = Module {
+        funcs: bodies.clone().into(),
+        ..Module::default()
+    };
+    let mut funcs = FuncTable::default();
+    funcs.append(FuncTable::from_archive(Arc::new(archive(&archived))));
+    funcs.append(bodies.clone().into());
+    funcs.append(FuncTable::from_archive(Arc::new(archive(&archived))));
+    let fields = |header: FuncHeader<'_>| {
+        postcard::to_stdvec(&(
+            header.frame_size(),
+            header.frame_align(),
+            header.ret(),
+            header.params().collect::<Vec<_>>(),
+            header.caller_loc_off(),
+            header.name(),
+        ))
+        .unwrap()
+    };
+    for index in 0..funcs.len() {
+        assert_eq!(
+            fields(funcs.header(index).unwrap()),
+            fields(FuncHeader::Owned(&bodies[index % bodies.len()]))
+        );
+    }
+    assert!(funcs.header(funcs.len()).is_none());
+    assert!(funcs.header(usize::MAX).is_none());
+    assert_eq!(funcs.decoded_count(), bodies.len());
+}
+
+#[test]
 fn engine_construction_preserves_lazy_bodies_and_fork_settles_them() {
     let image = load(&module(), &Instance::default()).unwrap();
     let artifact = image.instantiate().unwrap();

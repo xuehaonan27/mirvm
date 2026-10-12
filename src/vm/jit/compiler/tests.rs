@@ -893,6 +893,60 @@ fn a_linked_entry_without_a_cfa_program_is_refused() {
 }
 
 #[test]
+fn compiling_a_caller_keeps_callee_instructions_archived() {
+    use crate::vm::archive::{bytes::Bytes, functions::Functions};
+    use std::sync::Arc;
+
+    for domain in [CodeDomain::Plain, CodeDomain::Trace] {
+        for reload in [false, true] {
+            let funcs: ir::FuncTable = vec![
+                body(
+                    "caller",
+                    Terminator::Call {
+                        callee: 1,
+                        args: Vec::new(),
+                        ret: RetDest::Ignore,
+                        target: 1,
+                        unwind: UnwindAction::Continue,
+                        role: ir::CallRole::Normal,
+                    },
+                ),
+                body("callee", Terminator::Return),
+            ]
+            .into();
+            let bytes = Bytes::new(
+                crate::vm::archive::functions::encode(&funcs)
+                    .unwrap()
+                    .to_vec(),
+            );
+            let len = bytes.len();
+            let archive = Functions::load(bytes, 0..len).unwrap();
+            let shared = Shared::new(ir::Module {
+                funcs: ir::FuncTable::from_archive(Arc::new(archive)),
+                ..Default::default()
+            });
+            let mut compiler = test_compiler(&shared, domain);
+            compiler.reload = reload;
+            assert_eq!(shared.module.funcs.decoded_count(), 0);
+            compiler.compile(0);
+            assert_ne!(
+                shared.jit.slots_for(domain).slots[0].load(Ordering::Acquire),
+                0
+            );
+            assert_ne!(
+                shared.jit.slots_for(domain).slots_fast[1].load(Ordering::Acquire),
+                0
+            );
+            assert_eq!(
+                shared.module.funcs.decoded_count(),
+                1,
+                "{domain:?}, reload={reload}: preparing a callee entry decoded its instructions"
+            );
+        }
+    }
+}
+
+#[test]
 fn compiled_call_checks_the_callees_frame_before_entering_it() {
     // The caller fits in the synthetic headroom, but its callee does not. A missing call-site
     // check returns normally, while checking the caller's frame twice also misses the overflow.

@@ -33,6 +33,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Open defects
 
+- **E53** `OPEN`: lower constant by-value aggregate arguments into addressable storage for C1.
+  `ffi_agg_probe` stops at its constant `S2` argument with `C1 by-value aggregate arg is not a place
+  (const expansion not wired)`; forcing synchronous JIT at threshold 1 rejects compilation of its
+  `main`. Restore the original fixture's cold/warm native differential without requiring callers to
+  inhibit constant propagation.
+
 - **E40** `OPEN`: guest execution remains substantially slower than native. The focused `fib32`
   startup case meets its 80 ms ceiling; uncached preparation and the corpus execution gap remain.
   Current measurements belong to [current-status.md](current-status.md). The remaining work is

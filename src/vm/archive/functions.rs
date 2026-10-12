@@ -97,12 +97,14 @@ impl Functions {
         self.chunks.last().map_or(0, |chunk| chunk.end)
     }
 
-    pub(crate) fn decode(&self, index: usize) -> FuncBody {
+    pub(crate) fn body(&self, index: usize) -> &ArchivedFuncBody {
         let chunk_index = self.chunks.partition_point(|chunk| chunk.end <= index);
         let start = chunk_index.checked_sub(1).map_or(0, |i| self.chunks[i].end);
-        match self.chunk_bodies(&self.chunks[chunk_index])[index - start]
-            .deserialize(&mut rkyv::Infallible)
-        {
+        &self.chunk_bodies(&self.chunks[chunk_index])[index - start]
+    }
+
+    pub(crate) fn decode(&self, index: usize) -> FuncBody {
+        match self.body(index).deserialize(&mut rkyv::Infallible) {
             Ok(body) => body,
             Err(never) => match never {},
         }

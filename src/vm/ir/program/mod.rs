@@ -5,9 +5,10 @@
 //! TLS slots, and the eager/lazy function table. The operand, width, and operation vocabulary
 //! these are written in stays in the parent module.
 //!
-//! The four are separate concerns and separate files: [`instr`] is what a guest body is made of,
+//! These are separate concerns and separate files: [`instr`] is what a guest body is made of,
 //! [`ffi`] is the signature a foreign call is made under, [`funcs`] is the function table and its
-//! lazy decode, and [`module`] is the artifact those are assembled into.
+//! lazy decode, [`header`] borrows metadata without decoding instructions, and [`module`] is the
+//! artifact those are assembled into.
 
 use super::{
     AsmIoDst, AsmIoVal, AsmSite, AsmStubId, Bb, FuncId, LinkAddr, Operand, PlaceExpr, ScalarPlace,
@@ -16,11 +17,13 @@ use super::{
 
 pub use ffi::*;
 pub use funcs::*;
+pub(crate) use header::*;
 pub use instr::*;
 pub use module::*;
 
 mod ffi;
 mod funcs;
+mod header;
 mod instr;
 mod module;
 

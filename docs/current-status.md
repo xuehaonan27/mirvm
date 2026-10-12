@@ -358,9 +358,34 @@ rejected before entry. Eager interpretation, template-bound interpretation and s
 native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
 diagnostics assert actual export and binding coverage so successful fallback cannot fake template use.
 
-Whole-program coverage and the cost of probing rejected definitions remain part of the default
-enablement gate. The generic matrix's preparation transition can still enter the frontend on an
-immediate repeat before publishing its bound image; that repeat is not a runtime-only cache hit.
+`FuncTable` exposes ABI/frame headers independently of instruction decoding. JIT callee admission,
+trampoline preparation, stack-headroom relocation, FFI marshalling and signal-handler validation
+borrow those headers. Compiling or reloading a caller in either plain or trace code leaves its
+callee's instructions archived; the mixed-part header check covers every parameter/return shape
+without initializing archived decode cells. This supplies the metadata boundary for per-Engine
+generic entries; it does not introduce shared generic execution or alter the archive format.
+Signal delivery and the generic fixture's captured trace agree with native execution. The original
+`ffi_agg_probe` remains blocked by E53's constant-aggregate lowering gap; a diagnostic variant with
+addressable arguments agrees with native under synchronous JIT and bound-image reload, including
+aggregate parameters, pair returns and indirect returns through native callbacks.
+
+Three alternating pairs on one release executable, with prepared std/dependency MIR and all derived
+products except the std base removed before each miss, give these medians. Every sample agrees with
+its native oracle; debug coverage runs are separate from timings and the OS page cache is retained.
+The option comparison measures template binding; both modes include the header-access boundary.
+
+| Workload | Exported definitions / bound instances | Rejected definitions | Eager whole process / lower | Templates whole process / lower |
+|---|---:|---:|---:|---:|
+| serde JSON | 39 / 55 | 518 | 410.5 / 209.8 ms | 404.4 / 204.1 ms |
+| flate2, 2 KiB input | 23 / 26 | 430 | 475.4 / 168.4 ms | 473.7 / 168.9 ms |
+| generic matrix, one selected type | 27 / 29 | 510 | 415.0 / 169.6 ms | 374.1 / 187.8 ms |
+
+These samples do not establish a whole-program speedup. Most generic definitions still take eager
+fallback; matrix whole-process ranges overlap widely (340.4–538.8 ms eager, 343.6–472.1 ms templates),
+and its lower phase does not improve. Rejected-definition probe cost remains part of the default
+enablement gate. Serde and flate2 bound-image hits take 87.8/88.7 ms and 137.2/136.2 ms respectively
+(eager/templates). The matrix's immediate repeat still enters the frontend before publishing its
+bound image; that repeat is not a runtime-only cache hit.
 
 ### Runtime generics prototype
 

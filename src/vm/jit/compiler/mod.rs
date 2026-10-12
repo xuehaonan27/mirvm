@@ -250,7 +250,7 @@ pub(super) fn worker(
             crate::diag_debug!(
                 Jit,
                 "received compilation request for f{func} ({})",
-                shared.module.funcs[func as usize].name
+                shared.module.funcs.header(func as usize).unwrap().name()
             );
         }
         c.compile(func);
@@ -266,7 +266,7 @@ pub(super) fn worker(
                 crate::diag_debug!(
                     Jit,
                     "f{func} release={ok} @{addr:#x} fast@{fast:#x}({})",
-                    shared.module.funcs[func as usize].name
+                    shared.module.funcs.header(func as usize).unwrap().name()
                 );
             } else {
                 crate::diag_debug!(Jit, "f{func} release={ok}");

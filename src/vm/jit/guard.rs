@@ -2,9 +2,9 @@
 
 use super::*;
 
-pub(super) fn required_headroom(body: &ir::FuncBody) -> u64 {
-    u64::from(body.frame_size)
-        .saturating_add(u64::from(body.frame_align.saturating_sub(16)))
+pub(super) fn required_headroom(body: ir::FuncHeader<'_>) -> u64 {
+    u64::from(body.frame_size())
+        .saturating_add(u64::from(body.frame_align().saturating_sub(16)))
         .saturating_add(helpers::STACK_GUARD_MARGIN as u64)
 }
 

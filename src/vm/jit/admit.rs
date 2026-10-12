@@ -101,9 +101,9 @@ pub(super) struct CalleeAbi {
 /// Callee ABI calculation. Every shape is acceptable: once `admit` has accepted a body, this can always
 /// derive it, so it returns `Some`. The `Option` is kept only for call-site convention
 /// (`.expect`/`.filter` readability).
-pub(super) fn callee_abi(body: &ir::FuncBody) -> Option<CalleeAbi> {
-    let mut nparams = usize::from(matches!(body.ret, RetAbi::Indirect { .. }));
-    for p in &body.params {
+pub(super) fn callee_abi(body: ir::FuncHeader<'_>) -> Option<CalleeAbi> {
+    let mut nparams = usize::from(matches!(body.ret(), RetAbi::Indirect { .. }));
+    for p in body.params() {
         nparams += match p {
             ParamAbi::Zst => 0,
             ParamAbi::Scalar(_) => 1,
@@ -111,8 +111,8 @@ pub(super) fn callee_abi(body: &ir::FuncBody) -> Option<CalleeAbi> {
             ParamAbi::Indirect { .. } => 1,
         };
     }
-    nparams += usize::from(body.caller_loc_off.is_some());
-    let nrets = match body.ret {
+    nparams += usize::from(body.caller_loc_off().is_some());
+    let nrets = match body.ret() {
         RetAbi::Zst | RetAbi::Indirect { .. } => 0,
         RetAbi::Scalar(_) => 1,
         RetAbi::Pair(_, _) => 2,
@@ -120,12 +120,12 @@ pub(super) fn callee_abi(body: &ir::FuncBody) -> Option<CalleeAbi> {
     Some(CalleeAbi {
         nparams,
         nrets,
-        sret: matches!(body.ret, RetAbi::Indirect { .. }),
+        sret: matches!(body.ret(), RetAbi::Indirect { .. }),
     })
 }
 
 pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
-    if callee_abi(body).is_none() {
+    if callee_abi(ir::FuncHeader::Owned(body)).is_none() {
         return false;
     }
     for blk in &body.blocks {
@@ -297,7 +297,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                             | RetDest::Pair(ScalarPlace::Slot(_), ScalarPlace::Slot(_))
                             | RetDest::Indirect(_)
                     )
-                    && shared.module.funcs.get(*callee as usize).is_some()
+                    && (*callee as usize) < shared.module.funcs.len()
             }
             // CallIndirect (mirvm_call_indirect helper, same dispatch as the interpreter arm): all three
             // unwind actions are admitted (same as Call); callee and all args are evaluable; ret full shape.

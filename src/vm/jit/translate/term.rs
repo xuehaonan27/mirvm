@@ -177,7 +177,7 @@ impl Translator<'_, '_> {
                             let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
                             write_back!(lo, hi);
                         } else {
-                            let cb = &self.shared.module.funcs[*callee as usize];
+                            let cb = self.shared.module.funcs.header(*callee as usize).unwrap();
                             let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
                             if let Some(cabi) = plt {
                                 // Compiled slots point to bodies. Check before entering the callee's

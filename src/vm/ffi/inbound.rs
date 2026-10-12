@@ -15,7 +15,7 @@ use std::ffi::c_void;
 
 use crate::vm::ctx::Ctx;
 use crate::vm::dispatch::call_guest;
-use crate::vm::ir::{FfiAgg, FfiKind, FfiLeaf, FuncBody, Module, ParamAbi, RetAbi};
+use crate::vm::ir::{FfiAgg, FfiKind, FfiLeaf, Module, ParamAbi, RetAbi};
 use crate::vm::unwind::engine_abort;
 
 /// Move args by declared width (shared by trampoline / entry_trampoline; closure arg slots only
@@ -100,15 +100,15 @@ pub(crate) fn call_guest_ffi(
     ret_addr: Option<u64>,
 ) -> (u64, u64) {
     let module: &Module = unsafe { &(*ctx).shared.module };
-    let body: &FuncBody = &module.funcs[func as usize];
-    let mut av: Vec<u64> = Vec::with_capacity(vals.len() + body.params.len() + 1);
-    if let RetAbi::Indirect { .. } = body.ret {
+    let body = module.funcs.header(func as usize).unwrap();
+    let mut av: Vec<u64> = Vec::with_capacity(vals.len() + body.params().len() + 1);
+    if let RetAbi::Indirect { .. } = body.ret() {
         av.push(ret_addr.expect(
             "C1: callee returns an aggregate by value (RetAbi::Indirect) but has no result address",
         ));
     }
     let mut ki = 0usize;
-    for p in &body.params {
+    for p in body.params() {
         match p {
             ParamAbi::Zst => {}
             ParamAbi::Scalar(_) => match kinds.get(ki) {
@@ -122,7 +122,8 @@ pub(crate) fn call_guest_ffi(
                 }
                 None => engine_abort(&format!(
                     "C1 marshalling is missing an argument (callee fn {} params {:?})",
-                    body.name, body.params
+                    body.name(),
+                    body.params().collect::<Vec<_>>()
                 )),
             },
             ParamAbi::Pair(_, _) => match kinds.get(ki) {
@@ -133,7 +134,9 @@ pub(crate) fn call_guest_ffi(
                 }
                 _ => engine_abort(&format!(
                     "C1 marshalling mismatch: a `Pair` callee parameter met a non-scalar C argument (fn {} params {:?} kinds {:?})",
-                    body.name, body.params, kinds
+                    body.name(),
+                    body.params().collect::<Vec<_>>(),
+                    kinds
                 )),
             },
             ParamAbi::Indirect { .. } => match kinds.get(ki) {
@@ -143,7 +146,9 @@ pub(crate) fn call_guest_ffi(
                 }
                 _ => engine_abort(&format!(
                     "C1 marshalling mismatch: a by-address callee parameter met a non-scalar C argument (fn {} params {:?} kinds {:?})",
-                    body.name, body.params, kinds
+                    body.name(),
+                    body.params().collect::<Vec<_>>(),
+                    kinds
                 )),
             },
         }
@@ -151,7 +156,7 @@ pub(crate) fn call_guest_ffi(
     if ki != vals.len() {
         engine_abort(&format!(
             "C1 marshalling slot count mismatch: callee fn {} consumes {ki}, marshal supplies {}",
-            body.name,
+            body.name(),
             vals.len()
         ));
     }

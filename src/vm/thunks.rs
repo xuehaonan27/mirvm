@@ -366,12 +366,13 @@ pub(crate) enum SignalHandlerResolution {
 }
 
 fn has_signal_body_shape(shared: &Shared, func: FuncId) -> bool {
-    let Some(body) = shared.module.funcs.get(func as usize) else {
+    let Some(body) = shared.module.funcs.header(func as usize) else {
         return false;
     };
-    matches!(body.ret, super::ir::RetAbi::Zst)
-        && matches!(body.params.as_slice(), [super::ir::ParamAbi::Scalar(_)])
-        && body.caller_loc_off.is_none()
+    matches!(body.ret(), super::ir::RetAbi::Zst)
+        && body.params().len() == 1
+        && matches!(body.params().next(), Some(super::ir::ParamAbi::Scalar(_)))
+        && body.caller_loc_off().is_none()
 }
 
 fn has_signal_thunk_shape(data: &ThunkData) -> bool {

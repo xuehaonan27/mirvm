@@ -51,7 +51,7 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
             let shared = unsafe { (*ctx).shared };
             engine_abort(&format!(
                 "JIT strict: f{func}({}) meets compilation threshold but failed to be compiled",
-                shared.module.funcs[func as usize].name
+                shared.module.funcs.header(func as usize).unwrap().name()
             ))
         };
         // Dispatch into the current activation's code domain. This is the single
@@ -167,5 +167,5 @@ pub(crate) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str)
 #[inline]
 pub(crate) fn ret_abi_of(ctx: *mut Ctx, func: u32) -> RetAbi {
     let module: &Module = unsafe { &(*ctx).shared.module };
-    module.funcs[func as usize].ret
+    module.funcs.header(func as usize).unwrap().ret()
 }
