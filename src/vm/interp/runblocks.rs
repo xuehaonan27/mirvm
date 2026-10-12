@@ -15,13 +15,13 @@ use crate::vm::unwind::guarding_terminate;
 pub(super) fn run_blocks(
     ctx: *mut Ctx,
     func: u32,
+    body: &FuncBody,
     base: usize,
     edge: &Cell<Option<Bb>>,
     entry: Bb,
 ) -> Exit {
     let module: &Module = unsafe { &(*ctx).shared.module };
     let instance: &Instance = unsafe { &(*ctx).shared.instance };
-    let body: &FuncBody = &module.funcs[func as usize];
 
     let mut blk = entry as usize;
     // Back edges to count before the compile policy hears about them. One atomic per batch keeps the

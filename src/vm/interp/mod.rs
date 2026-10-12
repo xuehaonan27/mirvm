@@ -276,6 +276,64 @@ mod tests {
     use crate::vm::semantics::volatile::{mem_read_volatile, mem_write_volatile};
 
     #[test]
+    fn execution_and_cleanup_use_the_pinned_body() {
+        let value = Slot {
+            off: 0,
+            width: Width::W64,
+        };
+        let assign = |bits| Stmt::Assign {
+            dst: ScalarPlace::Slot(value),
+            rv: Rvalue::Use(Operand::Imm {
+                bits,
+                width: Width::W64,
+            }),
+        };
+        let pinned = FuncBody {
+            frame_size: 8,
+            frame_align: 8,
+            ret: RetAbi::Scalar(value),
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![
+                Block {
+                    stmts: vec![assign(17)],
+                    term: Terminator::Goto(1),
+                },
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Return,
+                },
+                Block {
+                    stmts: vec![assign(29)],
+                    term: Terminator::Resume,
+                },
+            ],
+            name: "pinned".into(),
+        };
+        let mut module = Module::default();
+        module.funcs.push(FuncBody {
+            blocks: vec![Block {
+                stmts: Vec::new(),
+                term: Terminator::Trap("must not look up the body again".into()),
+            }],
+            ..pinned.clone()
+        });
+        let engine = Engine::new(Shared::new(module));
+        let lease = engine.execution_lease().unwrap();
+        let activation = crate::vm::ctx::activate(lease.shared());
+        let ctx = activation.ctx();
+        let base = super::region_reserve(ctx, pinned.frame_size, pinned.frame_align);
+        let edge = std::cell::Cell::new(None);
+        assert!(matches!(
+            super::runblocks::run_blocks(ctx, 0, &pinned, base, &edge, 0),
+            super::Exit::Ret(17, 0)
+        ));
+        super::call::run_cleanup(ctx, 0, &pinned, base, 2);
+        assert_eq!(super::slot_read(ctx, base, value), 29);
+        super::region_restore(ctx, base);
+    }
+
+    #[test]
     fn engine_fault_returns_from_export_instead_of_exiting_the_host() {
         let mut module = Module::default();
         module.funcs.push(FuncBody {

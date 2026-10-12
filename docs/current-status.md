@@ -355,6 +355,22 @@ instantiation. Eager interpretation, template-bound interpretation and synchrono
 native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
 diagnostics assert actual export and binding coverage so successful fallback cannot fake template use.
 
+Three alternating pairs on one release executable, with prepared std/dependency MIR and all derived
+products except the std base removed before each miss, give these medians. Every sample agrees with
+its native oracle; debug coverage runs are separate from timings and the OS page cache is retained.
+
+| Workload | Eager whole process / lower | Templates whole process / lower | Bound instances |
+|---|---:|---:|---:|
+| serde JSON | 394.1 / 192.0 ms | 400.1 / 203.0 ms | 2 |
+| flate2, 2 KiB input | 435.5 / 159.3 ms | 430.3 / 163.9 ms | 1 |
+| generic matrix, one selected type | 345.2 / 166.3 ms | 349.6 / 158.2 ms | 2 |
+
+Each workload exports only one eligible definition. These small differences do not establish a
+speedup: almost all generic functions still take eager fallback. Coverage expansion and the cost of
+probing rejected definitions must be measured before default enablement. Serde and flate reload their
+bound images; the matrix's immediate repeat still enters the frontend and publishes the bound image,
+the unresolved D7 preparation transition. It is not counted as a runtime-only cache hit.
+
 ### Runtime generics prototype
 
 `experiments/runtime-generics` contains a reproducible, isolated prototype using the existing
@@ -406,8 +422,9 @@ crossing its work threshold. Native witnesses do not prove guest panic ownership
 trait resolver. No full repository test tier is claimed.
 
 The prototype's serial, process-global body override is confined to a disposable source copy.
-Production needs per-Engine entries and activation-pinned bodies before concurrent promotion,
-then reusable generic products and real-workload cold/warm validation. The selected integration
+The production interpreter uses its entry-selected body throughout normal execution and cleanup;
+per-Engine generic entries must retain both body and descriptor before concurrent promotion.
+Reusable generic products and real-workload cold/warm validation remain open. The selected integration
 roadmap and acceptance gates are owned by
 [runtime-generics-design.md](designs/runtime-generics-design.md); OSR is T13.
 

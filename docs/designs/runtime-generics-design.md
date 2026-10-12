@@ -70,11 +70,10 @@ validated template + instance descriptor
 ```
 
 Entry identity and concrete ABI stay fixed. An activation pins its chosen immutable body and
-descriptor until return/unwind; publishing another form affects subsequent entries. This is
-essential because the current interpreter re-reads `module.funcs[func]` while running blocks and
-cleanup. Replacing what that lookup returns during an activation could mix two instruction streams.
-The research hook avoids the race by allowing publication only between serial calls; it is not the
-production implementation.
+descriptor until return/unwind; publishing another form affects subsequent entries. The interpreter
+passes its entry-selected body through block execution and cleanup instead of resolving FuncId again.
+Generic storage must retain that body and its descriptor for the activation's full lifetime. The
+research hook allows publication only between serial calls; it is not the production implementation.
 
 Separate metadata lookup from obtaining executable instructions. Frame/ABI/callee-header queries,
 archive verification and image merging must not accidentally specialize a body. Preserve the
@@ -117,9 +116,9 @@ The next changes are ordered so that each produces a usable, reviewable boundary
    Acceptance: one template serves multiple actual Rust types; exported runtime state owns no
    compiler references; all unsupported shapes execute through the current lowerer.
 2. **Per-Engine generic function entries.** Add explicit template/descriptor storage to FuncTable
-   and separate headers from instructions. Pin the chosen form for the entire interpreted activation
-   and cleanup chain before enabling concurrent promotion. Preserve function pointers and concrete
-   ABI adapters, recursion, frame checks, native callbacks, close and fork. Acceptance: mixed
+   and separate headers from instructions. Retain the pinned body and descriptor across the entire
+   interpreted activation and cleanup chain when enabling concurrent promotion. Preserve function
+   pointers and concrete ABI adapters, recursion, frame checks, native callbacks, close and fork. Acceptance: mixed
    shared/concrete/JIT execution, concurrent first publication, guest unwind, signals and plain/trace
    differentials agree with eager execution; no global research override remains.
 3. **Reusable generic products.** Extend the existing function archive, verifier and shared-unit

@@ -12,10 +12,10 @@ use super::*;
 /// cleanup block to `Resume`. A `Call` inside the chain may re-enter mixed execution; a panic
 /// inside the chain aborts on a `Terminate` edge, and on a `Continue` edge escapes through
 /// `Drop` as a host double-panic abort (matching native).
-pub(super) fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
+pub(super) fn run_cleanup(ctx: *mut Ctx, func: u32, body: &FuncBody, base: usize, entry: Bb) {
     // Cleanup blocks contain no nested cleanup (MIR invariant), so a dummy edge is enough.
     let edge = Cell::new(None);
-    match run_blocks(ctx, func, base, &edge, entry) {
+    match run_blocks(ctx, func, body, base, &edge, entry) {
         Exit::Resume => {} // return to the guard; the host unwinder continues on its own
         Exit::Ret(..) => engine_abort("cleanup chain ended in Return (MIR invariant broken)"),
     }
@@ -35,6 +35,8 @@ pub(super) fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
 /// approximates native (the overflow depth is unspecified).
 pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let module: &Module = unsafe { &(*ctx).shared.module };
+    // Prologue, execution and cleanup share this immutable body, even if subsequent entries
+    // select another execution form for the same FuncId.
     let body: &FuncBody = &module.funcs[func as usize];
 
     // The prologue can raise an EngineFault too (stack guard, argument ABI, exhausted operand
@@ -162,7 +164,8 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         })
     };
     guard.shadow_active = true;
-    match crate::vm::unwind::catch_raw(|| run_blocks(ctx, func, base, &guard.unwind_edge, 0)) {
+    match crate::vm::unwind::catch_raw(|| run_blocks(ctx, func, body, base, &guard.unwind_edge, 0))
+    {
         Ok(Exit::Ret(lo, hi)) => (lo, hi), // guard drop restores the region
         Ok(Exit::Resume) => engine_abort(&format!(
             "Resume reached on the normal execution path (fn {})",
@@ -172,7 +175,7 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
             if !exception.is_engine_fault()
                 && let Some(cleanup) = guard.unwind_edge.get()
             {
-                run_cleanup(ctx, func, base, cleanup);
+                run_cleanup(ctx, func, body, base, cleanup);
             }
             exception.resume_or_rethrow()
         }
