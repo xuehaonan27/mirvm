@@ -52,6 +52,17 @@ for mode, settings in [
         assert "generic template exported: signed_const\n" in log, log
         assert "generic template exported: backwards\n" in log, log
         assert "generic template fallback: clone_and_unwind\n" in log, log
+        for definition, count in [("slice_len", 3), ("slice_identity", 3), ("slice_data", 3),
+                                  ("copy_slice", 3), ("fixed_field", 3), ("fixed_ref", 3),
+                                  ("witness", 3), ("clone_reference", 1), ("destroy", 2)]:
+            assert log.count("generic template exported: " + definition + "\n") == 1, definition
+            bound = [line for line in log.splitlines()
+                     if "generic template bound:" in line and definition in line]
+            assert len(bound) == count and len(set(bound)) == count, (definition, bound)
+        assert "generic template fallback: indirect\n" in log, log
+        assert "generic template exported: caller_location\n" in log, log
+        assert not any("generic template bound:" in line and "caller_location" in line
+                       for line in log.splitlines())
     else:
         assert "generic template " not in log, log
     warm = run(mode + "-warm", [mirvm, "run", source], settings)

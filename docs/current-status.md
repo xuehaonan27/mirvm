@@ -342,34 +342,25 @@ test tier is established by the census.
 
 ### Production generic template export
 
-Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for a bounded scalar and
-pointer/const subset. Each admitted definition is exported once; concrete bindings produce ordinary
+Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for scalar/pair frames,
+slice metadata, fixed field projections, pointer/const operations and resolved direct guest calls.
+Each admitted definition is exported once; concrete bindings produce ordinary
 bytecode without a full MIR-body substitution per instance. Unsupported functions retain the original
 lowerer. The default remains eager, and runtime sharing, generic archives and promotion are not yet
 implemented. This is an integration boundary, not a demonstrated whole-program speedup.
 
 The `generic-templates` contract checks five actual Rust type/const instances against one template,
 including an aligned ZST, distinct element widths and const lengths. It also covers signed consts,
-negative pointer offsets, guest Clone/Drop/panic through eager fallback, and an invalid unentered
-instantiation. Eager interpretation, template-bound interpretation and synchronous JIT agree with
+negative pointer offsets, slice parameters/returns, field references, distinct same-layout trait
+witnesses, reference cloning, drop glue and guest panic propagation. Indirect calls, by-value generic
+cleanup and caller-location bindings retain eager fallback; an invalid unentered instantiation is
+rejected before entry. Eager interpretation, template-bound interpretation and synchronous JIT agree with
 native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
 diagnostics assert actual export and binding coverage so successful fallback cannot fake template use.
 
-Three alternating pairs on one release executable, with prepared std/dependency MIR and all derived
-products except the std base removed before each miss, give these medians. Every sample agrees with
-its native oracle; debug coverage runs are separate from timings and the OS page cache is retained.
-
-| Workload | Eager whole process / lower | Templates whole process / lower | Bound instances |
-|---|---:|---:|---:|
-| serde JSON | 394.1 / 192.0 ms | 400.1 / 203.0 ms | 2 |
-| flate2, 2 KiB input | 435.5 / 159.3 ms | 430.3 / 163.9 ms | 1 |
-| generic matrix, one selected type | 345.2 / 166.3 ms | 349.6 / 158.2 ms | 2 |
-
-Each workload exports only one eligible definition. These small differences do not establish a
-speedup: almost all generic functions still take eager fallback. Coverage expansion and the cost of
-probing rejected definitions must be measured before default enablement. Serde and flate reload their
-bound images; the matrix's immediate repeat still enters the frontend and publishes the bound image,
-the unresolved D7 preparation transition. It is not counted as a runtime-only cache hit.
+Whole-program coverage and the cost of probing rejected definitions remain part of the default
+enablement gate. The generic matrix's preparation transition can still enter the frontend on an
+immediate repeat before publishing its bound image; that repeat is not a runtime-only cache hit.
 
 ### Runtime generics prototype
 

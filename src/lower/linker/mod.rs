@@ -15,7 +15,7 @@ use super::*;
 
 pub(crate) struct Linker<'tcx> {
     pub(crate) tcx: TyCtxt<'tcx>,
-    pub(super) generic_templates: super::generic::Templates,
+    pub(super) generic_templates: super::generic::Templates<'tcx>,
     /// instance → FuncId (dedup set; includes already-lowered and queued)
     pub(crate) ids: FxHashMap<Instance<'tcx>, ir::FuncId>,
     /// Lowering queue (FuncId allocated, body not yet emitted) — in split mode this is the **delta-class** queue

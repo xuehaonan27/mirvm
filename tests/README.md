@@ -60,7 +60,8 @@ the existing sysroot. `MIRVM_CONTRACT_HOME` selects that shared home.
 
 `make case C=generic-templates` compares structural generic export/binding with native and eager
 execution, checks positive template reuse across real types and consts, and exercises synchronous
-JIT, bound-image reload, unsupported guest cleanup and compile-time rejection of an unentered bad
+JIT, bound-image reload, slice pair ABIs, fixed projections, distinct trait/drop witnesses, panic
+propagation, caller-location fallback and compile-time rejection of an unentered bad
 instance. It uses isolated derived stores and the same shared-home convention. The presence flag
 `MIRVM_GENERIC_TEMPLATES` only affects lowering misses; unset it for an eager control and use a fresh
 derived store when measuring exporter coverage.

@@ -496,10 +496,7 @@ fn lower_one<'tcx>(
     let body = linker
         .generic_templates
         .lower(tcx, typing_env, inst)
-        .map(|mut body| {
-            body.name = linker.image_symbol(inst).into();
-            body
-        });
+        .map(|bound| bound.link(linker, inst));
     let body = body
         .map(Ok)
         .unwrap_or_else(|| func::lower_instance(tcx, typing_env, inst, linker))

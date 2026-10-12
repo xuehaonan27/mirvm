@@ -1,27 +1,28 @@
-//! Structural generic MIR export. Only layout-independent scalar frames are admitted; every
+//! Structural generic MIR export. Only layout-independent scalar/pair frames are admitted; every
 //! unsupported shape returns to the ordinary lowerer before any linker state has changed.
 
 use super::frame::{self, FrameLayout, ValKind};
+use super::linker::Linker;
 use crate::vm::ir::*;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir,
-    ty::{self, Instance, InstanceKind, Ty, TyCtxt, TypingEnv},
+    ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv},
 };
 
 /// This cache belongs to one compiler session and semantic profile. Shims are excluded, so the
 /// definition is the complete template key. Negative entries avoid repeatedly probing a body.
 #[derive(Default)]
-pub(super) struct Templates(FxHashMap<DefId, Option<Template>>);
+pub(super) struct Templates<'tcx>(FxHashMap<DefId, Option<Export<'tcx>>>);
 
-impl Templates {
-    pub(super) fn lower<'tcx>(
+impl<'tcx> Templates<'tcx> {
+    pub(super) fn lower(
         &mut self,
         tcx: TyCtxt<'tcx>,
         env: TypingEnv<'tcx>,
         instance: Instance<'tcx>,
-    ) -> Option<FuncBody> {
+    ) -> Option<Bound<'tcx>> {
         if !crate::options::generic_templates()
             || !matches!(instance.def, InstanceKind::Item(_))
             || !instance.args.iter().any(|arg| {
@@ -35,7 +36,7 @@ impl Templates {
         {
             return None;
         }
-        let template = self
+        let exported = self
             .0
             .entry(instance.def_id())
             .or_insert_with(|| {
@@ -55,6 +56,7 @@ impl Templates {
                 template
             })
             .as_ref()?;
+        let template = &exported.template;
         let values = template
             .bindings
             .iter()
@@ -76,6 +78,42 @@ impl Templates {
                 }
             })
             .collect::<Option<Vec<_>>>()?;
+        // Resolve every witness before allocating any FuncId. Refusing one concrete binding
+        // leaves the eager lowerer's worklist and native/constant state untouched.
+        let callees = exported
+            .calls
+            .iter()
+            .map(|&fn_ty| {
+                let fn_ty = instance.instantiate_mir_and_normalize_erasing_regions(
+                    tcx,
+                    env,
+                    EarlyBinder::bind(tcx, fn_ty),
+                );
+                let ty::FnDef(def, args) = *fn_ty.kind() else {
+                    return None;
+                };
+                let mut callee = Instance::try_resolve(tcx, env, def, args).ok()??;
+                if let InstanceKind::Intrinsic(def) = callee.def {
+                    if tcx.intrinsic(def)?.must_be_overridden {
+                        return None;
+                    }
+                    callee = Instance::new_raw(def, callee.args);
+                }
+                if tcx.is_foreign_item(callee.def_id())
+                    || callee.def.requires_caller_location(tcx)
+                    || !matches!(
+                        callee.def,
+                        InstanceKind::Item(_)
+                            | InstanceKind::Shim(
+                                ty::ShimKind::DropGlue(..) | ty::ShimKind::Clone(..)
+                            )
+                    )
+                {
+                    return None;
+                }
+                Some(callee)
+            })
+            .collect::<Option<Vec<_>>>()?;
         if crate::diag::prints(crate::diag::Severity::Debug) {
             crate::diag_debug!(
                 Lower,
@@ -83,7 +121,43 @@ impl Templates {
                 tcx.symbol_name(instance).name
             );
         }
-        Some(template.specialize(&values))
+        Some(Bound {
+            body: template.specialize(&values),
+            callees,
+        })
+    }
+}
+
+/// Compiler-owned call recipes are separate from the owned instruction template.
+struct Export<'tcx> {
+    template: Template,
+    calls: Vec<Ty<'tcx>>,
+}
+
+pub(super) struct Bound<'tcx> {
+    body: FuncBody,
+    callees: Vec<Instance<'tcx>>,
+}
+
+impl<'tcx> Bound<'tcx> {
+    pub(super) fn link(mut self, linker: &mut Linker<'tcx>, caller: Instance<'tcx>) -> FuncBody {
+        let ids: Vec<_> = self
+            .callees
+            .iter()
+            .map(|&inst| linker.func_id(inst))
+            .collect();
+        for block in &mut self.body.blocks {
+            if let Terminator::Call { callee, role, .. } = &mut block.term {
+                *callee = ids[*callee as usize];
+                if linker.main_catch_site.is_some_and(|site| {
+                    site.boundary_caller == caller && site.boundary_callee == *callee
+                }) {
+                    *role = CallRole::MainPanicBoundary;
+                }
+            }
+        }
+        self.body.name = linker.image_symbol(caller).into();
+        self.body
     }
 }
 
@@ -106,8 +180,9 @@ impl Template {
         assert_eq!(values.len(), self.bindings.len());
         let mut body = self.body.clone();
         let bind = |operand: &mut Operand| {
-            if let Operand::Mem { expr, width } = operand {
-                assert!(matches!(expr.base, PlaceBase::Local(off) if off == self.dictionary));
+            if let Operand::Mem { expr, width } = operand
+                && matches!(expr.base, PlaceBase::Local(off) if off == self.dictionary)
+            {
                 let [PlaceStep::Deref, PlaceStep::Offset(off)] = &*expr.steps else {
                     unreachable!("template dictionary addressing")
                 };
@@ -126,6 +201,7 @@ impl Template {
                             bind(a);
                             bind(b);
                         }
+                        Rvalue::Ref(_) => {}
                         _ => unreachable!("template rvalue"),
                     },
                     Stmt::MemCopy {
@@ -143,6 +219,7 @@ impl Template {
                     discr: SwitchDiscr::Scalar(a),
                     ..
                 } => bind(a),
+                Terminator::Call { args, .. } => args.iter_mut().for_each(&bind),
                 Terminator::Goto(_) | Terminator::Return | Terminator::Unreachable => {}
                 _ => unreachable!("template terminator"),
             }
@@ -161,10 +238,11 @@ struct Exporter<'tcx> {
     temporary: Slot,
     dictionary: u32,
     bindings: Vec<Binding>,
+    calls: Vec<Ty<'tcx>>,
 }
 
 impl<'tcx> Exporter<'tcx> {
-    fn export(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Option<Template> {
+    fn export(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) -> Option<Export<'tcx>> {
         if tcx.data_layout.pointer_size().bytes() != 8 {
             return None;
         }
@@ -177,7 +255,13 @@ impl<'tcx> Exporter<'tcx> {
         for local in &mir.local_decls {
             if !matches!(
                 local.ty.kind(),
-                ty::Bool | ty::Char | ty::Int(_) | ty::Uint(_) | ty::RawPtr(..) | ty::Ref(..)
+                ty::Bool
+                    | ty::Char
+                    | ty::Int(_)
+                    | ty::Uint(_)
+                    | ty::RawPtr(..)
+                    | ty::Ref(..)
+                    | ty::Tuple(_)
             ) && !local.ty.is_unit()
             {
                 return None;
@@ -185,11 +269,12 @@ impl<'tcx> Exporter<'tcx> {
         }
         let env = TypingEnv::post_analysis(tcx, instance.def_id());
         let frame = frame::freeze(tcx, env, mir).ok()?;
-        if frame
-            .locals
-            .iter()
-            .any(|local| !matches!(local.kind, ValKind::Zst | ValKind::Scalar(_)))
-        {
+        if frame.locals.iter().any(|local| {
+            !matches!(
+                local.kind,
+                ValKind::Zst | ValKind::Scalar(_) | ValKind::Pair(..)
+            )
+        }) {
             return None;
         }
         let temporary = Slot {
@@ -204,6 +289,16 @@ impl<'tcx> Exporter<'tcx> {
                 off: frame.locals[0].off,
                 width,
             }),
+            ValKind::Pair((a, aw), (b, bw)) => RetAbi::Pair(
+                Slot {
+                    off: frame.locals[0].off + a,
+                    width: aw,
+                },
+                Slot {
+                    off: frame.locals[0].off + b,
+                    width: bw,
+                },
+            ),
             _ => return None,
         };
         let mut params = mir
@@ -216,7 +311,17 @@ impl<'tcx> Exporter<'tcx> {
                         off: info.off,
                         width,
                     }),
-                    _ => unreachable!("scalar template frame"),
+                    ValKind::Pair((a, aw), (b, bw)) => ParamAbi::Pair(
+                        Slot {
+                            off: info.off + a,
+                            width: aw,
+                        },
+                        Slot {
+                            off: info.off + b,
+                            width: bw,
+                        },
+                    ),
+                    _ => unreachable!("scalar/pair template frame"),
                 }
             })
             .collect::<Vec<_>>();
@@ -232,36 +337,90 @@ impl<'tcx> Exporter<'tcx> {
             temporary,
             dictionary,
             bindings: Vec::new(),
+            calls: Vec::new(),
         };
         let blocks = mir
             .basic_blocks
             .iter()
             .map(|block| cx.block(block))
             .collect::<Option<_>>()?;
-        Some(Template {
-            body: FuncBody {
-                frame_size,
-                frame_align: cx.frame.align.max(8),
-                ret,
-                params,
-                caller_loc_off: None,
-                blocks,
-                name: tcx.def_path_str(instance.def_id()).into(),
+        Some(Export {
+            template: Template {
+                body: FuncBody {
+                    frame_size,
+                    frame_align: cx.frame.align.max(8),
+                    ret,
+                    params,
+                    caller_loc_off: None,
+                    blocks,
+                    name: tcx.def_path_str(instance.def_id()).into(),
+                },
+                dictionary,
+                bindings: cx.bindings,
             },
-            dictionary,
-            bindings: cx.bindings,
+            calls: cx.calls,
         })
     }
 
-    fn slot(&self, place: mir::Place<'tcx>) -> Option<Slot> {
-        if !place.projection.is_empty() {
-            return None;
-        }
+    fn place(&self, place: mir::Place<'tcx>) -> Option<(PlaceExpr, Ty<'tcx>)> {
         let local = &self.frame.locals[place.local.as_usize()];
-        Some(Slot {
-            off: local.off,
-            width: local.kind.scalar()?,
-        })
+        let mut expr = PlaceExpr {
+            base: PlaceBase::Local(local.off),
+            steps: Box::new([]),
+        };
+        let mut ty = local.ty;
+        for projection in place.projection {
+            match projection {
+                mir::ProjectionElem::Deref => {
+                    ty = ty.builtin_deref(true)?;
+                    expr.steps = expr
+                        .steps
+                        .into_vec()
+                        .into_iter()
+                        .chain([PlaceStep::Deref])
+                        .collect();
+                }
+                mir::ProjectionElem::Field(field, field_ty) => {
+                    let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
+                    // Dynamic tails require an alignment binding as well as the field offset.
+                    if frame::layout_of(self.tcx, self.env, field_ty)
+                        .ok()?
+                        .is_unsized()
+                    {
+                        return None;
+                    }
+                    expr = offset(expr, layout.fields.offset(field.as_usize()).bytes())?;
+                    ty = field_ty;
+                }
+                _ => return None,
+            }
+        }
+        Some((expr, ty))
+    }
+
+    fn scalar_place(&self, place: mir::Place<'tcx>) -> Option<ScalarPlace> {
+        let (expr, ty) = self.place(place)?;
+        Some(scalar_place(expr, self.width(ty)?))
+    }
+
+    fn pair(&self, place: mir::Place<'tcx>) -> Option<(ScalarPlace, ScalarPlace)> {
+        let (expr, ty) = self.place(place)?;
+        let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
+        let ValKind::Pair((a, aw), (b, bw)) = frame::classify(self.tcx, &layout) else {
+            return None;
+        };
+        Some((
+            scalar_place(offset(expr.clone(), u64::from(a))?, aw),
+            scalar_place(offset(expr, u64::from(b))?, bw),
+        ))
+    }
+
+    fn pair_operand(&self, operand: &mir::Operand<'tcx>) -> Option<(Operand, Operand)> {
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand else {
+            return None;
+        };
+        let (a, b) = self.pair(*place)?;
+        Some((read(a), read(b)))
     }
 
     fn width(&self, ty: Ty<'tcx>) -> Option<Width> {
@@ -303,7 +462,7 @@ impl<'tcx> Exporter<'tcx> {
     fn operand(&mut self, operand: &mir::Operand<'tcx>) -> Option<Operand> {
         match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                Some(Operand::Slot(self.slot(*place)?))
+                Some(read(self.scalar_place(*place)?))
             }
             mir::Operand::Constant(c) => {
                 let width = self.width(c.const_.ty())?;
@@ -325,6 +484,11 @@ impl<'tcx> Exporter<'tcx> {
     fn rvalue(&mut self, rv: &mir::Rvalue<'tcx>) -> Option<Rvalue> {
         Some(match rv {
             mir::Rvalue::Use(a, _) => Rvalue::Use(self.operand(a)?),
+            mir::Rvalue::UnaryOp(mir::UnOp::PtrMetadata, a) => Rvalue::Use(self.pair_operand(a)?.1),
+            mir::Rvalue::Ref(_, _, place) | mir::Rvalue::RawPtr(_, place) => {
+                // A fat reference also needs metadata; the scalar destination check excludes it.
+                Rvalue::Ref(self.place(*place)?.0)
+            }
             mir::Rvalue::Cast(kind, a, to) => {
                 let from = a.ty(&self.mir.local_decls, self.tcx);
                 match kind {
@@ -333,9 +497,10 @@ impl<'tcx> Exporter<'tcx> {
                         to: self.width(*to)?,
                         a: self.operand(a)?,
                     },
-                    mir::CastKind::PtrToPtr if self.width(from)? == self.width(*to)? => {
-                        Rvalue::Use(self.operand(a)?)
-                    }
+                    mir::CastKind::PtrToPtr if self.width(*to)? == Width::W64 => Rvalue::Use(
+                        self.operand(a)
+                            .or_else(|| self.pair_operand(a).map(|v| v.0))?,
+                    ),
                     _ => return None,
                 }
             }
@@ -393,14 +558,47 @@ impl<'tcx> Exporter<'tcx> {
         })
     }
 
+    fn assign(&mut self, place: mir::Place<'tcx>, rv: &mir::Rvalue<'tcx>) -> Option<Vec<Stmt>> {
+        let (_, ty) = self.place(place)?;
+        let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
+        let value = |dst, a| Stmt::Assign {
+            dst,
+            rv: Rvalue::Use(a),
+        };
+        match frame::classify(self.tcx, &layout) {
+            ValKind::Zst => match rv {
+                mir::Rvalue::Use(_, _) | mir::Rvalue::Aggregate(_, _) => Some(Vec::new()),
+                _ => None,
+            },
+            ValKind::Scalar(_) => Some(vec![Stmt::Assign {
+                dst: self.scalar_place(place)?,
+                rv: self.rvalue(rv)?,
+            }]),
+            ValKind::Pair(..) => {
+                let (a, b) = self.pair(place)?;
+                let (lo, hi) = match rv {
+                    mir::Rvalue::Use(op, _) => self.pair_operand(op)?,
+                    mir::Rvalue::Aggregate(box mir::AggregateKind::RawPtr(..), ops)
+                        if ops.len() == 2 =>
+                    {
+                        let mut ops = ops.iter();
+                        (self.operand(ops.next()?)?, self.operand(ops.next()?)?)
+                    }
+                    _ => return None,
+                };
+                Some(vec![value(a, lo), value(b, hi)])
+            }
+            _ => None,
+        }
+    }
+
     fn block(&mut self, block: &mir::BasicBlockData<'tcx>) -> Option<Block> {
         let mut stmts = Vec::new();
         for stmt in &block.statements {
             match &stmt.kind {
-                mir::StatementKind::Assign(box (place, rv)) => stmts.push(Stmt::Assign {
-                    dst: ScalarPlace::Slot(self.slot(*place)?),
-                    rv: self.rvalue(rv)?,
-                }),
+                mir::StatementKind::Assign(box (place, rv)) => {
+                    stmts.extend(self.assign(*place, rv)?)
+                }
                 mir::StatementKind::Intrinsic(
                     box mir::NonDivergingIntrinsic::CopyNonOverlapping(copy),
                 ) => {
@@ -441,13 +639,69 @@ impl<'tcx> Exporter<'tcx> {
                 args,
                 destination,
                 target: Some(target),
+                unwind,
                 ..
             } => {
-                let ty::FnDef(def, _) = *func.ty(&self.mir.local_decls, self.tcx).kind() else {
+                let fn_ty = func.ty(&self.mir.local_decls, self.tcx);
+                let ty::FnDef(def, _) = *fn_ty.kind() else {
                     return None;
                 };
-                let intrinsic = self.tcx.intrinsic(def)?;
-                if intrinsic.name.as_str() != "arith_offset" || args.len() != 2 {
+                if !self
+                    .tcx
+                    .intrinsic(def)
+                    .is_some_and(|i| i.name.as_str() == "arith_offset")
+                {
+                    if fn_ty.fn_sig(self.tcx).skip_binder().abi() == rustc_abi::ExternAbi::RustCall
+                    {
+                        return None;
+                    }
+                    let mut arguments = Vec::new();
+                    for arg in args {
+                        let ty = arg.node.ty(&self.mir.local_decls, self.tcx);
+                        let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
+                        match frame::classify(self.tcx, &layout) {
+                            ValKind::Zst => {}
+                            ValKind::Scalar(_) => arguments.push(self.operand(&arg.node)?),
+                            ValKind::Pair(..) => {
+                                let (a, b) = self.pair_operand(&arg.node)?;
+                                arguments.extend([a, b]);
+                            }
+                            _ => return None,
+                        }
+                    }
+                    let (_, ty) = self.place(*destination)?;
+                    let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
+                    let ret = match frame::classify(self.tcx, &layout) {
+                        ValKind::Zst => RetDest::Ignore,
+                        ValKind::Scalar(_) => RetDest::Scalar(self.scalar_place(*destination)?),
+                        ValKind::Pair(..) => {
+                            let (a, b) = self.pair(*destination)?;
+                            RetDest::Pair(a, b)
+                        }
+                        _ => return None,
+                    };
+                    let unwind = match unwind {
+                        mir::UnwindAction::Continue | mir::UnwindAction::Unreachable => {
+                            UnwindAction::Continue
+                        }
+                        mir::UnwindAction::Terminate(_) => UnwindAction::Terminate,
+                        mir::UnwindAction::Cleanup(_) => return None,
+                    };
+                    let callee = u32::try_from(self.calls.len()).ok()?;
+                    self.calls.push(fn_ty);
+                    return Some(Block {
+                        stmts,
+                        term: Terminator::Call {
+                            callee,
+                            args: arguments,
+                            ret,
+                            target: target.as_u32(),
+                            unwind,
+                            role: CallRole::Normal,
+                        },
+                    });
+                }
+                if args.len() != 2 {
                     return None;
                 }
                 let ty::RawPtr(pointee, _) =
@@ -457,7 +711,7 @@ impl<'tcx> Exporter<'tcx> {
                 };
                 stmts.push(self.scale(&args[1].node, pointee)?);
                 stmts.push(Stmt::Assign {
-                    dst: ScalarPlace::Slot(self.slot(*destination)?),
+                    dst: self.scalar_place(*destination)?,
                     rv: Rvalue::IntBin {
                         op: IntBinOp::Add,
                         signed: false,
@@ -470,5 +724,32 @@ impl<'tcx> Exporter<'tcx> {
             _ => return None,
         };
         Some(Block { stmts, term })
+    }
+}
+
+fn offset(mut expr: PlaceExpr, offset: u64) -> Option<PlaceExpr> {
+    if let PlaceBase::Local(off) = &mut expr.base
+        && expr.steps.is_empty()
+    {
+        *off = off.checked_add(u32::try_from(offset).ok()?)?;
+    } else if offset != 0 {
+        let mut steps = expr.steps.into_vec();
+        steps.push(PlaceStep::Offset(i32::try_from(offset).ok()?));
+        expr.steps = steps.into();
+    }
+    Some(expr)
+}
+
+fn scalar_place(expr: PlaceExpr, width: Width) -> ScalarPlace {
+    match expr.base {
+        PlaceBase::Local(off) if expr.steps.is_empty() => ScalarPlace::Slot(Slot { off, width }),
+        _ => ScalarPlace::Mem { expr, width },
+    }
+}
+
+fn read(place: ScalarPlace) -> Operand {
+    match place {
+        ScalarPlace::Slot(slot) => Operand::Slot(slot),
+        ScalarPlace::Mem { expr, width } => Operand::Mem { expr, width },
     }
 }
