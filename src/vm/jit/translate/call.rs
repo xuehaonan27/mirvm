@@ -234,16 +234,11 @@ impl Translator<'_, '_> {
     pub(super) fn write_ret(&mut self, ret: &RetDest, lo: Value, hi: Value) {
         match ret {
             RetDest::Ignore | RetDest::Indirect(_) => {}
-            RetDest::Scalar(ScalarPlace::Slot(s)) => {
-                let s = *s;
-                self.def_slot(s, lo);
+            RetDest::Scalar(place) => self.write_scalar_place(place, lo),
+            RetDest::Pair(a, b) => {
+                self.write_scalar_place(a, lo);
+                self.write_scalar_place(b, hi);
             }
-            RetDest::Pair(ScalarPlace::Slot(pl), ScalarPlace::Slot(ph)) => {
-                let (pl, ph) = (*pl, *ph);
-                self.def_slot(pl, lo);
-                self.def_slot(ph, hi);
-            }
-            _ => unreachable!("admit screens the ret shapes"),
         }
     }
 }

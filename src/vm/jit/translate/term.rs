@@ -69,22 +69,6 @@ impl Translator<'_, '_> {
                 for a in args {
                     av.push(self.operand(a).0);
                 }
-                // Write-back template, the same shape for PLT results and the c2i ret_ss.
-                macro_rules! write_back {
-                    ($lo:expr, $hi:expr) => {
-                        match ret {
-                            RetDest::Ignore | RetDest::Indirect(_) => {}
-                            RetDest::Scalar(ScalarPlace::Slot(s)) => {
-                                self.def_slot(*s, $lo);
-                            }
-                            RetDest::Pair(ScalarPlace::Slot(pl), ScalarPlace::Slot(ph)) => {
-                                self.def_slot(*pl, $lo);
-                                self.def_slot(*ph, $hi);
-                            }
-                            _ => unreachable!("admit screens the ret shapes"),
-                        }
-                    };
-                }
                 match unwind {
                     UnwindAction::Cleanup(bb) => {
                         // try_call: `normal` is the ok block (write back, then jump to target) and
@@ -118,7 +102,7 @@ impl Translator<'_, '_> {
                         self.enter_cleanup_continuation(pad, *bb, ok, blocks);
                         let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                         let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
-                        write_back!(lo, hi);
+                        self.write_ret(ret, lo, hi);
                         self.b.ins().jump(blocks[*target as usize], &[]);
                     }
                     UnwindAction::Terminate => {
@@ -147,7 +131,7 @@ impl Translator<'_, '_> {
                         self.b.ins().call(fref, &[fv, ap, nv, rp]);
                         let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                         let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
-                        write_back!(lo, hi);
+                        self.write_ret(ret, lo, hi);
                         self.b.ins().jump(blocks[*target as usize], &[]);
                     }
                     UnwindAction::Continue => {
@@ -175,7 +159,7 @@ impl Translator<'_, '_> {
                             self.b.ins().call(fref, &[fv, ap, nv, rp]);
                             let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                             let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
-                            write_back!(lo, hi);
+                            self.write_ret(ret, lo, hi);
                         } else {
                             let cb = self.shared.module.funcs.header(*callee as usize).unwrap();
                             let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
@@ -239,7 +223,7 @@ impl Translator<'_, '_> {
                                 } else {
                                     self.b.ins().iconst(types::I64, 0)
                                 };
-                                write_back!(lo, hi);
+                                self.write_ret(ret, lo, hi);
                             } else {
                                 // Cold path: call c2i directly from the call site, packing the
                                 // flattened arguments back to the interpreter. The interpreter
@@ -266,7 +250,7 @@ impl Translator<'_, '_> {
                                 self.b.ins().call(fref, &[fv, ap, nv, rp]);
                                 let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                                 let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
-                                write_back!(lo, hi);
+                                self.write_ret(ret, lo, hi);
                             }
                         }
                         self.b.ins().jump(blocks[*target as usize], &[]);

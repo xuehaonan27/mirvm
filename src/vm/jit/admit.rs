@@ -290,13 +290,12 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     unwind,
                     UnwindAction::Continue | UnwindAction::Cleanup(_) | UnwindAction::Terminate
                 ) && args.iter().all(operand_ok)
-                    && matches!(
-                        ret,
-                        RetDest::Ignore
-                            | RetDest::Scalar(ScalarPlace::Slot(_))
-                            | RetDest::Pair(ScalarPlace::Slot(_), ScalarPlace::Slot(_))
-                            | RetDest::Indirect(_)
-                    )
+                    && match ret {
+                        RetDest::Ignore => true,
+                        RetDest::Scalar(place) => mem_place_ok(place),
+                        RetDest::Pair(a, b) => mem_place_ok(a) && mem_place_ok(b),
+                        RetDest::Indirect(place) => place_ok(place),
+                    }
                     && (*callee as usize) < shared.module.funcs.len()
             }
             // CallIndirect (mirvm_call_indirect helper, same dispatch as the interpreter arm): all three
