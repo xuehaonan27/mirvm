@@ -15,33 +15,44 @@ Export owned templates and bindings; release the compiler session before Engine 
 instances share instructions, while profitable hot instances obtain concrete bytecode for the
 existing JIT. Unsupported functions retain ordinary eager lowering in the product integration.
 
-The production lowerer admits fixed scalar/pair frames, slice metadata and pair moves, fixed-layout
-field projections, checked slice/array indexing, slice patterns, scalar const parameters, integer
-operations and opaque-pointee offset/copy loops under `MIRVM_GENERIC_TEMPLATES=1` (unset disables it). Direct calls bind concrete guest functions,
-including resolved trait methods and Clone/Drop shims, through the existing linker worklist. One compiler
-session caches both eligible templates and rejected definitions. Only ordinary Item instances are
-eligible; the session's definition identity and semantic profile fix the cache key. Binding resolves
-type sizes, const values and callee identities without instantiating a whole concrete MIR body.
-Layout recipes include compound pointees such as `[T; N]`; they bind sizes independently of the
-fixed execution frame. Compiler-owned layout/call recipes remain separate from the owned template
-and resolve completely before
-the linker allocates any FuncId. Equal-layout types can therefore bind different witnesses. Unsupported
-frames/projections, indirect or foreign calls, cleanup and general caller-location ABIs retain eager lowering.
+The production lowerer admits scalar/pair frames, opaque by-value locals, slice metadata and pair
+moves, fixed-layout field projections, checked slice/array indexing, slice patterns, scalar const
+parameters, integer operations and opaque-pointee offset/copy loops under
+`MIRVM_GENERIC_TEMPLATES=1` (unset disables it). Direct calls bind concrete guest functions,
+including resolved trait methods and Clone/Drop shims, through the existing linker worklist. One
+compiler session caches both eligible templates and rejected definitions. Only ordinary Item
+instances are eligible; the session's definition identity and semantic profile fix the cache key.
+Binding resolves layouts, const values and callee identities without instantiating a whole concrete
+MIR body. Layout recipes include compound types such as `[T; N]`. Compiler-owned layout/call recipes
+remain separate from the owned template and resolve completely before the linker allocates any
+FuncId. Equal-layout types can therefore bind different witnesses.
+
+An opaque local occupies a fixed pointer slot in the template. Binding appends its sized, aligned
+storage to the concrete frame with checked offset arithmetic, then initializes the pointer to that
+storage. Moves use byte copies that permit overlap. The parameter and return headers use the concrete
+value's ZST, scalar, pair or indirect ABI; opaque call operands and destinations bind through the
+same classification. Opaque storage adds no per-value heap allocation or compiler query at guest
+entry. Cleanup, Resume and terminate edges retain MIR's control flow, including partial initialization when Clone unwinds.
+This concrete frame contract is fixed before any interpreter/JIT caller queries its header.
+Unsupported projections, aggregate construction, indirect or foreign calls and general
+caller-location ABIs retain eager lowering.
+
 Bounds assertions branch to the guest panic lang item with the original source location and unwind
 action. Index strides read type-size bindings through ordinary IR; address temporaries remain live
 through every operand of a statement or terminator and are reused only after it completes. Slice
 patterns preserve metadata while selecting from the front, from the end or a subslice. Collection
-still performs required instance validation before export. The owned template carries ordinary IR dictionary reads
-and a positional schema; immediate specialization removes that hidden argument before the existing
-verifier, archive and runtime see the body. This stage neither persists templates nor shares runtime
-instructions. Its flag changes lowering strategy, not artifact semantics; an existing concrete image
-can satisfy either setting without entering the exporter.
+still performs required instance validation before export. The owned template carries ordinary IR
+dictionary reads and a positional schema; immediate specialization removes that hidden argument and
+binds frame/call adapters before the existing verifier, archive and runtime see the body. This stage
+neither persists templates nor shares runtime instructions. Its flag changes lowering strategy, not
+artifact semantics; an existing concrete image can satisfy either setting without entering the
+exporter.
 
 The execution prototype supports this architecture, not a whole-program speedup claim. Its real
 MIR exporter handles an opaque-pointee copy loop, and its witness/unwind experiments use native
-Rust callbacks. Arbitrary trait calls, layout-dependent locals, guest exceptions and persistent
-generic images remain integration gates. Production rollout must be measured on the existing
-serde, flate and generic-matrix workloads with prepared dependencies and std.
+Rust callbacks. General trait/caller-location ABIs and persistent generic images remain integration
+gates. Production rollout must be measured on the existing serde, flate and generic-matrix workloads
+with prepared dependencies and std.
 
 ## 2. Owned records
 
@@ -122,8 +133,8 @@ are separate policy acceptance cases. Initial thresholds are an experiment, not 
 
 The next changes are ordered so that each produces a usable, reviewable boundary:
 
-1. **Production template export and binding.** Extend layout-dependent locals/projections and Clone/Drop
-   results requiring dynamic frames, plus remaining range APIs and array-subslice projections. Keep
+1. **Production template export and binding.** Extend layout-dependent field projections and aggregate
+   construction, plus remaining range APIs and array-subslice projections. Keep
    eager fallback and compile-time diagnostic parity, including an unentered invalid instance.
    Acceptance: one template serves multiple actual Rust types; exported runtime state owns no
    compiler references; all unsupported shapes execute through the current lowerer.

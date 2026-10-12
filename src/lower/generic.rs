@@ -1,7 +1,11 @@
-//! Structural generic MIR export. Only layout-independent scalar/pair frames are admitted; every
-//! unsupported shape returns to the ordinary lowerer before any linker state has changed.
+//! Structural generic MIR export with opaque local storage and concrete ABI binding. Unsupported
+//! shapes return to the ordinary lowerer before any linker state has changed.
 
-use super::frame::{self, FrameLayout, ValKind};
+mod template;
+
+use template::{Binding, CallAbi, Layout, LocalBinding, Template, reserve};
+
+use super::frame::{self, ValKind};
 use super::linker::Linker;
 use crate::vm::ir::*;
 use rustc_data_structures::fx::FxHashMap;
@@ -57,19 +61,23 @@ impl<'tcx> Templates<'tcx> {
             })
             .as_ref()?;
         let template = &exported.template;
+        let layouts = exported
+            .layouts
+            .iter()
+            .map(|&ty| {
+                let ty = instance.instantiate_mir_and_normalize_erasing_regions(
+                    tcx,
+                    env,
+                    EarlyBinder::bind(tcx, ty),
+                );
+                fixed_layout(tcx, env, ty)
+            })
+            .collect::<Option<Vec<_>>>()?;
         let values = template
             .bindings
             .iter()
             .map(|binding| match *binding {
-                Binding::Size(index) => {
-                    let ty = instance.instantiate_mir_and_normalize_erasing_regions(
-                        tcx,
-                        env,
-                        EarlyBinder::bind(tcx, exported.layouts[index as usize]),
-                    );
-                    let layout = frame::layout_of(tcx, env, ty).ok()?;
-                    (!layout.is_unsized()).then(|| layout.size.bytes())
-                }
+                Binding::Size(index) => Some(u64::from(layouts[index as usize].size)),
                 Binding::Const(index, width) => {
                     let value = instance
                         .args
@@ -119,6 +127,7 @@ impl<'tcx> Templates<'tcx> {
                 Some((callee, call.location))
             })
             .collect::<Option<Vec<_>>>()?;
+        let body = template.specialize(&values, &layouts)?;
         if crate::diag::prints(crate::diag::Severity::Debug) {
             crate::diag_debug!(
                 Lower,
@@ -126,10 +135,7 @@ impl<'tcx> Templates<'tcx> {
                 tcx.symbol_name(instance).name
             );
         }
-        Some(Bound {
-            body: template.specialize(&values),
-            callees,
-        })
+        Some(Bound { body, callees })
     }
 }
 
@@ -182,89 +188,26 @@ impl<'tcx> Bound<'tcx> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Binding {
-    Size(u32),
-    Const(u32, Width),
-}
-
-/// Owned instructions and a positional binding schema; neither retains compiler data. Memory
-/// operands read the hidden immutable dictionary. Only specialization leaves this module today.
-struct Template {
-    body: FuncBody,
-    bindings: Vec<Binding>,
-    dictionary: u32,
-}
-
-impl Template {
-    fn specialize(&self, values: &[u64]) -> FuncBody {
-        assert_eq!(values.len(), self.bindings.len());
-        let mut body = self.body.clone();
-        let bind = |operand: &mut Operand| {
-            if let Operand::Mem { expr, width } = operand
-                && matches!(expr.base, PlaceBase::Local(off) if off == self.dictionary)
-            {
-                let [PlaceStep::Deref, PlaceStep::Offset(off)] = &*expr.steps else {
-                    unreachable!("template dictionary addressing")
-                };
-                *operand = Operand::Imm {
-                    bits: values[*off as usize / 8],
-                    width: *width,
-                };
-            }
-        };
-        for block in &mut body.blocks {
-            for stmt in &mut block.stmts {
-                match stmt {
-                    Stmt::Assign { rv, .. } => match rv {
-                        Rvalue::Use(a) | Rvalue::Cast { a, .. } => bind(a),
-                        Rvalue::IntBin { a, b, .. } | Rvalue::IntCmp { a, b, .. } => {
-                            bind(a);
-                            bind(b);
-                        }
-                        Rvalue::Ref(_) => {}
-                        _ => unreachable!("template rvalue"),
-                    },
-                    Stmt::MemCopy {
-                        src, dst, count, ..
-                    } => {
-                        bind(src);
-                        bind(dst);
-                        bind(count);
-                    }
-                    _ => unreachable!("template statement"),
-                }
-            }
-            match &mut block.term {
-                Terminator::SwitchInt {
-                    discr: SwitchDiscr::Scalar(a),
-                    ..
-                } => bind(a),
-                Terminator::Call { args, .. } => args.iter_mut().for_each(&bind),
-                Terminator::Goto(_) | Terminator::Return | Terminator::Unreachable => {}
-                _ => unreachable!("template terminator"),
-            }
-        }
-        body.params.pop();
-        // Address temporaries may follow the dictionary; reclaim its slot only at the frame tail.
-        if body.frame_size == self.dictionary + 8 {
-            body.frame_size = self.dictionary;
-        }
-        body
-    }
-}
-
 struct ProjectedPlace<'tcx> {
     expr: PlaceExpr,
     ty: Ty<'tcx>,
     meta: Option<Operand>,
 }
 
+struct Local<'tcx> {
+    off: u32,
+    ty: Ty<'tcx>,
+    kind: Option<ValKind>,
+}
+
 struct Exporter<'tcx> {
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
     mir: &'tcx mir::Body<'tcx>,
-    frame: FrameLayout<'tcx>,
+    locals: Vec<Local<'tcx>>,
+    frame_align: u32,
+    local_bindings: Vec<LocalBinding>,
+    call_abis: Vec<CallAbi>,
     temporary: Slot,
     dictionary: u32,
     bindings: Vec<Binding>,
@@ -282,84 +225,55 @@ impl<'tcx> Exporter<'tcx> {
             return None;
         }
         let mir = tcx.instance_mir(instance.def);
-        if mir.spread_arg.is_some() || mir.basic_blocks.iter().any(|b| b.is_cleanup) {
+        if mir.spread_arg.is_some() {
             return None;
-        }
-        // Restrict local types before querying layout: admitting a currently scalar generic ADT
-        // would confuse one concrete layout with a universally fixed frame.
-        for local in &mir.local_decls {
-            if !matches!(
-                local.ty.kind(),
-                ty::Bool
-                    | ty::Char
-                    | ty::Int(_)
-                    | ty::Uint(_)
-                    | ty::RawPtr(..)
-                    | ty::Ref(..)
-                    | ty::Tuple(_)
-            ) && !local.ty.is_unit()
-            {
-                return None;
-            }
         }
         let env = TypingEnv::post_analysis(tcx, instance.def_id());
-        let frame = frame::freeze(tcx, env, mir).ok()?;
-        if frame.locals.iter().any(|local| {
-            !matches!(
-                local.kind,
-                ValKind::Zst | ValKind::Scalar(_) | ValKind::Pair(..)
-            )
-        }) {
-            return None;
+        let mut size = 0;
+        let mut frame_align = 8;
+        let mut locals = Vec::new();
+        let mut layouts = Vec::new();
+        let mut local_bindings = Vec::new();
+        let mut ret = RetAbi::Zst;
+        let mut params = vec![ParamAbi::Zst; mir.arg_count];
+        for (index, decl) in mir.local_decls.iter().enumerate() {
+            let layout = fixed_layout(tcx, env, decl.ty);
+            let off;
+            if let Some(layout) = &layout {
+                off = reserve(&mut size, layout.size, layout.align)?;
+                frame_align = frame_align.max(layout.align);
+                if index == 0 {
+                    let sret = if matches!(layout.kind, ValKind::Other { .. }) {
+                        reserve(&mut size, 8, 8)?
+                    } else {
+                        0
+                    };
+                    ret = layout.ret(off, sret);
+                } else if index <= mir.arg_count {
+                    params[index - 1] = layout.param(off);
+                }
+            } else {
+                off = reserve(&mut size, 8, 8)?;
+                local_bindings.push(LocalBinding {
+                    local: index,
+                    pointer: Slot {
+                        off,
+                        width: Width::W64,
+                    },
+                    layout: layout_index(&mut layouts, decl.ty)?,
+                });
+            }
+            locals.push(Local {
+                off,
+                ty: decl.ty,
+                kind: layout.map(|l| l.kind),
+            });
         }
         let temporary = Slot {
-            off: frame.size.checked_add(7)? & !7,
+            off: reserve(&mut size, 8, 8)?,
             width: Width::W64,
         };
-        let dictionary = temporary.off.checked_add(8)?;
-        let frame_size = dictionary.checked_add(8)?;
-        let ret = match frame.locals[0].kind {
-            ValKind::Zst => RetAbi::Zst,
-            ValKind::Scalar(width) => RetAbi::Scalar(Slot {
-                off: frame.locals[0].off,
-                width,
-            }),
-            ValKind::Pair((a, aw), (b, bw)) => RetAbi::Pair(
-                Slot {
-                    off: frame.locals[0].off + a,
-                    width: aw,
-                },
-                Slot {
-                    off: frame.locals[0].off + b,
-                    width: bw,
-                },
-            ),
-            _ => return None,
-        };
-        let mut params = mir
-            .args_iter()
-            .map(|local| {
-                let info = &frame.locals[local.as_usize()];
-                match info.kind {
-                    ValKind::Zst => ParamAbi::Zst,
-                    ValKind::Scalar(width) => ParamAbi::Scalar(Slot {
-                        off: info.off,
-                        width,
-                    }),
-                    ValKind::Pair((a, aw), (b, bw)) => ParamAbi::Pair(
-                        Slot {
-                            off: info.off + a,
-                            width: aw,
-                        },
-                        Slot {
-                            off: info.off + b,
-                            width: bw,
-                        },
-                    ),
-                    _ => unreachable!("scalar/pair template frame"),
-                }
-            })
-            .collect::<Vec<_>>();
+        let dictionary = reserve(&mut size, 8, 8)?;
         params.push(ParamAbi::Scalar(Slot {
             off: dictionary,
             width: Width::W64,
@@ -368,15 +282,18 @@ impl<'tcx> Exporter<'tcx> {
             tcx,
             env,
             mir,
-            frame,
+            locals,
+            frame_align,
+            local_bindings,
+            call_abis: Vec::new(),
             temporary,
             dictionary,
             bindings: Vec::new(),
             calls: Vec::new(),
-            layouts: Vec::new(),
+            layouts,
             pending: Vec::new(),
-            next_scratch: frame_size,
-            frame_size,
+            next_scratch: size,
+            frame_size: size,
             extra_blocks: Vec::new(),
         };
         let mut blocks: Vec<_> = mir
@@ -389,7 +306,7 @@ impl<'tcx> Exporter<'tcx> {
             template: Template {
                 body: FuncBody {
                     frame_size: cx.frame_size,
-                    frame_align: cx.frame.align.max(8),
+                    frame_align: cx.frame_align,
                     ret,
                     params,
                     caller_loc_off: None,
@@ -398,6 +315,8 @@ impl<'tcx> Exporter<'tcx> {
                 },
                 dictionary,
                 bindings: cx.bindings,
+                locals: cx.local_bindings,
+                calls: cx.call_abis,
             },
             calls: cx.calls,
             layouts: cx.layouts,
@@ -405,10 +324,14 @@ impl<'tcx> Exporter<'tcx> {
     }
 
     fn place(&mut self, place: mir::Place<'tcx>) -> Option<ProjectedPlace<'tcx>> {
-        let local = &self.frame.locals[place.local.as_usize()];
+        let local = &self.locals[place.local.as_usize()];
         let mut expr = PlaceExpr {
             base: PlaceBase::Local(local.off),
-            steps: Box::new([]),
+            steps: if local.kind.is_none() {
+                vec![PlaceStep::Deref].into()
+            } else {
+                Box::new([])
+            },
         };
         let mut ty = local.ty;
         let mut meta = None;
@@ -454,10 +377,10 @@ impl<'tcx> Exporter<'tcx> {
                     let (ty::Slice(elem) | ty::Array(elem, _)) = *ty.kind() else {
                         return None;
                     };
-                    let info = &self.frame.locals[index.as_usize()];
+                    let info = &self.locals[index.as_usize()];
                     let idx = Slot {
                         off: info.off,
-                        width: info.kind.scalar()?,
+                        width: info.kind?.scalar()?,
                     };
                     expr = self.index(expr, Operand::Slot(idx), elem)?;
                     ty = elem;
@@ -651,14 +574,22 @@ impl<'tcx> Exporter<'tcx> {
                 width: Width::W64,
             });
         }
-        let index = match self.layouts.iter().position(|&layout_ty| layout_ty == ty) {
-            Some(index) => index,
-            None => {
-                self.layouts.push(ty);
-                self.layouts.len() - 1
-            }
+        let index = layout_index(&mut self.layouts, ty)?;
+        self.binding(Binding::Size(index), Width::W64)
+    }
+
+    fn call(&mut self, call: Call<'tcx>, abi: CallAbi) -> Option<u32> {
+        let index = u32::try_from(self.calls.len()).ok()?;
+        self.calls.push(call);
+        self.call_abis.push(abi);
+        Some(index)
+    }
+
+    fn operand_place(&mut self, operand: &mir::Operand<'tcx>) -> Option<ProjectedPlace<'tcx>> {
+        let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand else {
+            return None;
         };
-        self.binding(Binding::Size(u32::try_from(index).ok()?), Width::W64)
+        self.place(*place)
     }
 
     fn operand(&mut self, operand: &mir::Operand<'tcx>) -> Option<Operand> {
@@ -762,12 +693,27 @@ impl<'tcx> Exporter<'tcx> {
 
     fn assign(&mut self, place: mir::Place<'tcx>, rv: &mir::Rvalue<'tcx>) -> Option<Vec<Stmt>> {
         let ty = place.ty(&self.mir.local_decls, self.tcx).ty;
-        let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
+        let layout = fixed_layout(self.tcx, self.env, ty);
+        if layout
+            .as_ref()
+            .is_none_or(|l| matches!(l.kind, ValKind::Other { .. }))
+        {
+            let mir::Rvalue::Use(op, _) = rv else {
+                return None;
+            };
+            return Some(vec![Stmt::MemCopy {
+                dst: Operand::AddrOf(self.place(place)?.expr),
+                src: Operand::AddrOf(self.operand_place(op)?.expr),
+                count: self.size(ty)?,
+                elem_size: 1,
+                overlap: true,
+            }]);
+        }
         let value = |dst, a| Stmt::Assign {
             dst,
             rv: Rvalue::Use(a),
         };
-        match frame::classify(self.tcx, &layout) {
+        match layout?.kind {
             ValKind::Zst => match rv {
                 mir::Rvalue::Use(_, _) | mir::Rvalue::Aggregate(_, _) => Some(Vec::new()),
                 _ => None,
@@ -840,6 +786,38 @@ impl<'tcx> Exporter<'tcx> {
             mir::TerminatorKind::Goto { target } => Terminator::Goto(target.as_u32()),
             mir::TerminatorKind::Return => Terminator::Return,
             mir::TerminatorKind::Unreachable => Terminator::Unreachable,
+            mir::TerminatorKind::UnwindResume => Terminator::Resume,
+            mir::TerminatorKind::UnwindTerminate(_) => Terminator::TerminateAbort,
+            mir::TerminatorKind::Drop {
+                place,
+                target,
+                unwind,
+                ..
+            } => {
+                let place = self.place(*place)?;
+                if !place.ty.is_sized(self.tcx, self.env) {
+                    return None;
+                }
+                let def = self.tcx.require_lang_item(
+                    rustc_hir::LangItem::DropGlue,
+                    block.terminator().source_info.span,
+                );
+                let callee = self.call(
+                    Call {
+                        ty: Ty::new_fn_def(self.tcx, def, [place.ty]),
+                        location: None,
+                    },
+                    CallAbi::default(),
+                )?;
+                Terminator::Call {
+                    callee,
+                    args: vec![Operand::AddrOf(place.expr)],
+                    ret: RetDest::Ignore,
+                    target: target.as_u32(),
+                    unwind: unwind_action(*unwind),
+                    role: CallRole::Normal,
+                }
+            }
             mir::TerminatorKind::SwitchInt { discr, targets } => Terminator::SwitchInt {
                 discr: SwitchDiscr::Scalar(self.operand(discr)?),
                 targets: targets
@@ -862,13 +840,15 @@ impl<'tcx> Exporter<'tcx> {
                 let def = self
                     .tcx
                     .require_lang_item(rustc_hir::LangItem::PanicBoundsCheck, span);
-                let callee = u32::try_from(self.calls.len()).ok()?;
                 let args = vec![self.operand(index)?, self.operand(len)?];
-                let unwind = unwind_action(*unwind)?;
-                self.calls.push(Call {
-                    ty: Ty::new_fn_def(self.tcx, def, ty::GenericArgs::empty()),
-                    location: Some(span),
-                });
+                let unwind = unwind_action(*unwind);
+                let callee = self.call(
+                    Call {
+                        ty: Ty::new_fn_def(self.tcx, def, ty::GenericArgs::empty()),
+                        location: Some(span),
+                    },
+                    CallAbi::default(),
+                )?;
                 let unreach =
                     u32::try_from(self.mir.basic_blocks.len() + self.extra_blocks.len()).ok()?;
                 let panic = unreach.checked_add(1)?;
@@ -915,36 +895,53 @@ impl<'tcx> Exporter<'tcx> {
                         return None;
                     }
                     let mut arguments = Vec::new();
+                    let mut abi = CallAbi::default();
                     for arg in args {
                         let ty = arg.node.ty(&self.mir.local_decls, self.tcx);
-                        let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
-                        match frame::classify(self.tcx, &layout) {
-                            ValKind::Zst => {}
-                            ValKind::Scalar(_) => arguments.push(self.operand(&arg.node)?),
-                            ValKind::Pair(..) => {
+                        match fixed_layout(self.tcx, self.env, ty).map(|l| l.kind) {
+                            Some(ValKind::Zst) => {}
+                            Some(ValKind::Scalar(_)) => arguments.push(self.operand(&arg.node)?),
+                            Some(ValKind::Pair(..)) => {
                                 let (a, b) = self.pair_operand(&arg.node)?;
                                 arguments.extend([a, b]);
                             }
-                            _ => return None,
+                            kind => {
+                                if kind.is_none() {
+                                    abi.args.push((
+                                        arguments.len(),
+                                        layout_index(&mut self.layouts, ty)?,
+                                    ));
+                                }
+                                arguments
+                                    .push(Operand::AddrOf(self.operand_place(&arg.node)?.expr));
+                            }
                         }
                     }
                     let ty = destination.ty(&self.mir.local_decls, self.tcx).ty;
-                    let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
-                    let ret = match frame::classify(self.tcx, &layout) {
-                        ValKind::Zst => RetDest::Ignore,
-                        ValKind::Scalar(_) => RetDest::Scalar(self.scalar_place(*destination)?),
-                        ValKind::Pair(..) => {
+                    let ret = match fixed_layout(self.tcx, self.env, ty).map(|l| l.kind) {
+                        Some(ValKind::Zst) => RetDest::Ignore,
+                        Some(ValKind::Scalar(_)) => {
+                            RetDest::Scalar(self.scalar_place(*destination)?)
+                        }
+                        Some(ValKind::Pair(..)) => {
                             let (a, b) = self.pair(*destination)?;
                             RetDest::Pair(a, b)
                         }
-                        _ => return None,
+                        kind => {
+                            if kind.is_none() {
+                                abi.ret = Some(layout_index(&mut self.layouts, ty)?);
+                            }
+                            RetDest::Indirect(self.place(*destination)?.expr)
+                        }
                     };
-                    let unwind = unwind_action(*unwind)?;
-                    let callee = u32::try_from(self.calls.len()).ok()?;
-                    self.calls.push(Call {
-                        ty: fn_ty,
-                        location: None,
-                    });
+                    let unwind = unwind_action(*unwind);
+                    let callee = self.call(
+                        Call {
+                            ty: fn_ty,
+                            location: None,
+                        },
+                        abi,
+                    )?;
                     stmts.append(&mut self.pending);
                     return Some(Block {
                         stmts,
@@ -986,12 +983,35 @@ impl<'tcx> Exporter<'tcx> {
     }
 }
 
-fn unwind_action(unwind: mir::UnwindAction) -> Option<UnwindAction> {
-    Some(match unwind {
+fn unwind_action(unwind: mir::UnwindAction) -> UnwindAction {
+    match unwind {
         mir::UnwindAction::Continue | mir::UnwindAction::Unreachable => UnwindAction::Continue,
         mir::UnwindAction::Terminate(_) => UnwindAction::Terminate,
-        mir::UnwindAction::Cleanup(_) => return None,
+        mir::UnwindAction::Cleanup(block) => UnwindAction::Cleanup(block.as_u32()),
+    }
+}
+
+fn fixed_layout<'tcx>(tcx: TyCtxt<'tcx>, env: TypingEnv<'tcx>, ty: Ty<'tcx>) -> Option<Layout> {
+    let layout = tcx.layout_of(env.as_query_input(ty)).ok()?;
+    if layout.is_unsized() {
+        return None;
+    }
+    Some(Layout {
+        size: u32::try_from(layout.size.bytes()).ok()?,
+        align: u32::try_from(layout.align.abi.bytes()).ok()?,
+        kind: frame::classify(tcx, &layout),
     })
+}
+
+fn layout_index<'tcx>(layouts: &mut Vec<Ty<'tcx>>, ty: Ty<'tcx>) -> Option<u32> {
+    let index = match layouts.iter().position(|&layout| layout == ty) {
+        Some(index) => index,
+        None => {
+            layouts.push(ty);
+            layouts.len() - 1
+        }
+    };
+    u32::try_from(index).ok()
 }
 
 fn offset(mut expr: PlaceExpr, offset: u64) -> Option<PlaceExpr> {

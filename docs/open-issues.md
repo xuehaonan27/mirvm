@@ -33,6 +33,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Open defects
 
+- **E54** `OPEN`: distinguish a JIT admission refusal from a pending compilation in synchronous
+  mode. The compiler worker returns without publishing a result for an unsupported body, while
+  dispatch waits for a nonzero slot and eventually reports a dead-worker/queue timeout. Publish an
+  explicit interpreted-only outcome and preserve it independently in plain and trace domains;
+  cover an intentionally unsupported body at threshold 1 without a long wait.
+
 - **E53** `OPEN`: lower constant by-value aggregate arguments into addressable storage for C1.
   `ffi_agg_probe` stops at its constant `S2` argument with `C1 by-value aggregate arg is not a place
   (const expansion not wired)`; forcing synchronous JIT at threshold 1 rejects compilation of its
@@ -248,8 +254,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a
     generic semantic IR, dedicated frontend or source interpreter. Evaluate
     [runtime generics](designs/runtime-generics-design.md#5-integration-roadmap-and-gates) through
-    the selected engineering roadmap: expand template export/binding to layout-dependent locals/projections,
-    by-value Clone/Drop and remaining range/array-subslice paths;
+    the selected engineering roadmap: expand template export/binding to layout-dependent field projections,
+    aggregate construction and remaining range/array-subslice paths;
     measure actual admitted instances and rejected-definition probe costs. Then integrate
     per-Engine entries with pinned activations, reusable generic archives, then measured tier
     policy and coverage expansion. Replace the experiment's serial global publication hook;

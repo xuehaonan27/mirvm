@@ -59,6 +59,132 @@ fn clone_and_unwind<T: Clone>(value: T) {
 }
 
 #[inline(never)]
+fn owned_identity<T>(_: u8, value: T, _: u16) -> T {
+    value
+}
+
+#[inline(never)]
+fn owned_forward<T>(value: T) -> T {
+    owned_identity(7, value, 513)
+}
+
+#[inline(never)]
+fn owned_pick<T>(first: T, choose_first: bool, second: T) -> T {
+    if choose_first { first } else { second }
+}
+
+#[inline(never)]
+fn owned_select<T>(first: T, second: T, choose_first: bool) -> T {
+    owned_pick(first, choose_first, second)
+}
+
+#[inline(never)]
+fn owned_clone<T: Clone>(value: T) -> T {
+    let copy = value.clone();
+    drop(value);
+    copy
+}
+
+#[inline(never)]
+fn owned_observe<T: Clone + Action>(value: T) -> u64 {
+    let copy = value.clone();
+    copy.act()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[repr(align(128))]
+struct AlignedValue([u8; 73]);
+
+fn check_owned<T: Clone + PartialEq + std::fmt::Debug>(value: T) {
+    let cloned = owned_clone(value.clone());
+    assert_eq!(cloned, value);
+    assert_eq!(owned_forward(cloned), value);
+    assert_eq!(owned_select(value.clone(), value.clone(), true), value);
+    assert_eq!(owned_select(value.clone(), value.clone(), false), value);
+    println!("owned {} {}", size_of::<T>(), align_of::<T>());
+}
+
+static DROP_ORDER: AtomicUsize = AtomicUsize::new(0);
+
+struct Life {
+    id: u64,
+    stage: u64,
+}
+
+impl Clone for Life {
+    fn clone(&self) -> Self {
+        if self.stage == 1 {
+            panic!("clone failed");
+        }
+        Self { id: self.id + 1, stage: self.stage }
+    }
+}
+impl Action for Life {
+    fn act(&self) -> u64 {
+        if self.stage == 2 {
+            panic!("observe failed");
+        }
+        self.id
+    }
+}
+impl Drop for Life {
+    fn drop(&mut self) {
+        DROP_ORDER.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |order| {
+            Some(order * 10 + self.id as usize)
+        }).unwrap();
+        if self.stage == 3 && self.id == 1 {
+            panic!("original drop failed");
+        }
+    }
+}
+
+#[derive(Clone)]
+#[repr(align(128))]
+struct DropZst;
+impl Action for DropZst {
+    fn act(&self) -> u64 {
+        assert_eq!(self as *const Self as usize % align_of::<Self>(), 0);
+        97
+    }
+}
+impl Drop for DropZst {
+    fn drop(&mut self) {
+        assert_eq!(self as *const Self as usize % align_of::<Self>(), 0);
+        DROP_ORDER.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn check_owned_cleanup() {
+    DROP_ORDER.store(0, Ordering::SeqCst);
+    assert_eq!(owned_observe(Life { id: 1, stage: 0 }), 2);
+    assert_eq!(DROP_ORDER.load(Ordering::SeqCst), 21);
+    for (stage, expected) in [(1, 1), (2, 21)] {
+        DROP_ORDER.store(0, Ordering::SeqCst);
+        assert!(std::panic::catch_unwind(|| owned_observe(Life { id: 1, stage })).is_err());
+        assert_eq!(DROP_ORDER.load(Ordering::SeqCst), expected);
+    }
+    DROP_ORDER.store(0, Ordering::SeqCst);
+    assert!(std::panic::catch_unwind(|| owned_clone(Life { id: 1, stage: 3 })).is_err());
+    assert_eq!(DROP_ORDER.load(Ordering::SeqCst), 12);
+    DROP_ORDER.store(0, Ordering::SeqCst);
+    assert_eq!(owned_observe(DropZst), 97);
+    assert_eq!(DROP_ORDER.load(Ordering::SeqCst), 2);
+    DROP_ORDER.store(0, Ordering::SeqCst);
+    let selected = owned_select(Life { id: 1, stage: 0 }, Life { id: 2, stage: 0 }, true);
+    assert_eq!(selected.id, 1);
+    assert_eq!(DROP_ORDER.load(Ordering::SeqCst), 2);
+    drop(selected);
+    assert_eq!(DROP_ORDER.load(Ordering::SeqCst), 21);
+    DROP_ORDER.store(0, Ordering::SeqCst);
+    let selected = owned_select(Life { id: 1, stage: 0 }, Life { id: 2, stage: 0 }, false);
+    assert_eq!(selected.id, 2);
+    assert_eq!(DROP_ORDER.load(Ordering::SeqCst), 1);
+    drop(selected);
+    assert_eq!(DROP_ORDER.load(Ordering::SeqCst), 12);
+    println!("owned clone, return and unwind drop order agree");
+}
+
+#[inline(never)]
 fn slice_len<T>(values: &[T]) -> usize {
     values.len()
 }
@@ -312,6 +438,15 @@ fn main() {
     let last = unsafe { data.as_ptr().add(2) };
     assert_eq!(unsafe { backwards(last, -2) }, data.as_ptr());
     std::panic::set_hook(Box::new(|_| {}));
+    check_owned(213u8);
+    check_owned(0xfedcba9876543210u64);
+    check_owned((29u8, 0xfedcba9876543210u64));
+    check_owned([0xfedcba9876543210u64; 8]);
+    check_owned(u128::MAX - 19);
+    check_owned(17.25f64);
+    check_owned(AlignedZst);
+    check_owned(AlignedValue([197; 73]));
+    check_owned_cleanup();
     let value = Tracked(17);
     assert_eq!(value.0, 17);
     assert!(std::panic::catch_unwind(|| clone_and_unwind(value)).is_err());

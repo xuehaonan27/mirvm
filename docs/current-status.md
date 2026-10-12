@@ -342,24 +342,29 @@ test tier is established by the census.
 
 ### Production generic template export
 
-Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for scalar/pair frames,
-slice metadata and patterns, fixed field projections, checked slice/array indexing, pointer/const
-operations and resolved direct guest calls. Each admitted definition is exported once; concrete bindings produce ordinary
-bytecode without a full MIR-body substitution per instance. Unsupported functions retain the original
-lowerer. The default remains eager, and runtime sharing, generic archives and promotion are not yet
+Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for scalar/pair and
+opaque by-value locals, slice metadata and patterns, fixed field projections, checked slice/array
+indexing, pointer/const operations and resolved direct guest calls. Each admitted definition is
+exported once; concrete bindings produce ordinary bytecode without a full MIR-body substitution per
+instance. Unsupported functions retain the original lowerer. The default remains eager, and runtime sharing, generic archives and promotion are not yet
 implemented. This is an integration boundary, not a demonstrated whole-program speedup.
 
 The `generic-templates` contract checks five actual Rust type/const instances against one template,
 including an aligned ZST, distinct element widths and const lengths. It also covers signed consts,
 negative pointer offsets, slice parameters/returns, indexed references, field references, distinct
-same-layout trait witnesses, reference cloning, drop glue and guest panic propagation. Bounds checks cover empty slices,
-zero-length arrays, maximum indices, nested slices/arrays, ZSTs and different element widths; panic
+same-layout trait witnesses, reference cloning, drop glue and guest panic propagation. Bounds checks
+cover empty slices, zero-length arrays, maximum indices, nested slices/arrays, ZSTs and different element widths; panic
 messages, source line/column and caller cleanup agree with native. Compound pointee sizes bind both
 type and const parameters. First/last/middle patterns and mutable subslices preserve pointer identity,
-length and writes across empty and nonempty inputs. Indirect calls, by-value generic
-cleanup and caller-location bindings retain eager fallback; an invalid unentered instantiation is
-rejected before entry. Eager interpretation, template-bound interpretation and synchronous JIT agree with
-native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
+length and writes across empty and nonempty inputs. By-value identity, forwarding, selection and Clone
+share templates across ZST, scalar, pair, oversized scalar, array and over-aligned aggregate layouts.
+The contract checks mixed concrete/opaque arguments, both selection branches, Clone failure, a
+subsequent witness failure and a destructor failure before return; value identity, alignment and drop
+order agree with native. Direct JIT calls write scalar/pair results to either slots or memory
+destinations through the same writeback path. Indirect calls, unsupported constant/aggregate
+operations and caller-location bindings retain eager fallback; an invalid unentered instantiation is
+rejected before entry. Eager interpretation, template-bound interpretation and synchronous JIT agree
+with native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
 diagnostics assert actual export and binding coverage so successful fallback cannot fake template use.
 
 `FuncTable` exposes ABI/frame headers independently of instruction decoding. JIT callee admission,
@@ -379,17 +384,18 @@ its native oracle; debug coverage runs are separate from timings and the OS page
 
 | Workload | Exported definitions / bound instances | Rejected definitions | Eager whole process / lower | Templates whole process / lower |
 |---|---:|---:|---:|---:|
-| serde JSON | 41 / 64 | 516 | 403.7 / 197.0 ms | 403.7 / 195.4 ms |
-| flate2, 2 KiB input | 25 / 28 | 428 | 458.6 / 173.1 ms | 459.2 / 163.8 ms |
-| generic matrix, one selected type | 28 / 31 | 509 | 360.0 / 157.9 ms | 374.3 / 169.6 ms |
+| serde JSON | 164 / 266 | 393 | 409.4 / 198.0 ms | 435.0 / 203.0 ms |
+| flate2, 2 KiB input | 111 / 149 | 342 | 445.6 / 164.7 ms | 468.3 / 171.6 ms |
+| generic matrix, one selected type | 168 / 249 | 369 | 338.0 / 161.6 ms | 351.5 / 169.9 ms |
 
-These samples do not establish a whole-program speedup. Most generic definitions still take eager
-fallback. The matrix includes a 2,476.4 ms eager sample whose timing ledger reports only 444.7 ms;
-the sample is retained, and the unaccounted process time prevents attributing that difference to
-lowering. Serde and flate2 bound-image hits have medians of 92.5/97.9 ms and 137.1/136.9 ms respectively
-(eager/templates); the serde template range includes a 178.5 ms outlier. The matrix's immediate repeat
-still enters the frontend before publishing its bound image; that repeat is not a runtime-only cache
-hit. Broader coverage and rejected-definition probe cost remain part of the default-enablement gate.
+These samples show broader template coverage without a whole-program speedup: template-mode cold
+medians are 4–6% higher and lowering medians are 5.0–8.3 ms higher. Export probes, concrete frame/call
+binding and per-instance bytecode emission remain work before guest entry; instruction storage is
+still duplicated per instance. The samples do not isolate the contribution of each cost. Serde and
+flate2 bound-image hits have medians of 84.9/108.1 ms and 146.1/138.1 ms respectively (eager/templates);
+the serde template range is 96.0–143.6 ms. The matrix's immediate repeat still enters the frontend
+before publishing its bound image; that repeat is not a runtime-only cache hit. Rejected-definition
+probe cost and shared-entry integration remain part of the default-enablement gate.
 
 ### Runtime generics prototype
 
