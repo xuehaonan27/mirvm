@@ -1,11 +1,10 @@
 # Shared generic execution and specialization
 
-> Status: Production template export/binding is opt-in; shared execution remains an isolated prototype.
+> Status: Production shared interpretation, reusable templates and on-demand JIT specialization are opt-in.
 > Owns generic execution products, promotion and integration gates. Frontend selection and semantic
 > validation remain in [frontend-boundary.md](frontend-boundary.md#41-runtime-generics); measurements
 > belong to [current-status.md](../current-status.md#runtime-generics-prototype). D7 and T13 in
-> [open-issues.md](../open-issues.md) own unfinished work. The production runtime still uses concrete
-> bytecode.
+> [open-issues.md](../open-issues.md) own unfinished work. Unsupported functions retain eager lowering.
 
 ## 1. Decision and boundary
 
@@ -42,16 +41,16 @@ action. Index strides read type-size bindings through ordinary IR; address tempo
 through every operand of a statement or terminator and are reused only after it completes. Slice
 patterns preserve metadata while selecting from the front, from the end or a subslice. Collection
 still performs required instance validation before export. The owned template carries ordinary IR
-dictionary reads and a positional schema; immediate specialization removes that hidden argument and
-binds frame/call adapters before the existing verifier, archive and runtime see the body. This stage
-neither persists templates nor shares runtime instructions. Its flag changes lowering strategy, not
-artifact semantics; an existing concrete image can satisfy either setting without entering the
-exporter.
+dictionary reads and a positional schema. Binding fixes the frame and guest-call adapters without
+copying ordinary instructions. The interpreter initializes the dictionary pointer and opaque-local
+pointers once in its prologue; neither is a guest ABI parameter. The flag changes the representation
+produced on a lowering miss, not artifact semantics: a verified image can execute under either
+setting without entering the exporter.
 
 The execution prototype supports this architecture, not a whole-program speedup claim. Its real
 MIR exporter handles an opaque-pointee copy loop, and its witness/unwind experiments use native
-Rust callbacks. General trait/caller-location ABIs and persistent generic images remain integration
-gates. Production rollout must be measured on the existing serde, flate and generic-matrix workloads
+Rust callbacks. General caller-location ABIs and consumer-independent template export remain
+integration gates. Production rollout must be measured on the existing serde, flate and generic-matrix workloads
 with prepared dependencies and std.
 
 ## 2. Owned records
@@ -93,13 +92,16 @@ validated template + instance descriptor
 Entry identity and concrete ABI stay fixed. An activation pins its chosen immutable body and
 descriptor until return/unwind; publishing another form affects subsequent entries. The interpreter
 passes its entry-selected body through block execution and cleanup instead of resolving FuncId again.
-Generic storage must retain that body and its descriptor for the activation's full lifetime. The
-research hook allows publication only between serial calls; it is not the production implementation.
+`FuncTable::execution` retains the shared body and descriptor for that entire activation.
+`FuncTable::get` publishes concrete instructions in an instance's per-Engine `OnceLock` only when
+a concrete consumer, including the existing JIT compile service, requests them. Shared execution
+continues without waiting for this slot. A concrete form substitutes dictionary values and adds
+opaque-local pointer initialization while keeping the descriptor's exact frame and ABI.
 
 `FuncTable::header` borrows owned or archived ABI/frame metadata without initializing executable
 instructions. JIT call preparation, stack-headroom relocations, FFI marshalling and signal-handler
-shape checks use that boundary. Generic entries must preserve it: metadata lookup, archive
-verification and image merging must not accidentally specialize a body. Preserve the
+shape checks use that boundary. Metadata lookup, archive verification, ordinary table iteration and image merging preserve shared
+entries without specialization. Preserve the
 compiled caller's stack-headroom assumptions: a published callee form either fits the stable
 descriptor's checked frame contract or goes through a boundary that checks its own requirements.
 The current small-call fast path cannot silently inherit a different frame requirement.
@@ -108,7 +110,24 @@ Only one producer may publish an instance's verified concrete form. Recursive ca
 through its shared form while specialization is pending; unsupported optimization leaves that
 verified form usable. Compile failures retain the current JIT failure policy. Per-Engine lifetime,
 close, native reentry, unwind ownership, plain/trace separation and fork must cover both forms.
-A child must not inherit an initialization slot owned by a vanished thread.
+Before fork, the existing preparation boundary settles archive decode and concrete publication
+slots, including currently unentered shared instances. This intentionally pays their concrete
+emission cost at fork so the child cannot inherit an initializer owned by a vanished thread.
+
+Function archives share template objects within each immutable chunk. Borrowed validation checks
+the template's dictionary arity and accesses, admitted instruction vocabulary, concrete local
+storage, call ordinals and bound adapters before any runtime decode. Archive decode publishes each
+template once; immutable instructions may be shared by Engines, while their concrete publication
+slots remain separate. Shared instructions carry no external relocation: concrete call adapters own
+FuncIds and caller-location addresses.
+
+Unit, dependency and program manifests store templates as separate content-addressed fragments.
+A descriptor fragment hashes its template id together with the concrete binding representation;
+its manifest record names both fragments for loading and collection. Rehydration decodes each
+referenced template once and restores adapter relocations through the existing canonical site walk.
+Republishing an Engine preserves these shared products even after individual instances specialize.
+Standalone packages use the same owned representation in FUNCS; its byte layout is owned by the
+[container contract](modeb-mirvmar-design.md#22-container).
 
 Exact type/const specialization does not require speculative deoptimization. It also cannot move a
 currently executing loop into newly published code. OSR is a separate transfer contract under T13:
@@ -131,35 +150,29 @@ are separate policy acceptance cases. Initial thresholds are an experiment, not 
 
 ## 5. Integration roadmap and gates
 
-The next changes are ordered so that each produces a usable, reviewable boundary:
+Remaining integration work is grouped by a complete execution or preparation boundary:
 
-1. **Production template export and binding.** Extend layout-dependent field projections and aggregate
-   construction, plus remaining range APIs and array-subslice projections. Keep
-   eager fallback and compile-time diagnostic parity, including an unentered invalid instance.
-   Acceptance: one template serves multiple actual Rust types; exported runtime state owns no
-   compiler references; all unsupported shapes execute through the current lowerer.
-2. **Per-Engine generic function entries.** Add explicit template/descriptor storage to FuncTable
-   behind its separate header and instruction accessors. Retain the pinned body and descriptor across the entire
-   interpreted activation and cleanup chain when enabling concurrent promotion. Preserve function
-   pointers and concrete ABI adapters, recursion, frame checks, native callbacks, close and fork. Acceptance: mixed
-   shared/concrete/JIT execution, concurrent first publication, guest unwind, signals and plain/trace
-   differentials agree with eager execution; no global research override remains.
-3. **Reusable generic products.** Extend the existing function archive, verifier and shared-unit
-   manifests with template and descriptor references. Reuse canonical fragments and relocations;
-   avoid per-instance adapter-pointer literals defeating deduplication. Store verified concrete IR
-   and machine code under identities that include the template and exact bindings. Acceptance:
-   installed std, project preparation, edited-source misses, unchanged hits and cache purging obey
-   their existing ownership/diagnostic contracts without eager specialization on load.
-4. **Measured tier policy.** Add bounded heat accounting and asynchronous promotion through the
-   existing compile service. Compare shared-template JIT, direct specialization and staying shared
-   using measured compile cost and removable execution work. Acceptance: cold complete time and
-   first useful result improve on representative inputs without hiding late work; short/native-call
+1. **Measured tier policy.** Price shared interpretation and concrete/JIT compilation with the
+   existing compile service. Add bounded work/payback accounting and compare staying shared,
+   direct specialization and a compiled shared template. Acceptance: cold complete time and first
+   useful result improve on representative inputs without hiding late work; short/native-call
    workloads retain their cheaper path, and warm throughput and memory/code size remain acceptable.
-5. **OSR and coverage expansion.** Implement T13's activation-transfer contract independently of
-   generic coverage, then attach specialization to the same mechanism. Extend the generic exporter
-   only from corpus evidence, with associated types, niches/enums, closures, indirect calls and
-   recursive drop/cleanup handled explicitly. Acceptance includes a single hot invocation and a
-   real generic dependency workload, not just synthetic repeated calls.
+2. **Prepared generic products.** Export admitted dependency templates independently of a consumer,
+   integrate the `install`/`prepare` pipeline under D7, and verify edited-source misses, unchanged
+   hits and cache purging. Known semantic validation and exact instance bindings still precede
+   entry. Loading and publication must retain shared products without eager specialization.
+3. **Corpus-driven coverage.** Extend type-dependent field projections, aggregate construction and
+   range/array-subslice paths when their measured missed coverage warrants the change. Keep eager
+   fallback and diagnostic parity for unsupported shapes. Associated types, niches/enums, closures,
+   indirect calls and recursive drop/cleanup need explicit contracts, not layout-size equivalence.
+4. **OSR.** Implement T13's activation-transfer contract independently of generic coverage, then
+   attach specialization to the same mechanism. Acceptance includes one long hot invocation, live
+   values and cleanup state across transfer, and plain/trace domain identity.
+
+The shared-entry gate covers mixed shared/concrete/JIT execution, concurrent first publication,
+recursion, native callbacks, unwind, signals, close and fork. These lifecycle contracts remain
+required as admission and promotion change; the isolated experiment's global hook is never a
+production publication path.
 
 Do not select default enablement from the execution microbenchmarks. The release decision needs
 unmodified reference/candidate whole-process measurements, native output agreement, the relevant

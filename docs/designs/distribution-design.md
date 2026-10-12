@@ -203,10 +203,10 @@ ordinary `run` may still execute after a best-effort cache publication failure.
 Installing a library without a consumer can prepare its non-generic roots and concrete instances
 reachable from them. It cannot enumerate future `Vec<UserType>` or `deserialize::<UserType>`
 instances. Retain generic MIR metadata and prepare those instances when a consuming project is
-installed. With the current concrete-only representation, this includes their concrete bytecode.
-The [shared-generics direction](runtime-generics-design.md) can fulfill the ready-to-execute contract
-with owned templates and validated instance descriptors, while specializing hot bodies at runtime.
-Library preparation can then export admitted templates without enumerating future consumers.
+installed. The default path prepares concrete bytecode; the opt-in
+[shared-generics path](runtime-generics-design.md) prepares owned templates and validated instance
+descriptors, with concrete instructions generated when the JIT requests them. Exporting library
+templates without a concrete consumer remains preparation work.
 Installation must still settle known semantic errors and runtime bindings before guest entry;
 deferred specialization must not require a new rustc session. JIT compilation and per-process
 native binding remain governed by their runtime contracts.

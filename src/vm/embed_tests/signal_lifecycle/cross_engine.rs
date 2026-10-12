@@ -7,6 +7,7 @@ const SIGNAL_FAULTING_P1_GUEST_ADDR: u64 = 0xe239;
 fn faulting_masked_reraise_module() -> Module {
     let count = word(0);
     let handler = FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -105,6 +106,7 @@ fn faulting_masked_reraise_module() -> Module {
 fn mask_restored_faulting_signal_owner_module() -> Module {
     let count = word(0);
     let handler = FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,

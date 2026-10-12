@@ -7,6 +7,7 @@ use crate::vm::ir::{Block, FuncBody, Module, RetAbi, Terminator};
 fn context_export_module() -> Module {
     let mut module = Module {
         funcs: vec![FuncBody {
+            shared: None,
             frame_size: 0,
             frame_align: 1,
             ret: RetAbi::Zst,

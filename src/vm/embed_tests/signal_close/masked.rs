@@ -93,6 +93,7 @@ fn signal_nested_module() -> Module {
         term: Terminator::Return,
     });
     let nested = FuncBody {
+        shared: None,
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,

@@ -35,6 +35,7 @@ use intrinsic::*;
 /// Placeholder body for a function that cannot be lowered (calling it Traps with the reason).
 pub fn trap_body(name: &str, reason: &str) -> ir::FuncBody {
     ir::FuncBody {
+        shared: None,
         frame_size: 0,
         frame_align: 1,
         ret: RetAbi::Zst,
@@ -1924,6 +1925,7 @@ pub(crate) fn lower_instance<'tcx>(
     blocks.append(&mut cx.extra_blocks);
 
     Ok(ir::FuncBody {
+        shared: None,
         frame_size: cx.frame.size,
         frame_align: cx.frame.align,
         ret,

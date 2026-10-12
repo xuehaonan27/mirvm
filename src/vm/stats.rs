@@ -136,13 +136,13 @@ pub fn survey(module: &Module) -> Survey {
                 if !seen.insert(fid) {
                     continue;
                 }
-                let f = &module.funcs[fid as usize];
+                let f = module.funcs.execution(fid as usize).expect("valid FuncId");
                 for r in traps_of(f) {
                     *reasons.entry(group_key(r)).or_default() += 1;
                     *reach_phases.entry(phase_of(r)).or_default() += 1;
                 }
-                for b in &f.blocks {
-                    if let Terminator::Call { callee, .. } = &b.term {
+                for b in f.code() {
+                    if let Terminator::Call { callee, .. } = f.term(b) {
                         queue.push_back(*callee);
                     }
                 }

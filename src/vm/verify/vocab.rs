@@ -5,6 +5,26 @@ use super::*;
 
 impl<'a> Verifier<'a> {
     pub(super) fn operand(&self, body: &FuncBody, op: &Operand) -> Result<(), crate::error::Error> {
+        if let Some(shared) = body.shared.as_ref()
+            && let Operand::Mem { expr, width } = op
+            && matches!(expr.base, PlaceBase::Local(off) if off == shared.template.dictionary)
+        {
+            let [PlaceStep::Deref, PlaceStep::Offset(off)] = &expr.steps[..] else {
+                return Err(crate::fail!(Engine, "invalid dictionary addressing"));
+            };
+            if *off < 0
+                || !(*off as usize).is_multiple_of(8)
+                || (*off as u64)
+                    .checked_add(u64::from(width.bytes()))
+                    .is_none_or(|end| end > shared.values.len() as u64 * 8)
+            {
+                return Err(crate::fail!(
+                    Engine,
+                    "dictionary read outside binding values"
+                ));
+            }
+            return Ok(());
+        }
         match op {
             Operand::Slot(slot) => self.slot(body, *slot),
             Operand::Mem { expr, .. } | Operand::AddrOf(expr) => self.place(body, expr),
@@ -21,6 +41,16 @@ impl<'a> Verifier<'a> {
     ) -> Result<(), crate::error::Error> {
         match place.base {
             PlaceBase::Local(off) => {
+                if body
+                    .shared
+                    .as_ref()
+                    .is_some_and(|shared| shared.template.dictionary == off)
+                {
+                    return Err(crate::fail!(
+                        Engine,
+                        "dictionary address escapes a binding read"
+                    ));
+                }
                 if off > body.frame_size {
                     return Err(crate::fail!(
                         Engine,
@@ -188,10 +218,10 @@ impl<'a> Verifier<'a> {
     }
 
     pub(super) fn bb(&self, body: &FuncBody, bb: Bb) -> Result<(), crate::error::Error> {
-        if bb as usize >= body.blocks.len() {
+        if bb as usize >= body.code().len() {
             return Err(crate::fail!(
                 Engine,
-                format!("basic block bb{bb} is outside 0..{}", body.blocks.len())
+                format!("basic block bb{bb} is outside 0..{}", body.code().len())
             ));
         }
         Ok(())

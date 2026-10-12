@@ -22,7 +22,7 @@ use super::manifest;
 /// chunks.
 fn mark_one(live: &mut Live, file: &manifest::File) {
     live.fragments
-        .extend(file.funcs.iter().map(|record| record.fragment));
+        .extend(file.funcs.iter().flat_map(manifest::Record::fragments));
     if let Some(frozen) = &file.frozen {
         live.chunks.extend(frozen.chunks.iter().copied());
     }
@@ -117,6 +117,7 @@ mod tests {
                 .iter()
                 .map(|fragment| manifest::Record {
                     fragment: *fragment,
+                    template: (*fragment == id(2)).then_some(id(7)),
                     bindings: Vec::new(),
                 })
                 .collect(),
@@ -172,7 +173,7 @@ mod tests {
         std::fs::write(crate::store::UNITS.dir_in(&root).join("notes.txt"), b"junk").unwrap();
 
         let live = live(&root);
-        assert_eq!(live.fragments, HashSet::from([id(1), id(2), id(3)]));
+        assert_eq!(live.fragments, HashSet::from([id(1), id(2), id(3), id(7)]));
         assert_eq!(live.chunks, HashSet::from([id(9)]));
         let _ = std::fs::remove_dir_all(&root);
     }

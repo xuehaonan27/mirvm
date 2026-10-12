@@ -254,14 +254,14 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a
     generic semantic IR, dedicated frontend or source interpreter. Evaluate
     [runtime generics](designs/runtime-generics-design.md#5-integration-roadmap-and-gates) through
-    the selected engineering roadmap: expand template export/binding to layout-dependent field projections,
-    aggregate construction and remaining range/array-subslice paths;
-    measure actual admitted instances and rejected-definition probe costs. Then integrate
-    per-Engine entries with pinned activations, reusable generic archives, then measured tier
-    policy and coverage expansion. Replace the experiment's serial global publication hook;
-    verify guest trait/drop/unwind, concurrency, callbacks, fork and trace domains. Require real
-    workload cold/warm measurements and specialization payback before default enablement. Preserve
-    Rust diagnostics, build-script/proc-macro, layout/ABI, std and input-invalidation contracts;
+    the selected engineering roadmap: measure shared interpretation and on-demand specialization
+    costs, add a work/payback policy through the existing compile service, and evaluate compiled
+    shared templates. Extend dependency preparation to consumer-independent template products.
+    Expand layout-dependent fields, aggregates and range/array-subslice coverage from corpus
+    evidence; measure rejected-definition probes. Require real workload cold/warm measurements,
+    unchanged bound-image reuse and specialization payback before default enablement. Preserve
+    guest trait/drop/unwind, concurrency, callbacks, fork, signal and trace contracts as admission
+    grows. Retain Rust diagnostics, build-script/proc-macro, layout/ABI, std and input invalidation;
     coordinate single-invocation optimization with T13.
   - Diagnose the generic-matrix cache-publication transition: with only std base retained, the first
     run reports no program-cache store and the second re-enters analysis/lowering with shared units;

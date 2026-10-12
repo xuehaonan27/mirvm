@@ -426,7 +426,63 @@ fn indirect<T>(value: &T, call: fn(&T) -> u64) -> u64 {
     call(value)
 }
 
+#[inline(never)]
+fn recursive<T>(value: T, depth: usize) -> T {
+    if depth == 0 { value } else { recursive(value, depth.wrapping_sub(1)) }
+}
+
+unsafe extern "C" {
+    fn qsort(base: *mut u64, count: usize, size: usize,
+             compare: extern "C" fn(*const u64, *const u64) -> i32);
+    fn fork() -> i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn _exit(code: i32) -> !;
+}
+
+extern "C" fn compare(a: *const u64, b: *const u64) -> i32 {
+    let (a, b) = unsafe { (owned_identity(0, *a, 0), recursive(*b, 3)) };
+    if a < b { -1 } else if a == b { 0 } else { 1 }
+}
+
+fn check_shared_entries() {
+    let barrier = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        for i in 0..4u64 {
+            let barrier = &barrier;
+            scope.spawn(move || {
+                barrier.wait();
+                for depth in 0..8 {
+                    assert_eq!(recursive(i, depth), i);
+                    assert_eq!(owned_identity(0, i, 0), i);
+                }
+            });
+        }
+    });
+    assert_eq!(recursive(17u8, 13), 17);
+    let mut values = [19u64, 3, 17, 11];
+    unsafe { qsort(values.as_mut_ptr(), values.len(), size_of::<u64>(), compare); }
+    assert_eq!(values, [3, 11, 17, 19]);
+}
+
+fn check_fork() {
+    let pid = unsafe { fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        let value = owned_forward([37u64; 8]);
+        unsafe { _exit(if value == [37; 8] { 0 } else { 9 }); }
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+    assert_eq!(status, 0);
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("fork") {
+        check_fork();
+        println!("shared fork agrees");
+        return;
+    }
+    check_shared_entries();
     check::<u8, 0>(13, 0);
     check::<u8, 17>(213, 0);
     check::<u64, 31>(0xfedcba9876543210, 0);

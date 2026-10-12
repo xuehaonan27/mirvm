@@ -22,7 +22,7 @@ use super::*;
 /// First byte of the encoded fragment: a change to the canonical form itself (a new reference site,
 /// a different ordinal rule) must invalidate every fragment id, and hashing the version is what
 /// makes that automatic instead of a remembered migration.
-pub const ENCODING_VERSION: u8 = 1;
+pub const ENCODING_VERSION: u8 = 2;
 
 /// What one ordinal of a canonical body stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +53,11 @@ pub(crate) trait SiteVisitor {
 /// Visit every reference site of a body in walk order: blocks in order, statements before the
 /// terminator, places and operands in the order the instruction reads them.
 pub(crate) fn visit_sites(body: &mut FuncBody, visitor: &mut impl SiteVisitor) {
+    if let Some(shared) = &mut body.shared {
+        for call in &mut shared.calls {
+            visit_term(call, visitor);
+        }
+    }
     for block in &mut body.blocks {
         for stmt in &mut block.stmts {
             visit_stmt(stmt, visitor);
@@ -90,6 +95,43 @@ pub fn encode_canonical(body: &FuncBody) -> Result<Vec<u8>, crate::error::Error>
     Ok(bytes)
 }
 
+pub(crate) struct Stored {
+    pub descriptor: Vec<u8>,
+    pub template: Option<Vec<u8>>,
+}
+
+impl Stored {
+    pub(crate) fn fragments(&self) -> impl Iterator<Item = &[u8]> {
+        std::iter::once(self.descriptor.as_slice()).chain(self.template.as_deref())
+    }
+}
+
+/// Split a canonical instance into independently shared storage products. The descriptor's hash
+/// includes its template id, so replacing shared instructions also changes the instance identity.
+pub(crate) fn stored_canonical(mut body: FuncBody) -> Result<Stored, crate::error::Error> {
+    let template = body
+        .shared
+        .as_mut()
+        .map(|shared| {
+            let bytes = encode_template(&shared.template)?;
+            shared.template = std::sync::Arc::new(GenericTemplate {
+                dictionary: 0,
+                binding_count: 0,
+                blocks: Vec::new(),
+            });
+            Ok::<_, crate::error::Error>(bytes)
+        })
+        .transpose()?;
+    let template_id = template.as_ref().map(|bytes| id_of(bytes));
+    let mut descriptor = postcard::to_stdvec(&template_id)
+        .map_err(|error| crate::fail!(Engine, error.to_string()))?;
+    descriptor.extend(encode_canonical(&body)?);
+    Ok(Stored {
+        descriptor,
+        template,
+    })
+}
+
 /// The canonical body inside a fragment's bytes. The encoding version is checked here rather than
 /// assumed, so bytes another version wrote are refused instead of misread.
 pub fn decode(bytes: &[u8]) -> Result<FuncBody, crate::error::Error> {
@@ -107,6 +149,25 @@ pub fn decode(bytes: &[u8]) -> Result<FuncBody, crate::error::Error> {
 /// The content address of already-encoded fragment bytes.
 pub fn id_of(bytes: &[u8]) -> [u8; 32] {
     *blake3::hash(bytes).as_bytes()
+}
+
+pub(crate) fn encode_template(template: &GenericTemplate) -> Result<Vec<u8>, crate::error::Error> {
+    let mut bytes = vec![ENCODING_VERSION, b'T'];
+    bytes.extend(
+        postcard::to_stdvec(template).map_err(|error| crate::fail!(Engine, error.to_string()))?,
+    );
+    Ok(bytes)
+}
+
+pub(crate) fn decode_template(bytes: &[u8]) -> Result<GenericTemplate, crate::error::Error> {
+    let Some(bytes) = bytes.strip_prefix(&[ENCODING_VERSION, b'T']) else {
+        return Err(crate::fail!(
+            Engine,
+            "incompatible shared template encoding"
+        ));
+    };
+    postcard::from_bytes(bytes)
+        .map_err(|error| crate::fail!(Engine, format!("template decode: {error}")))
 }
 
 /// The content address of one body.
@@ -547,6 +608,7 @@ mod tests {
 
     fn body_with(term: Terminator) -> FuncBody {
         FuncBody {
+            shared: None,
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,

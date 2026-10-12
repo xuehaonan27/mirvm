@@ -22,6 +22,7 @@ def run(name, args, extra=None, success=True):
 native = scratch / "native"
 run("build-native", [rustc, "--edition=2024", "-Awarnings", source, "-o", native])
 expected = run("native", [native]).stdout
+expected_fork = run("native-fork", [native, "fork"]).stdout
 empty = scratch / "empty.rs"
 empty.write_text("fn main() {}\n")
 run("prepare", [mirvm, "run", empty], {"MIRVM_HOME": str(shared_home)})
@@ -44,6 +45,11 @@ for mode, settings in [
     first = run(mode, [mirvm, "run", source], settings)
     assert first.stdout == expected, (mode, first.stdout, expected)
     log = first.stderr.decode()
+    specialized = "generic instance specialized:"
+    if mode == "jit":
+        assert any(specialized in line and "owned_identity" in line for line in log.splitlines()), log
+    else:
+        assert specialized not in log, log
     if mode != "eager":
         assert len(re.findall(r"generic template exported: copy_elements\n", log)) == 1, log
         copies = [line for line in log.splitlines()
@@ -61,7 +67,7 @@ for mode, settings in [
                                   ("middle_slice", 4), ("tail_mut", 4),
                                   ("owned_identity", 8), ("owned_forward", 8),
                                   ("owned_clone", 9), ("owned_observe", 2),
-                                  ("owned_pick", 9), ("owned_select", 9)]:
+                                  ("owned_pick", 9), ("owned_select", 9), ("recursive", 2)]:
             assert log.count("generic template exported: " + definition + "\n") == 1, definition
             bound = [line for line in log.splitlines()
                      if "generic template bound:" in line and definition in line]
@@ -76,7 +82,14 @@ for mode, settings in [
     assert warm.stdout == expected
     assert "cache-load=" in warm.stderr.decode() and "frontend=" not in warm.stderr.decode()
     assert "generic template " not in warm.stderr.decode()
-    print("PASS", mode, "native output, export coverage and bound-image reload")
+    if mode == "jit":
+        assert any(specialized in line and "owned_identity" in line for line in warm.stderr.decode().splitlines())
+    else:
+        assert specialized not in warm.stderr.decode()
+    fork = run(mode + "-fork", [mirvm, "run", source, "--", "fork"], settings)
+    assert fork.stdout == expected_fork
+    assert "cache-load=" in fork.stderr.decode() and "frontend=" not in fork.stderr.decode()
+    print("PASS", mode, "native output, export coverage, bound-image reload and fork")
 
 # Collection must reject a bad instantiation even when runtime control flow never enters it.
 invalid = scratch / "invalid.rs"

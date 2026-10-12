@@ -20,9 +20,10 @@ impl<'a> Verifier<'a> {
                 )
             ));
         }
-        if body.blocks.is_empty() {
+        if body.code().is_empty() {
             return Err(crate::fail!(Engine, "has no basic blocks"));
         }
+        self.shared(body)?;
         self.ret_abi(body, &body.ret)?;
         for (i, param) in body.params.iter().enumerate() {
             self.param_abi(body, param)
@@ -31,12 +32,12 @@ impl<'a> Verifier<'a> {
         if let Some(off) = body.caller_loc_off.as_ref() {
             self.span(body, *off, 8, "track_caller slot")?;
         }
-        for (bb, block) in body.blocks.iter().enumerate() {
+        for (bb, block) in body.code().iter().enumerate() {
             for (si, stmt) in block.stmts.iter().enumerate() {
                 self.stmt(body, stmt)
                     .map_err(|e| crate::fail!(Engine, format!("bb{bb} statement {si}: {e}")))?;
             }
-            self.term(body, &block.term)
+            self.term(body, body.term(block))
                 .map_err(|e| crate::fail!(Engine, format!("bb{bb} terminator: {e}")))?;
         }
         Ok(())

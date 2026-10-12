@@ -30,11 +30,11 @@ pub(super) fn run_blocks(
     let mut iterations = 0u32;
     loop {
         let current = blk;
-        let block: &Block = &body.blocks[blk];
+        let block: &Block = &body.code()[blk];
         for stmt in &block.stmts {
             exec_stmt(ctx, base, stmt);
         }
-        match &block.term {
+        match body.term(block) {
             Terminator::Goto(t) => blk = *t as usize,
             Terminator::SwitchInt {
                 discr,

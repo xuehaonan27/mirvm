@@ -586,6 +586,7 @@ mod tests {
             width: Width::W32,
         };
         let callback = FuncBody {
+            shared: None,
             frame_size: 32,
             frame_align: 8,
             ret: RetAbi::Scalar(callback_ret),
@@ -639,6 +640,7 @@ mod tests {
             name: "qsort_guest_callback_calls_strlen".into(),
         };
         let outer = FuncBody {
+            shared: None,
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Scalar(outer_ret),

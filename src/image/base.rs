@@ -436,6 +436,7 @@ mod tests {
                 .unwrap(),
             ),
             funcs: vec![FuncBody {
+                shared: None,
                 name: "std_body".into(),
                 frame_size: 0,
                 frame_align: 1,

@@ -15,6 +15,7 @@ static NEXT_PACKAGE_TEST: AtomicU64 = AtomicU64::new(0);
 
 fn test_body(name: &str) -> crate::vm::ir::FuncBody {
     crate::vm::ir::FuncBody {
+        shared: None,
         frame_size: 8,
         frame_align: 8,
         ret: crate::vm::ir::RetAbi::Zst,
@@ -366,6 +367,7 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
         steps: Box::new([]),
     };
     module.funcs.push(FuncBody {
+        shared: None,
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Scalar(ret),
@@ -401,6 +403,7 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
         name: "bump_static".into(),
     });
     module.funcs.push(FuncBody {
+        shared: None,
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Scalar(ret),
@@ -425,6 +428,7 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
         align: 8,
     });
     module.funcs.push(FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Scalar(ret),

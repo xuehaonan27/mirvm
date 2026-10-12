@@ -1327,6 +1327,7 @@ mod tests {
     /// Construct minimal body: one block, term arbitrary, stmts can be added after return.
     fn body_with(term: ir::Terminator, stmts: Vec<ir::Stmt>) -> ir::FuncBody {
         ir::FuncBody {
+            shared: None,
             frame_size: 0,
             frame_align: 1,
             ret: ir::RetAbi::Zst,

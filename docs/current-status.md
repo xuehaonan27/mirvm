@@ -340,14 +340,16 @@ query execution, hashing, allocation and archive verification remain visible. Th
 supports the execution prototype below. No whole-program generic execution improvement or full
 test tier is established by the census.
 
-### Production generic template export
+### Production shared generic execution
 
 Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for scalar/pair and
 opaque by-value locals, slice metadata and patterns, fixed field projections, checked slice/array
 indexing, pointer/const operations and resolved direct guest calls. Each admitted definition is
-exported once; concrete bindings produce ordinary bytecode without a full MIR-body substitution per
-instance. Unsupported functions retain the original lowerer. The default remains eager, and runtime sharing, generic archives and promotion are not yet
-implemented. This is an integration boundary, not a demonstrated whole-program speedup.
+exported once; binding fixes ABI, frame storage, dictionary values and guest-call adapters without
+copying its ordinary instructions. The interpreter executes the shared template directly. The existing
+JIT service requests concrete instructions through a per-Engine publication slot when compiling an
+instance. Unsupported functions retain the original lowerer, and default enablement remains gated
+on whole-program measurements.
 
 The `generic-templates` contract checks five actual Rust type/const instances against one template,
 including an aligned ZST, distinct element widths and const lengths. It also covers signed consts,
@@ -363,39 +365,33 @@ subsequent witness failure and a destructor failure before return; value identit
 order agree with native. Direct JIT calls write scalar/pair results to either slots or memory
 destinations through the same writeback path. Indirect calls, unsupported constant/aggregate
 operations and caller-location bindings retain eager fallback; an invalid unentered instantiation is
-rejected before entry. Eager interpretation, template-bound interpretation and synchronous JIT agree
-with native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
-diagnostics assert actual export and binding coverage so successful fallback cannot fake template use.
+rejected before entry. Eager interpretation, shared interpretation and synchronous JIT agree with
+native output, including concurrent entries, recursive calls, native qsort callbacks and fork in a
+separate single-threaded invocation. Each reloads its bound image without re-entering the frontend.
+Export/binding diagnostics assert actual coverage; specialization diagnostics distinguish shared
+execution from the JIT's concrete requests. Program manifests derive callback code ownership from
+the actual frozen domain, so a program-owned native entry can be published and reloaded.
 
 `FuncTable` exposes ABI/frame headers independently of instruction decoding. JIT callee admission,
 trampoline preparation, stack-headroom relocation, FFI marshalling and signal-handler validation
 borrow those headers. Compiling or reloading a caller in either plain or trace code leaves its
 callee's instructions archived; the mixed-part header check covers every parameter/return shape
-without initializing archived decode cells. This supplies the metadata boundary for per-Engine
-generic entries; it does not introduce shared generic execution or alter the archive format.
-Signal delivery and the generic fixture's captured trace agree with native execution. The original
+without initializing archived decode cells. Shared instructions and schema are deduplicated within
+function archive chunks and stored as independent content-addressed fragments in unit/program
+manifests. Descriptors include the exact template identity and concrete adapter relocations.
+Borrowed verification checks dictionary arity/accesses, frame storage, call indices and the admitted
+vocabulary without specializing. Focused checks cover concurrent publication, template sharing,
+Engine isolation, republishing after specialization, fork preparation and malformed descriptors.
+The original
 `ffi_agg_probe` remains blocked by E53's constant-aggregate lowering gap; a diagnostic variant with
 addressable arguments agrees with native under synchronous JIT and bound-image reload, including
 aggregate parameters, pair returns and indirect returns through native callbacks.
 
-Three alternating pairs on one release executable, with prepared std/dependency MIR and all derived
-products except the std base removed before each miss, give these medians. Every sample agrees with
-its native oracle; debug coverage runs are separate from timings and the OS page cache is retained.
-
-| Workload | Exported definitions / bound instances | Rejected definitions | Eager whole process / lower | Templates whole process / lower |
-|---|---:|---:|---:|---:|
-| serde JSON | 164 / 266 | 393 | 409.4 / 198.0 ms | 435.0 / 203.0 ms |
-| flate2, 2 KiB input | 111 / 149 | 342 | 445.6 / 164.7 ms | 468.3 / 171.6 ms |
-| generic matrix, one selected type | 168 / 249 | 369 | 338.0 / 161.6 ms | 351.5 / 169.9 ms |
-
-These samples show broader template coverage without a whole-program speedup: template-mode cold
-medians are 4–6% higher and lowering medians are 5.0–8.3 ms higher. Export probes, concrete frame/call
-binding and per-instance bytecode emission remain work before guest entry; instruction storage is
-still duplicated per instance. The samples do not isolate the contribution of each cost. Serde and
-flate2 bound-image hits have medians of 84.9/108.1 ms and 146.1/138.1 ms respectively (eager/templates);
-the serde template range is 96.0–143.6 ms. The matrix's immediate repeat still enters the frontend
-before publishing its bound image; that repeat is not a runtime-only cache hit. Rejected-definition
-probe cost and shared-entry integration remain part of the default-enablement gate.
+Whole-process rollout measurements use one release executable with the option unset/set, prepared
+std/dependency MIR, three alternating pairs and all derived products except the std base removed
+before each miss. Every timed sample must agree with native output; debug coverage is collected
+separately and the OS page cache is retained. Measured promotion/payback policy, consumer-independent
+preparation and further corpus-driven admission remain open under D7.
 
 ### Runtime generics prototype
 

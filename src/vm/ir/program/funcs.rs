@@ -10,6 +10,7 @@ pub struct FuncTable {
 struct Part {
     end: usize,
     storage: FuncStorage,
+    concrete: std::collections::HashMap<usize, std::sync::OnceLock<FuncBody>>,
 }
 
 enum FuncStorage {
@@ -38,6 +39,12 @@ impl From<Vec<FuncBody>> for FuncTable {
     fn from(funcs: Vec<FuncBody>) -> Self {
         Self {
             parts: vec![Part {
+                concrete: funcs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, body)| body.shared.is_some())
+                    .map(|(index, _)| (index, std::sync::OnceLock::new()))
+                    .collect(),
                 end: funcs.len(),
                 storage: FuncStorage::Eager(funcs),
             }],
@@ -60,6 +67,12 @@ impl FuncTable {
             .collect();
         Self {
             parts: vec![Part {
+                concrete: archive
+                    .bodies()
+                    .enumerate()
+                    .filter(|(_, body)| body.shared.is_some())
+                    .map(|(index, _)| (index, std::sync::OnceLock::new()))
+                    .collect(),
                 end: archive.len(),
                 storage: FuncStorage::Lazy(LazyFuncs { archive, cells }),
             }],
@@ -97,6 +110,15 @@ impl FuncTable {
                     lazy.get(index);
                 }
             }
+            for (&index, cell) in &part.concrete {
+                let body = match &part.storage {
+                    FuncStorage::Eager(funcs) => &funcs[index],
+                    FuncStorage::Lazy(lazy) => lazy.get(index),
+                };
+                if body.shared.is_some() {
+                    cell.get_or_init(|| body.specialize());
+                }
+            }
         }
     }
 
@@ -115,6 +137,15 @@ impl FuncTable {
             .sum()
     }
 
+    #[cfg(test)]
+    pub(crate) fn specialized_count(&self) -> usize {
+        self.parts
+            .iter()
+            .flat_map(|part| part.concrete.values())
+            .filter(|cell| cell.get().is_some())
+            .count()
+    }
+
     pub fn len(&self) -> usize {
         self.parts.last().map_or(0, |part| part.end)
     }
@@ -124,28 +155,40 @@ impl FuncTable {
     }
 
     pub fn get(&self, index: usize) -> Option<&FuncBody> {
-        let (storage, index) = self.part(index)?;
-        Some(match storage {
+        let body = self.execution(index)?;
+        if body.shared.is_none() {
+            return Some(body);
+        }
+        let (part, index) = self.part(index)?;
+        Some(part.concrete[&index].get_or_init(|| {
+            crate::diag_debug!(Jit, "generic instance specialized: {}", body.name);
+            body.specialize()
+        }))
+    }
+
+    pub(crate) fn execution(&self, index: usize) -> Option<&FuncBody> {
+        let (part, index) = self.part(index)?;
+        Some(match &part.storage {
             FuncStorage::Eager(funcs) => &funcs[index],
             FuncStorage::Lazy(lazy) => lazy.get(index),
         })
     }
 
     pub(crate) fn header(&self, index: usize) -> Option<FuncHeader<'_>> {
-        let (storage, index) = self.part(index)?;
-        Some(match storage {
+        let (part, index) = self.part(index)?;
+        Some(match &part.storage {
             FuncStorage::Eager(funcs) => FuncHeader::Owned(&funcs[index]),
             FuncStorage::Lazy(lazy) => FuncHeader::Archived(lazy.archive.body(index)),
         })
     }
 
-    fn part(&self, index: usize) -> Option<(&FuncStorage, usize)> {
+    fn part(&self, index: usize) -> Option<(&Part, usize)> {
         if index >= self.len() {
             return None;
         }
         let part_index = self.parts.partition_point(|part| part.end <= index);
         let start = part_index.checked_sub(1).map_or(0, |i| self.parts[i].end);
-        Some((&self.parts[part_index].storage, index - start))
+        Some((&self.parts[part_index], index - start))
     }
 
     pub fn iter(&self) -> FuncIter<'_> {
@@ -157,6 +200,9 @@ impl FuncTable {
 
     pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, FuncBody> {
         self.make_eager();
+        for cell in self.parts[0].concrete.values_mut() {
+            *cell = std::sync::OnceLock::new();
+        }
         let FuncStorage::Eager(funcs) = &mut self.parts[0].storage else {
             unreachable!()
         };
@@ -168,7 +214,14 @@ impl FuncTable {
         let FuncStorage::Eager(funcs) = &mut self.parts[0].storage else {
             unreachable!()
         };
+        let generic = body.shared.is_some();
         funcs.push(body);
+        if generic {
+            let index = self.parts[0].end;
+            self.parts[0]
+                .concrete
+                .insert(index, std::sync::OnceLock::new());
+        }
         self.parts[0].end += 1;
     }
 
@@ -179,6 +232,7 @@ impl FuncTable {
         };
         out.append(funcs);
         self.parts[0].end = 0;
+        self.parts[0].concrete.clear();
     }
 
     fn make_eager(&mut self) {
@@ -221,7 +275,7 @@ impl<'a> Iterator for FuncIter<'a> {
     type Item = &'a FuncBody;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.funcs.get(self.next)?;
+        let item = self.funcs.execution(self.next)?;
         self.next += 1;
         Some(item)
     }

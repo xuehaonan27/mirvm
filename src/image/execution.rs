@@ -138,6 +138,7 @@ mod tests {
             ..Default::default()
         };
         let body = FuncBody {
+            shared: None,
             frame_size: 0,
             frame_align: 1,
             ret: RetAbi::Zst,

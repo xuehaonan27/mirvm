@@ -2,6 +2,7 @@ use super::*;
 
 fn body(term: Terminator) -> FuncBody {
     FuncBody {
+        shared: None,
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,

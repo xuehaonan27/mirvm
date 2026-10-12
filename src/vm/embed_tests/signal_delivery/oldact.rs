@@ -81,6 +81,7 @@ fn cross_engine_signal_reinstaller_module() -> Module {
         .push(marker_store(&SIGNAL_OVERRIDE_HANDLER_RAN));
 
     let installer = FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Scalar(old),

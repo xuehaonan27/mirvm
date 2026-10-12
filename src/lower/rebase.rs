@@ -62,6 +62,13 @@ impl Rebase {
     /// purpose: a new statement or terminator variant must fail to compile rather than
     /// silently keep an unremapped id.
     pub(super) fn body(&self, b: &mut ir::FuncBody) {
+        if let Some(shared) = &mut b.shared {
+            for call in &mut shared.calls {
+                if let ir::Terminator::Call { callee, .. } = call {
+                    *callee = self.fn_id(*callee);
+                }
+            }
+        }
         for block in &mut b.blocks {
             for stmt in &mut block.stmts {
                 match stmt {

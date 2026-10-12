@@ -239,6 +239,7 @@ fn trace_domain_compiles_a_pinned_syscall_body() {
 
 fn body(name: &str, first: Terminator) -> ir::FuncBody {
     ir::FuncBody {
+        shared: None,
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -512,6 +513,7 @@ fn a_compiled_body_runs_from_its_artifact() {
         width: ir::Width::W64,
     };
     let body = ir::FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: ir::RetAbi::Scalar(slot()),
@@ -635,6 +637,7 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
             width: ir::Width::W64,
         };
         ir::FuncBody {
+            shared: None,
             frame_size: 16,
             frame_align: 8,
             ret: ir::RetAbi::Zst,
@@ -760,6 +763,7 @@ fn an_indirect_native_signature_is_recorded_and_replayed() {
         unwind: false,
     };
     let funcs = vec![ir::FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: ir::RetAbi::Zst,

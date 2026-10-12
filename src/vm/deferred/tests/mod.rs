@@ -78,6 +78,7 @@ fn tsd_module(marker: &AtomicU64, reinstall: bool) -> Module {
     };
     let dtor_sig = sig(vec![FfiKind::Ptr], FfiKind::Void, Vec::new());
     let register = FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -183,6 +184,7 @@ fn tsd_module(marker: &AtomicU64, reinstall: bool) -> Module {
         });
     }
     let dtor = FuncBody {
+        shared: None,
         frame_size: 24,
         frame_align: 8,
         ret: RetAbi::Zst,

@@ -161,6 +161,7 @@ fn word(off: u32) -> Slot {
 
 fn function(name: &str, params: usize, ret: RetAbi, first: Terminator) -> FuncBody {
     FuncBody {
+        shared: None,
         frame_size: 8 * (params as u32 + 1),
         frame_align: 8,
         ret,
@@ -185,6 +186,7 @@ fn function(name: &str, params: usize, ret: RetAbi, first: Terminator) -> FuncBo
 fn install_fake_guest_panic_cleanup(module: &mut Module) {
     let cleanup = module.funcs.len() as u32;
     module.funcs.push(FuncBody {
+        shared: None,
         frame_size: 24,
         frame_align: 8,
         ret: RetAbi::Pair(word(0), word(8)),

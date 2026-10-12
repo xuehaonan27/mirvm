@@ -42,7 +42,6 @@ pub(crate) fn unit_of(
     below: &[manifest::LayerRanges],
     prefix: crate::vm::verify::Prefix,
     module: &ir::Module,
-    home: usize,
     frozen: (u64, u64),
 ) -> manifest::Unit {
     manifest::Unit {
@@ -50,9 +49,10 @@ pub(crate) fn unit_of(
         tls: (prefix.tls as u32, module.tls.len() as u32),
         asm: (prefix.asm as u32, module.asm_sites.len() as u32),
         frozen,
-        // A layer's entry stubs live in its own code spline slot, one 16 GiB step wide.
+        // Entry stubs follow the frozen domain, including program deltas outside the image spline.
         code: (
-            crate::os_arch::addrspace::image_code_addr(home) as u64,
+            crate::os_arch::addrspace::code_home_for_frozen(frozen.0 as usize)
+                .expect("a publishable layer has a valid frozen domain") as u64,
             crate::os_arch::addrspace::IMAGE_CODE_STEP as u64,
         ),
         layers: Vec::new(),
@@ -178,7 +178,7 @@ pub fn try_load(
         (0, base.module.funcs.len() as u32),
         (0, base.module.tls.len() as u32),
     );
-    let unit = unit_of(&[base_range], prefix, &f.module, 0, frozen);
+    let unit = unit_of(&[base_range], prefix, &f.module, frozen);
     let symbols = manifest::Symbols::of(std::iter::once(base));
     // The bodies come back from the fragment store, then the id-bearing tables from the canonical
     // form: a missing fragment or an unresolvable symbol is a miss, never a partial layer.
@@ -278,8 +278,7 @@ pub fn store_and_wrap(
             .frozen
             .as_ref()
             .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64));
-        let Some(unit) =
-            frozen_home.map(|frozen| unit_of(&[], below.prefix, &bi.module, 0, frozen))
+        let Some(unit) = frozen_home.map(|frozen| unit_of(&[], below.prefix, &bi.module, frozen))
         else {
             return degraded(bi);
         };
@@ -387,6 +386,28 @@ pub(crate) fn degraded(mut bi: crate::image::BaseImage) -> crate::image::BaseIma
 #[cfg(test)]
 mod tests {
     /// Both two-arg and single-arg --extern forms are parsed to path; bare-name --extern ⇒ None (self-heal)
+    #[test]
+    fn generic_callback_manifest_uses_the_actual_code_domain() {
+        use crate::os_arch::addrspace;
+        let module = crate::vm::ir::Module::default();
+        for frozen in [
+            addrspace::DELTA_FIXED_ADDR,
+            addrspace::BASE_IMAGE_FIXED_ADDR,
+            addrspace::image_addr(7),
+        ] {
+            let unit = super::unit_of(
+                &[],
+                crate::vm::verify::Prefix::default(),
+                &module,
+                (frozen as u64, 8),
+            );
+            assert_eq!(
+                unit.code.0,
+                addrspace::code_home_for_frozen(frozen).unwrap() as u64
+            );
+        }
+    }
+
     #[test]
     fn extern_paths_parse_both_forms_and_reject_bare_name() {
         let args = vec![

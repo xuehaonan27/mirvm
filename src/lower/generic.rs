@@ -127,7 +127,7 @@ impl<'tcx> Templates<'tcx> {
                 Some((callee, call.location))
             })
             .collect::<Option<Vec<_>>>()?;
-        let body = template.specialize(&values, &layouts)?;
+        let body = template.bind(values, &layouts)?;
         if crate::diag::prints(crate::diag::Severity::Debug) {
             crate::diag_debug!(
                 Lower,
@@ -167,10 +167,10 @@ impl<'tcx> Bound<'tcx> {
             .iter()
             .map(|&(inst, _)| linker.func_id(inst))
             .collect();
-        for block in &mut self.body.blocks {
+        for term in &mut self.body.shared.as_mut().unwrap().calls {
             if let Terminator::Call {
                 callee, args, role, ..
-            } = &mut block.term
+            } = term
             {
                 if let Some(span) = self.callees[*callee as usize].1 {
                     args.push(linker.caller_location_imm(span)?);
@@ -305,15 +305,20 @@ impl<'tcx> Exporter<'tcx> {
         Some(Export {
             template: Template {
                 body: FuncBody {
+                    shared: None,
                     frame_size: cx.frame_size,
                     frame_align: cx.frame_align,
                     ret,
                     params,
                     caller_loc_off: None,
-                    blocks,
+                    blocks: Vec::new(),
                     name: tcx.def_path_str(instance.def_id()).into(),
                 },
-                dictionary,
+                instructions: std::sync::Arc::new(GenericTemplate {
+                    dictionary,
+                    binding_count: u32::try_from(cx.bindings.len()).ok()?,
+                    blocks,
+                }),
                 bindings: cx.bindings,
                 locals: cx.local_bindings,
                 calls: cx.call_abis,

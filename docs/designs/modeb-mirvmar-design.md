@@ -46,7 +46,7 @@ cache. Each violation is a rejection:
 
 ### 2.1 Goals and non-goals
 
-Goals: a single-file package format v7; `mirvm pack` from a Cargo project or script; `mirvm run
+Goals: a single-file package format v8; `mirvm pack` from a Cargo project or script; `mirvm run
 x.mirvm` to validate, load and execute; and three-dimensional acceptance — pack plus run must be
 byte-identical to a direct `mirvm run` on three loads, while refusal probes must be loud.
 
@@ -90,7 +90,10 @@ An unknown tag is skipped for forward compatibility; a missing required tag is a
   chunks must be nonempty, and the section must end exactly with its last chunk. Container target
   and build-id checks restrict compatibility. The loader retains an immutable aligned allocation
   and structurally validates every chunk with a maximum subtree depth of 128. The section and
-  whole-file digests protect the complete representation. Address expressions and foreign signatures
+  whole-file digests protect the complete representation. A function stores concrete blocks or a
+  shared template reference and instance descriptor. Templates can be shared within a chunk; no
+  shared pointer may cross its boundary. Semantic validation checks the template and bindings
+  without specializing them. Concrete publication remains per Engine. Address expressions and foreign signatures
   use archive-only indirection; runtime IR and shared fragments retain their inline fields.
 
 ### 2.3 pack flow

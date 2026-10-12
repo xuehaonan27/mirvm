@@ -2,15 +2,17 @@
 //! is exposed; verification and demand decoding subsequently use the same owned bytes.
 
 use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::error::Error;
-use crate::vm::ir::{ArchivedFuncBody, FuncBody, FuncTable};
+use crate::vm::ir::{ArchivedFuncBody, FuncBody, FuncTable, GenericTemplate, SharedBody};
 
 pub(crate) struct Functions {
     bytes: Arc<super::bytes::Bytes>,
     chunks: Vec<Chunk>,
+    templates: HashMap<usize, OnceLock<Arc<GenericTemplate>>>,
 }
 
 struct Chunk {
@@ -55,8 +57,7 @@ impl Functions {
             let chunk = data.get(pos..end).ok_or_else(invalid)?;
             // Each chunk is a self-contained tree. No relative pointer may cross its boundary,
             // allowing its bytes to move intact when an image stack is concatenated or published.
-            let mut validator =
-                rkyv::validation::validators::ArchiveValidator::with_max_depth(chunk, 128);
+            let mut validator = super::validator::Validator::new(chunk);
             let bodies = rkyv::validation::check_archived_root_with_context::<Vec<FuncBody>, _>(
                 chunk,
                 &mut validator,
@@ -78,7 +79,20 @@ impl Functions {
         if pos != data.len() {
             return Err(invalid());
         }
-        Ok(Self { bytes, chunks })
+        let mut result = Self {
+            bytes,
+            chunks,
+            templates: HashMap::new(),
+        };
+        let templates: Vec<_> = result
+            .bodies()
+            .filter_map(|body| body.shared.as_ref())
+            .map(|shared| std::ptr::from_ref(shared.template.as_ref()) as usize)
+            .collect();
+        for key in templates {
+            result.templates.entry(key).or_default();
+        }
+        Ok(result)
     }
 
     fn chunk_bodies(&self, chunk: &Chunk) -> &[ArchivedFuncBody] {
@@ -104,9 +118,32 @@ impl Functions {
     }
 
     pub(crate) fn decode(&self, index: usize) -> FuncBody {
-        match self.body(index).deserialize(&mut rkyv::Infallible) {
-            Ok(body) => body,
-            Err(never) => match never {},
+        fn owned<T>(value: &impl Deserialize<T, rkyv::Infallible>) -> T {
+            match value.deserialize(&mut rkyv::Infallible) {
+                Ok(value) => value,
+                Err(never) => match never {},
+            }
+        }
+        let body = self.body(index);
+        FuncBody {
+            frame_size: body.frame_size,
+            frame_align: body.frame_align,
+            ret: owned(&body.ret),
+            params: owned(&body.params),
+            caller_loc_off: owned(&body.caller_loc_off),
+            name: owned(&body.name),
+            blocks: owned(&body.blocks),
+            shared: body.shared.as_ref().map(|shared| {
+                let key = std::ptr::from_ref(shared.template.as_ref()) as usize;
+                let template =
+                    self.templates[&key].get_or_init(|| Arc::new(owned(shared.template.as_ref())));
+                Box::new(SharedBody {
+                    template: template.clone(),
+                    values: owned(&shared.values),
+                    locals: owned(&shared.locals),
+                    calls: owned(&shared.calls),
+                })
+            }),
         }
     }
 }
@@ -230,6 +267,7 @@ mod tests {
             unwind: false,
         };
         let body = FuncBody {
+            shared: None,
             name: "indirect".into(),
             frame_size: 16,
             frame_align: 8,
@@ -285,6 +323,7 @@ mod tests {
     fn rejects_truncation_invalid_discriminants_and_relative_pointers() {
         use crate::vm::ir::*;
         let body = FuncBody {
+            shared: None,
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,

@@ -5,6 +5,7 @@ fn module() -> Module {
     let mut module = Module {
         funcs: (0..8)
             .map(|index| FuncBody {
+                shared: None,
                 name: format!("body{index}").into(),
                 frame_size: 8,
                 frame_align: 8,
@@ -44,6 +45,132 @@ fn load_once(module: &Module, instance: &Instance) -> Result<VerifiedArtifact, E
 }
 
 #[test]
+fn generic_shared_archive_execution_and_concurrent_specialization() {
+    let first = test_generic_body(11);
+    let mut second = test_generic_body(29);
+    second.shared.as_mut().unwrap().template = first.shared.as_ref().unwrap().template.clone();
+    let mut module = Module {
+        funcs: vec![first, second].into(),
+        ..Module::default()
+    };
+    module.exports.insert("left".into(), 0);
+    module.exports.insert("right".into(), 1);
+    module.ensure_function_names();
+    let source = archive(&module);
+    let a = source.body(0).shared.as_ref().unwrap();
+    let b = source.body(1).shared.as_ref().unwrap();
+    assert!(std::ptr::eq(a.template.as_ref(), b.template.as_ref()));
+    let image = load(&module, &Instance::default()).unwrap();
+    let artifact = image.instantiate().unwrap();
+    let independent = image.instantiate().unwrap();
+    assert_eq!(artifact.module().funcs.decoded_count(), 0);
+    assert_eq!(artifact.module().funcs.specialized_count(), 0);
+    let engine = unsafe { crate::vm::Engine::from_verified_unchecked(artifact) }.unwrap();
+    let funcs = &engine.shared().module.funcs;
+    for (name, expected) in [("left", 18), ("right", 36)] {
+        // SAFETY: both exports accept and return one u64.
+        let result = unsafe { crate::vm::interp::run_export(&engine, name, &[7]) }.unwrap();
+        assert_eq!(result.into_returned().unwrap().lo, expected);
+    }
+    assert_eq!(funcs.specialized_count(), 0);
+    let first = funcs.execution(0).unwrap();
+    let second = funcs.execution(1).unwrap();
+    assert!(Arc::ptr_eq(
+        &first.shared.as_ref().unwrap().template,
+        &second.shared.as_ref().unwrap().template
+    ));
+    std::thread::scope(|scope| {
+        let joins: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| funcs.get(0).unwrap() as *const _ as usize))
+            .collect();
+        let pointers: Vec<_> = joins.into_iter().map(|join| join.join().unwrap()).collect();
+        assert!(pointers.iter().all(|pointer| *pointer == pointers[0]));
+    });
+    assert_eq!(funcs.specialized_count(), 1);
+    assert!(first.shared.is_some());
+    assert_eq!(funcs.get(0).unwrap().frame_size, first.frame_size);
+    assert_eq!(
+        postcard::to_stdvec(&funcs.get(0).unwrap().ret).unwrap(),
+        postcard::to_stdvec(&first.ret).unwrap()
+    );
+    assert_eq!(independent.module().funcs.specialized_count(), 0);
+    assert_eq!(independent.module().funcs.decoded_count(), 0);
+    funcs.prepare_for_fork();
+    assert_eq!(funcs.specialized_count(), 2);
+    // Republishing retains templates even after this Engine has specialized both instances.
+    let republished = load(&engine.shared().module, &Instance::default()).unwrap();
+    let fresh = republished.instantiate().unwrap();
+    assert_eq!(fresh.module().funcs.specialized_count(), 0);
+    assert!(fresh.module().funcs.execution(0).unwrap().shared.is_some());
+}
+
+#[test]
+fn generic_shared_archives_reject_invalid_descriptors_without_specializing() {
+    for bad in 0..7 {
+        let mut body = test_generic_body(11);
+        let shared = body.shared.as_mut().unwrap();
+        match bad {
+            0 => shared.values.clear(),
+            1 => Arc::make_mut(&mut shared.template).dictionary = body.frame_size,
+            2 => shared.locals.push(FrameLocal {
+                pointer: Slot {
+                    off: 0,
+                    width: Width::W64,
+                },
+                off: 24,
+                size: 8,
+                align: 8,
+            }),
+            3 => shared.calls.push(Terminator::Return),
+            4 => {
+                Arc::make_mut(&mut shared.template).blocks[0].term = Terminator::Call {
+                    callee: 7,
+                    args: Vec::new(),
+                    ret: RetDest::Ignore,
+                    target: 0,
+                    unwind: UnwindAction::Continue,
+                    role: CallRole::Normal,
+                }
+            }
+            5 => Arc::make_mut(&mut shared.template).blocks[0]
+                .stmts
+                .push(Stmt::Assign {
+                    dst: ScalarPlace::Slot(Slot {
+                        off: 16,
+                        width: Width::W64,
+                    }),
+                    rv: Rvalue::Use(Operand::Imm {
+                        bits: 0,
+                        width: Width::W64,
+                    }),
+                }),
+            6 => Arc::make_mut(&mut shared.template).blocks[0]
+                .stmts
+                .push(Stmt::Assign {
+                    dst: ScalarPlace::Slot(Slot {
+                        off: 8,
+                        width: Width::W64,
+                    }),
+                    rv: Rvalue::TlsRef(0),
+                }),
+            _ => unreachable!(),
+        }
+        let mut module = Module {
+            funcs: vec![body].into(),
+            ..Module::default()
+        };
+        module.ensure_function_names();
+        let instance = Instance::default();
+        let owned = crate::vm::verify::module(&module, &instance).unwrap_err();
+        let archived = load(&module, &instance)
+            .err()
+            .expect("invalid shared descriptor accepted");
+        assert_eq!(owned.to_string(), archived.to_string(), "case {bad}");
+        assert_eq!(module.funcs.specialized_count(), 0);
+    }
+}
+
+#[test]
 fn header_queries_preserve_lazy_bodies_across_archive_parts() {
     let slot = |off, width| Slot { off, width };
     let lo = slot(0, Width::W8);
@@ -62,6 +189,7 @@ fn header_queries_preserve_lazy_bodies_across_archive_parts() {
         .into_iter()
         .enumerate()
         .map(|(i, ret)| FuncBody {
+            shared: None,
             frame_size: 128,
             frame_align: 64,
             ret,

@@ -36,6 +36,7 @@ fn host_syscall_module(builtin: Builtin, nr: i64, args: &[u64]) -> Module {
         width: Width::W64,
     }));
     export_module(FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Pair(result, errno),

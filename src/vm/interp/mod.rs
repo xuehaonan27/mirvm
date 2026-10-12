@@ -289,6 +289,7 @@ mod tests {
             }),
         };
         let pinned = FuncBody {
+            shared: None,
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Scalar(value),
@@ -312,6 +313,7 @@ mod tests {
         };
         let mut module = Module::default();
         module.funcs.push(FuncBody {
+            shared: None,
             blocks: vec![Block {
                 stmts: Vec::new(),
                 term: Terminator::Trap("must not look up the body again".into()),
@@ -337,6 +339,7 @@ mod tests {
     fn engine_fault_returns_from_export_instead_of_exiting_the_host() {
         let mut module = Module::default();
         module.funcs.push(FuncBody {
+            shared: None,
             frame_size: 0,
             frame_align: 1,
             ret: RetAbi::Zst,
@@ -369,6 +372,7 @@ mod tests {
         };
         let mut module = Module::default();
         module.funcs.push(FuncBody {
+            shared: None,
             frame_size: 16,
             frame_align: 8,
             ret: RetAbi::Pair(lo, hi),

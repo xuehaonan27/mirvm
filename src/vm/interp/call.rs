@@ -37,7 +37,7 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     let module: &Module = unsafe { &(*ctx).shared.module };
     // Prologue, execution and cleanup share this immutable body, even if subsequent entries
     // select another execution form for the same FuncId.
-    let body: &FuncBody = &module.funcs[func as usize];
+    let body: &FuncBody = module.funcs.execution(func as usize).expect("valid FuncId");
 
     // The prologue can raise an EngineFault too (stack guard, argument ABI, exhausted operand
     // region), so staged guards are armed from the first Ctx mutation and undo only the steps
@@ -69,6 +69,20 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
 
     let base = region_reserve(ctx, body.frame_size, body.frame_align);
     guard.base = Some(base);
+    if let Some(shared) = &body.shared {
+        slot_write(
+            ctx,
+            base,
+            Slot {
+                off: shared.template.dictionary,
+                width: Width::W64,
+            },
+            shared.values.as_ptr() as u64,
+        );
+        for local in &shared.locals {
+            slot_write(ctx, base, local.pointer, base as u64 + u64::from(local.off));
+        }
+    }
     // Prologue: consume the argument slots per ParamAbi. The count is checked up front so a
     // mismatch names the function and the expectation rather than panicking out of bounds.
     let needed: usize = matches!(body.ret, RetAbi::Indirect { .. }) as usize

@@ -17,12 +17,14 @@ use super::{
 
 pub use ffi::*;
 pub use funcs::*;
+pub use generic::*;
 pub(crate) use header::*;
 pub use instr::*;
 pub use module::*;
 
 mod ffi;
 mod funcs;
+mod generic;
 mod header;
 mod instr;
 mod module;

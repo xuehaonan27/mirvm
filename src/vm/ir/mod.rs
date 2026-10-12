@@ -808,6 +808,7 @@ mod tests {
     #[test]
     fn capture_rewrite_changes_only_plain_host_syscalls() {
         let body = |name: &str, builtin| FuncBody {
+            shared: None,
             frame_size: 0,
             frame_align: 1,
             ret: RetAbi::Zst,

@@ -119,7 +119,7 @@ pub fn lookup(
         .frozen
         .as_ref()
         .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))?;
-    let unit = crate::image::deps::unit_of(&[], below.prefix, &f.module, 0, frozen);
+    let unit = crate::image::deps::unit_of(&[], below.prefix, &f.module, frozen);
     let symbols = manifest::Symbols::of(stack.layers());
     // A missing fragment or an unresolvable symbol is a miss, never a partial module.
     manifest::rehydrate_module(&mut f.module, &f.funcs, &unit, &symbols).ok()?;
@@ -155,7 +155,7 @@ pub(crate) fn mark_live(
     let Ok(file) = postcard::from_bytes::<manifest::File>(manifest_bytes) else {
         return;
     };
-    fragments.extend(file.funcs.iter().map(|record| record.fragment));
+    fragments.extend(file.funcs.iter().flat_map(manifest::Record::fragments));
     if let Some(frozen) = &file.frozen {
         chunks.extend(frozen.chunks.iter().copied());
     }
@@ -208,7 +208,7 @@ pub fn store(
     // edit, and what lets two programs share a body they both have — and the manifest keeps the rest.
     // The segments mirror the closure layer's exactly, because the delta *is* the closure above the
     // base in this track.
-    let unit = crate::image::deps::unit_of(&[], below.prefix, module, 0, frozen);
+    let unit = crate::image::deps::unit_of(&[], below.prefix, module, frozen);
     let symbols = manifest::Symbols::of(stack.layers());
     let mut session = crate::store::frags::Session::default();
     let projected =

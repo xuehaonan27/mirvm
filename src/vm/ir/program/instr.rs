@@ -713,6 +713,7 @@ pub struct Block {
 )]
 #[archive(check_bytes)]
 pub struct FuncBody {
+    pub shared: Option<Box<super::SharedBody>>,
     pub frame_size: u32,
     pub frame_align: u32,
     /// Return channel (_0).

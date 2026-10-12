@@ -14,11 +14,12 @@
 //! handled in one direction only.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::vm::ir::frag::{self, SiteVisitor, Target};
-use crate::vm::ir::{AsmStubId, FuncBody, FuncId, LinkAddr, TlsId};
+use crate::vm::ir::{AsmStubId, FuncBody, FuncId, GenericTemplate, LinkAddr, TlsId};
 
 /// What one ordinal of a canonical body stands for.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -380,6 +381,9 @@ pub(crate) fn project_module(
             Ok(projected) => {
                 records.push(projected.record);
                 session.add(projected.bytes);
+                if let Some(template) = projected.template {
+                    session.add(template);
+                }
             }
             Err(error) => {
                 if crate::options::a2_debug() {
@@ -422,8 +426,17 @@ pub(crate) fn rehydrate_module(
             )
         ));
     }
-    let ids: Vec<[u8; 32]> = records.iter().map(|record| record.fragment).collect();
+    let ids: Vec<[u8; 32]> = records.iter().flat_map(Record::fragments).collect();
     let fragments = crate::store::frags::Index::load().read_many(&ids);
+    let mut templates = HashMap::new();
+    for id in records.iter().filter_map(|record| record.template) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = templates.entry(id) {
+            let bytes = fragments
+                .get(&id)
+                .ok_or_else(|| crate::fail!(Image, "a shared template is missing"))?;
+            entry.insert(Arc::new(frag::decode_template(bytes)?));
+        }
+    }
     let mut bodies = Vec::with_capacity(records.len());
     for (index, record) in records.iter().enumerate() {
         let fragment = fragments.get(&record.fragment).ok_or_else(|| {
@@ -433,7 +446,15 @@ pub(crate) fn rehydrate_module(
             )
         })?;
         let name = module.function_names.get(index).map_or("?", |name| name);
-        bodies.push(rehydrate(fragment, &record.bindings, name, unit, symbols)?);
+        let template = record.template.map(|id| (id, templates[&id].clone()));
+        bodies.push(rehydrate(
+            fragment,
+            template,
+            &record.bindings,
+            name,
+            unit,
+            symbols,
+        )?);
     }
     module.funcs = bodies.into();
     Ok(())
@@ -628,10 +649,17 @@ impl Tables {
 }
 
 /// One function's stored form: the fragment, and what its ordinals mean.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Record {
     pub fragment: [u8; 32],
+    pub template: Option<[u8; 32]>,
     pub bindings: Vec<Binding>,
+}
+
+impl Record {
+    pub(crate) fn fragments(&self) -> impl Iterator<Item = [u8; 32]> {
+        std::iter::once(self.fragment).chain(self.template)
+    }
 }
 
 /// One projected body: what the manifest records, plus the bytes the fragment store needs.
@@ -639,6 +667,7 @@ pub(crate) struct Record {
 pub(crate) struct Projected {
     pub record: Record,
     pub bytes: Vec<u8>,
+    pub template: Option<Vec<u8>>,
 }
 
 /// Write one lowered body down. `Err` names the target that could not be expressed; the caller treats
@@ -653,13 +682,18 @@ pub(crate) fn project(
     for target in &canonical.targets {
         bindings.push(project_target(*target, unit, symbols)?);
     }
-    let bytes = frag::encode_canonical(&canonical.body)?;
+    let stored = frag::stored_canonical(canonical.body)?;
+    let template = stored.template;
+    let template_id = template.as_ref().map(|bytes| frag::id_of(bytes));
+    let bytes = stored.descriptor;
     Ok(Projected {
         record: Record {
             fragment: frag::id_of(&bytes),
+            template: template_id,
             bindings,
         },
         bytes,
+        template,
     })
 }
 
@@ -807,12 +841,33 @@ pub(crate) fn index_target<'a>(
 /// One function's fragment bytes and bindings, turned back into the body the runtime needs.
 pub(crate) fn rehydrate(
     fragment: &[u8],
+    template: Option<([u8; 32], Arc<GenericTemplate>)>,
     bindings: &[Binding],
     name: &str,
     unit: &Unit,
     symbols: &Symbols,
 ) -> Result<FuncBody, crate::error::Error> {
-    let mut body = frag::decode(fragment)?;
+    let (id, bytes) = postcard::take_from_bytes::<Option<[u8; 32]>>(fragment)
+        .map_err(|error| crate::fail!(Image, error.to_string()))?;
+    if id != template.as_ref().map(|(id, _)| *id) {
+        return Err(crate::fail!(
+            Image,
+            "descriptor template identity differs from manifest"
+        ));
+    }
+    let mut body = frag::decode(bytes)?;
+    match (&mut body.shared, template) {
+        (Some(shared), Some((_, blocks))) if shared.template.blocks.is_empty() => {
+            shared.template = blocks
+        }
+        (None, None) => {}
+        _ => {
+            return Err(crate::fail!(
+                Image,
+                "descriptor and template representation differ"
+            ));
+        }
+    }
     body.name = name.into();
     let mut binder = Binder {
         bindings,
@@ -997,6 +1052,7 @@ mod tests {
     /// the terminator, and a call's callee before its arguments.
     fn body_with_sites(tls: TlsId, static_addr: u64, callee: FuncId, addr_imm: u64) -> FuncBody {
         FuncBody {
+            shared: None,
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,
@@ -1035,6 +1091,7 @@ mod tests {
 
     fn asm_body(stub: AsmStubId) -> FuncBody {
         FuncBody {
+            shared: None,
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,
@@ -1203,6 +1260,7 @@ mod tests {
             let projected = project(&body, &unit, &symbols).unwrap();
             let rebuilt = rehydrate(
                 &projected.bytes,
+                None,
                 &projected.record.bindings,
                 "sym",
                 &unit,
@@ -1221,6 +1279,79 @@ mod tests {
     }
 
     #[test]
+    fn generic_templates_are_shared_and_descriptors_bind_the_exact_template() {
+        use crate::vm::ir::*;
+        let unit = unit();
+        let symbols = Symbols::default();
+        let mut body = test_generic_body(11);
+        let call = Terminator::Call {
+            callee: 0,
+            args: Vec::new(),
+            ret: RetDest::Ignore,
+            target: 1,
+            unwind: UnwindAction::Continue,
+            role: CallRole::Normal,
+        };
+        let shared = body.shared.as_mut().unwrap();
+        let blocks = &mut Arc::make_mut(&mut shared.template).blocks;
+        blocks[0].term = call.clone();
+        blocks.push(Block {
+            stmts: Vec::new(),
+            term: Terminator::Return,
+        });
+        shared.calls.push(call);
+        if let Terminator::Call { callee, .. } = &mut shared.calls[0] {
+            *callee = unit.funcs.0 + 2;
+        }
+        let first = project(&body, &unit, &symbols).unwrap();
+        let mut other = body.clone();
+        other.shared.as_mut().unwrap().values[0] = 29;
+        let second = project(&other, &unit, &symbols).unwrap();
+        assert_eq!(first.record.template, second.record.template);
+        assert_eq!(first.template, second.template);
+        assert_ne!(first.record.fragment, second.record.fragment);
+        let id = first.record.template.unwrap();
+        let blocks = Arc::new(frag::decode_template(first.template.as_ref().unwrap()).unwrap());
+        let rebuild = |projected: &Projected| {
+            rehydrate(
+                &projected.bytes,
+                Some((id, blocks.clone())),
+                &projected.record.bindings,
+                "bound",
+                &unit,
+                &symbols,
+            )
+            .unwrap()
+        };
+        let a = rebuild(&first);
+        let b = rebuild(&second);
+        assert!(Arc::ptr_eq(
+            &a.shared.as_ref().unwrap().template,
+            &b.shared.as_ref().unwrap().template
+        ));
+        assert_eq!(a.shared.as_ref().unwrap().values, [11]);
+        assert_eq!(b.shared.as_ref().unwrap().values, [29]);
+        assert_eq!(frag::canonical(&a).targets, frag::canonical(&body).targets);
+        assert_eq!(project(&a, &unit, &symbols).unwrap().record, first.record);
+        for template in [None, Some(([0; 32], blocks.clone()))] {
+            let error = rehydrate(
+                &first.bytes,
+                template,
+                &first.record.bindings,
+                "bad",
+                &unit,
+                &symbols,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("template identity"), "{error}");
+        }
+        assert_eq!(
+            first.record.fragments().collect::<Vec<_>>(),
+            [first.record.fragment, id]
+        );
+    }
+
+    #[test]
     fn a_binding_of_the_wrong_kind_is_rejected() {
         let unit = unit();
         let symbols = Symbols::default();
@@ -1228,7 +1359,8 @@ mod tests {
         let projected = project(&body, &unit, &symbols).unwrap();
         let mut bindings = projected.record.bindings.clone();
         bindings[0] = Binding::Func(0);
-        let error = rehydrate(&projected.bytes, &bindings, "sym", &unit, &symbols).unwrap_err();
+        let error =
+            rehydrate(&projected.bytes, None, &bindings, "sym", &unit, &symbols).unwrap_err();
         assert!(error.to_string().contains("does not name a TLS"), "{error}");
     }
 
@@ -1240,6 +1372,7 @@ mod tests {
         let projected = project(&body, &unit, &symbols).unwrap();
         let error = rehydrate(
             &projected.bytes,
+            None,
             &projected.record.bindings,
             "sym",
             &unit,

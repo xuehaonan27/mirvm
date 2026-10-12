@@ -5,6 +5,7 @@ pub(crate) mod functions;
 pub(crate) mod meta;
 #[cfg(test)]
 mod tests;
+mod validator;
 
 use std::sync::Arc;
 

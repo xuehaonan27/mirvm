@@ -39,6 +39,7 @@ unsafe extern "C-unwind" fn set_tsd_from_exit_signal() {
 fn exit_signal_tsd_module(marker: &AtomicU64) -> Module {
     let mut module = tsd_module(marker, false);
     let attach = FuncBody {
+        shared: None,
         frame_size: 0,
         frame_align: 1,
         ret: RetAbi::Zst,
@@ -51,6 +52,7 @@ fn exit_signal_tsd_module(marker: &AtomicU64) -> Module {
         name: "attach_before_reusing_low_tsd_key".into(),
     };
     let handler = FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,

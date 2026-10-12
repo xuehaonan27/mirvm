@@ -84,18 +84,20 @@ pub(crate) fn main_role_counts(
 }
 
 pub(crate) fn body_main_role_counts(body: &FuncBody) -> (usize, usize) {
-    body.blocks
+    body.code()
         .iter()
-        .fold((0, 0), |(boundaries, catchers), block| match block.term {
-            Terminator::Call {
-                role: CallRole::MainPanicBoundary,
-                ..
-            } => (boundaries + 1, catchers),
-            Terminator::CallBuiltin {
-                role: BuiltinCallRole::MainPanicCatcher,
-                ..
-            } => (boundaries, catchers + 1),
-            _ => (boundaries, catchers),
+        .fold((0, 0), |(boundaries, catchers), block| {
+            match body.term(block) {
+                Terminator::Call {
+                    role: CallRole::MainPanicBoundary,
+                    ..
+                } => (boundaries + 1, catchers),
+                Terminator::CallBuiltin {
+                    role: BuiltinCallRole::MainPanicCatcher,
+                    ..
+                } => (boundaries, catchers + 1),
+                _ => (boundaries, catchers),
+            }
         })
 }
 
@@ -136,6 +138,7 @@ impl AddressUses {
 pub(crate) mod archived;
 mod body;
 mod ffi;
+mod shared;
 mod vocab;
 
 impl<'a> Verifier<'a> {

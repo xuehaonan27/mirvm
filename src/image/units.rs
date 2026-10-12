@@ -358,7 +358,6 @@ fn load_one(
         &stack.layer_ranges(),
         stack.below().prefix,
         &f.module,
-        f.home,
         frozen,
     );
     // Bindings and the id-bearing tables resolve against the layers below this unit, and the whole
@@ -376,9 +375,7 @@ fn load_one(
     {
         for (body, record) in f.module.funcs.iter().zip(&f.funcs) {
             match manifest::project(body, &unit_view, &symbols) {
-                Ok(projected)
-                    if projected.record.fragment == record.fragment
-                        && projected.record.bindings == record.bindings => {}
+                Ok(projected) if projected.record == *record => {}
                 Ok(_) => {
                     reason("a body does not project back to its record");
                     return None;
@@ -526,13 +523,7 @@ pub(crate) fn store(
         return super::deps::degraded(bi);
     };
     let frozen = (snapshot.home() as u64, snapshot.bytes().len() as u64);
-    let unit_view = super::deps::unit_of(
-        &stack.layer_ranges(),
-        below.prefix,
-        &bi.module,
-        home,
-        frozen,
-    );
+    let unit_view = super::deps::unit_of(&stack.layer_ranges(), below.prefix, &bi.module, frozen);
     let symbols = manifest::Symbols::of(stack.layers());
     let mut session = crate::store::frags::Session::default();
     let mut chunks = crate::store::frags::Session::default();

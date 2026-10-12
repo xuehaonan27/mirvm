@@ -39,6 +39,7 @@ fn p1_identity_module(link_addr: LinkAddr, unwind: bool) -> Module {
 fn foreign_closed_traversal_module(owner_thunk: u64) -> Module {
     let mut module = Module {
         funcs: vec![FuncBody {
+            shared: None,
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,

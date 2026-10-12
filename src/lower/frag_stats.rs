@@ -2,7 +2,7 @@
 //! fragments, and how much of that is shared content.
 //!
 //! The design's sharing-acceptance ratio is this number, so the probe hashes exactly the at-rest form
-//! the fragment store uses ([`crate::vm::ir::frag`]) and prints one line per body. Two sessions are
+//! the fragment store uses ([`crate::vm::ir::frag`]) and prints one line per fragment reference. Two sessions are
 //! compared by intersecting their id sets: the share between two adjacent versions of a crate, or
 //! between two feature sets, is that intersection over the union. What the summary adds per layer is
 //! the size the layer would take — unique fragment bytes plus the frozen bytes stored beside them —
@@ -47,7 +47,7 @@ impl FragStats {
 
     /// Record one stored body against the unit the home rule gives it.
     pub(super) fn home(&mut self, home: Option<crate::image::units::Home>, body: &ir::FuncBody) {
-        let Ok(bytes) = ir::frag::encode(body) else {
+        let Ok(stored) = ir::frag::stored_canonical(ir::frag::canonical(body).body) else {
             return;
         };
         let entry = self.homes.entry(home.map(|home| home.unit)).or_default();
@@ -55,13 +55,15 @@ impl FragStats {
         if home.is_some_and(|home| home.unattached) {
             entry.unattached += 1;
         }
-        entry.canonical_bytes += bytes.len() as u64;
-        let fragments = entry
-            .fragments
-            .entry(ir::frag::id_of(&bytes))
-            .or_insert((0, 0));
-        fragments.0 += 1;
-        fragments.1 = bytes.len() as u64;
+        for bytes in stored.fragments() {
+            entry.canonical_bytes += bytes.len() as u64;
+            let fragments = entry
+                .fragments
+                .entry(ir::frag::id_of(bytes))
+                .or_insert((0, 0));
+            fragments.0 += 1;
+            fragments.1 = bytes.len() as u64;
+        }
     }
 
     /// Record one stored layer. A body that cannot be encoded is skipped: it could not become a
@@ -73,24 +75,26 @@ impl FragStats {
             ..Default::default()
         };
         for body in funcs.iter() {
-            let Ok(bytes) = ir::frag::encode(body) else {
+            let Ok(stored) = ir::frag::stored_canonical(ir::frag::canonical(body).body) else {
                 continue;
             };
-            let id = ir::frag::id_of(&bytes);
             layer.bodies += 1;
-            layer.canonical_bytes += bytes.len() as u64;
-            layer
-                .fragments
-                .entry(id)
-                .or_insert((0, bytes.len() as u64))
-                .0 += 1;
-            crate::diag::instrument(format_args!(
-                "[frag] {} {} {} {}",
-                name,
-                crate::utils::content::digest_hex(&id),
-                bytes.len(),
-                body.name
-            ));
+            for bytes in stored.fragments() {
+                let id = ir::frag::id_of(bytes);
+                layer.canonical_bytes += bytes.len() as u64;
+                layer
+                    .fragments
+                    .entry(id)
+                    .or_insert((0, bytes.len() as u64))
+                    .0 += 1;
+                crate::diag::instrument(format_args!(
+                    "[frag] {} {} {} {}",
+                    name,
+                    crate::utils::content::digest_hex(&id),
+                    bytes.len(),
+                    body.name
+                ));
+            }
         }
         self.layers.push(layer);
     }
