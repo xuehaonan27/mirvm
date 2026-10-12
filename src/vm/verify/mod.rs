@@ -99,6 +99,7 @@ pub(crate) fn body_main_role_counts(body: &FuncBody) -> (usize, usize) {
         })
 }
 
+#[derive(Clone, Copy)]
 struct Verifier<'a> {
     module: &'a Module,
     instance: &'a Instance,
@@ -223,16 +224,29 @@ impl<'a> Verifier<'a> {
         self.run_header()?;
         let mut main_boundaries = 0;
         let mut main_catchers = 0;
-        for (i, body) in self.module.funcs.iter().enumerate() {
-            self.body(body).map_err(|e| {
-                crate::fail!(
-                    Engine,
-                    format!("function {} `{}`: {e}", self.prefix.funcs + i, body.name)
-                )
-            })?;
-            let (boundaries, catchers) = body_main_role_counts(body);
-            main_boundaries += boundaries;
-            main_catchers += catchers;
+        let mut index = self.prefix.funcs;
+        for part in self.module.funcs.parts() {
+            match part {
+                FuncPart::Owned(bodies) => {
+                    for body in bodies {
+                        self.body(body).map_err(|e| {
+                            crate::fail!(Engine, format!("function {index} `{}`: {e}", body.name))
+                        })?;
+                        let (boundaries, catchers) = body_main_role_counts(body);
+                        main_boundaries += boundaries;
+                        main_catchers += catchers;
+                        index += 1;
+                    }
+                }
+                FuncPart::Archived(archive) => {
+                    for body in archive.bodies() {
+                        let (boundaries, catchers) = archived::function_in(*self, index, body)?;
+                        main_boundaries += boundaries;
+                        main_catchers += catchers;
+                        index += 1;
+                    }
+                }
+            }
         }
         // Delta images can refer to a boundary stored in an earlier image layer. The merged
         // executable (prefix zero) must contain exactly one before it can run or be packed.

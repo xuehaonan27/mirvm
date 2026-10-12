@@ -34,7 +34,10 @@ impl<'tcx> Linker<'tcx> {
         }
         let fid = self.func_id(inst);
         if fid < self.delta_first_fn
-            && let Some(&a) = self.base_fn_entries.get(self.tcx.symbol_name(inst).name)
+            && let Some(&a) = self
+                .base_fn_entries
+                .get(self.tcx.symbol_name(inst).name)
+                .or_else(|| self.base_fn_entries.get(self.base_symbol(inst).as_str()))
         {
             self.fn_entries.insert(inst, a);
             return Ok(a);

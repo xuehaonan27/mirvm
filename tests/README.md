@@ -39,9 +39,10 @@ metadata, so some call chains can remain incomplete. This instrument is Linux-on
 frame pointers can then truncate the chain. The default `dwarf,16384` is useful for host startup.
 
 CPU flame graphs exclude I/O and scheduling waits. Measure wall time separately without perf;
-`MIRVM_TIMING=1` supplies the product's phase ledger. Its `layer-load` is nested inside `frontend`
-or `cache-load`, and `frontend` includes base-image preparation. Do not add nested fields together
-or treat `total` as whole-process time: dependency preparation before the driver and final process
+`MIRVM_TIMING=1` supplies the product's phase ledger. `base-load` is nested inside `frontend` or
+`cache-load`; a missing base's `base-build` follows analysis and precedes program `lower`. It includes
+std lowering, encoding, verification and publication. `layer-load` includes manifest loading before
+analysis and after a new base. Do not add overlapping fields or treat `total` as whole-process time: dependency preparation before the driver and final process
 teardown are outside it. Distinguish an empty derived cache, a prepared base with a new program,
 and a new process with reusable program/JIT entries. Keep source paths, sysroot and filesystem
 constant; use an isolated `MIRVM_HOME` instead of purging a working cache. These states do not imply
@@ -51,6 +52,11 @@ an empty OS page cache.
 `mirvm log export SESSION`, checks captured guest syscall events. The current event format has no
 timestamps and covers the instrumented variadic `libc::syscall` path, so it cannot provide startup
 durations or a CPU flame graph. A compute-only guest may produce a clean session with zero records.
+
+`make case C=base-image` checks canonical std bytes across isolated and in-session builds, different
+main return types and allocators, program/native input isolation, profile separation, cross-program
+reuse, edits, corrupt-cache recovery and publication failure. It uses fresh derived stores sharing
+the existing sysroot. `MIRVM_CONTRACT_HOME` selects that shared home.
 
 `validate` and `inventory` build nothing, so a manifest typo or an unjustified asset costs seconds.
 The framework needs no particular bash version and no product to check itself: the

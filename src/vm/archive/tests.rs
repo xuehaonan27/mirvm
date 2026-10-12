@@ -62,6 +62,66 @@ fn engine_construction_preserves_lazy_bodies_and_fork_settles_them() {
 }
 
 #[test]
+fn merged_archives_verify_and_publish_without_decoding() {
+    let mut base = module();
+    // A backward reference in the suffix must retain its absolute id after merge and publication.
+    let mut tail = module();
+    let mut bodies = Vec::new();
+    tail.funcs.drain_into(&mut bodies);
+    bodies[0].blocks[0].term = Terminator::Call {
+        callee: 3,
+        args: Vec::new(),
+        ret: RetDest::Ignore,
+        target: 0,
+        unwind: UnwindAction::Continue,
+        role: CallRole::Normal,
+    };
+    tail.funcs = bodies.into();
+    base.funcs = FuncTable::from_archive(Arc::new(archive(&base)));
+    tail.funcs = FuncTable::from_archive(Arc::new(archive(&tail)));
+    base.funcs.append(tail.funcs);
+    base.function_names.extend(tail.function_names);
+    base.funcs.append(vec![module().funcs[0].clone()].into());
+    base.function_names.push("body0".into());
+    assert_eq!(base.funcs.decoded_count(), 1);
+    crate::vm::verify::module(&base, &Instance::default()).unwrap();
+    let published = load(&base, &Instance::default()).unwrap();
+    assert_eq!(base.funcs.decoded_count(), 1);
+    let artifact = published.instantiate().unwrap();
+    let funcs = &artifact.module().funcs;
+    assert_eq!(funcs.len(), 17);
+    assert_eq!(funcs.decoded_count(), 0);
+    assert_eq!(&*funcs[7].name, "body7");
+    assert!(matches!(
+        funcs[8].blocks[0].term,
+        Terminator::Call { callee: 3, .. }
+    ));
+    assert_eq!(&*funcs[15].name, "body7");
+    assert_eq!(&*funcs[16].name, "body0");
+    assert!(funcs.get(17).is_none());
+    assert_eq!(funcs.decoded_count(), 4);
+    funcs.prepare_for_fork();
+    assert_eq!(funcs.decoded_count(), 17);
+
+    // Removing the suffix invalidates this forward reference even though the bytes were archived.
+    let mut bad = module();
+    let mut bodies = Vec::new();
+    bad.funcs.drain_into(&mut bodies);
+    bodies[0].blocks[0].term = Terminator::Call {
+        callee: 8,
+        args: Vec::new(),
+        ret: RetDest::Ignore,
+        target: 0,
+        unwind: UnwindAction::Continue,
+        role: CallRole::Normal,
+    };
+    bad.funcs = bodies.into();
+    bad.funcs = FuncTable::from_archive(Arc::new(archive(&bad)));
+    assert!(crate::vm::verify::module(&bad, &Instance::default()).is_err());
+    assert_eq!(bad.funcs.decoded_count(), 0);
+}
+
+#[test]
 fn archive_and_owned_verifiers_reject_the_same_invalid_references() {
     let invalid = [
         Terminator::Goto(99),

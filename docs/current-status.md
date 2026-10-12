@@ -53,7 +53,10 @@ contracts are its siblings in `docs/designs/`.
   immutable function archive. Mirvm-owned sysroots publish content-identified generations with local
   integrity receipts and process leases; ordinary external inputs retain full content hashing.
   [startup-cache-design.md](designs/startup-cache-design.md) owns these contracts. `MIRVM_TIMING`
-  prints a phase ledger.
+  prints a phase ledger. Std products are currently built locally; release delivery and project
+  `install` remain unimplemented. On the default track, a cold `prepare` writes program/shared
+  products but returns before final bound-image publication. The intended installation boundary is
+  specified in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the
   source into a process-owned immutable snapshot and each `unsafe instantiate` builds an independent
   Engine, so one package instantiates repeatedly and concurrently. Artifacts use logical `LinkAddr`
@@ -133,10 +136,11 @@ frame storage and constant-copy paths covers:
   (including manifest-driven collection), covering catalogue reconciliation, damaged and missing
   packs, file replacement, directory relocation and content changes with restored timestamps.
 
-Focused validation of the archive/load path passes 18 tests on Linux x86_64 and macOS aarch64.
-They cover archive layout round trips, invalid bounds and references, retained immutable ownership,
-concurrent demand decoding, fork preparation, isolated frozen domains, package mutation and
-bound-image invalidation. Managed-input tests cover generation identity, local receipt recovery and
+Focused archive/base/package checks pass on Linux x86_64 and macOS aarch64. They cover archive
+layout round trips, chunk bounds, cross-segment references, integrity and generation rejection,
+fixed-domain conflicts, demand decoding through merge and publication, fork preparation, isolated
+frozen domains, package mutation and bound-image invalidation. The package format rejects the
+previous unchunked generation. Managed-input tests cover generation identity, local receipt recovery and
 publication/collection leases. Linux release checks pass `fork_exec_probe`, `jit_unwind_probe`,
 `fib32-jit-cache`, all eight package assertions and the unchanged `fib32` timing case at 52 ms
 against its 80 ms ceiling. Package checks include concurrent public Engine embedding,
@@ -215,8 +219,10 @@ paused; the local equivalent is authoritative.
 
 ### Frontend research
 
-The current binary's driver ledger includes base preparation in `frontend`; its `lower` includes
-rustc queries triggered by MIRVM. These labels do not partition rustc work from MIRVM work.
+The driver ledger exposes base loading and construction separately. `base-load` is nested in
+`frontend` or `cache-load`; a miss's `base-build` follows analysis and precedes program `lower`.
+Both lowering phases include the compiler queries they drive; the labels do not partition rustc
+work from MIRVM work.
 An external callback probe linked to the release library uses the pinned `nightly-2026-07-02`, the
 managed MIR sysroot, `-Zmir-opt-level=2` and one frontend thread. Three runs per mode use rustc's
 coarse `time-passes` instrument; a separate self-profile capture provides query attribution.
@@ -240,19 +246,155 @@ metadata decoding (21.3 ms), codegen candidate selection (11.4 ms), layout (7.8 
 allocation evaluation (6.8 ms) and instance resolution (6.4 ms). Inclusive query durations overlap.
 The measured outer self time includes allocations and other uninstrumented work, not just emission.
 
-Production-binary controls run fib and flate2 in three isolated homes per cache state and preserve
-guest output. Fib's `frontend` medians are 326.8 ms with empty derived stores, 32.9 ms with a supplied
-base, and 9.4 ms with base bypassed; bypass shifts 234.3 ms into `lower`. A new home can also recover
-managed receipts before driver entry. Bypass disables bound-image caching, and those runs report no
-successful program-cache publication, so whole-run differences do not establish an equivalent
-optimization. All 24 production runs and 36 successful compiler probes are retained. Three CPU
-captures have zero lost samples; query summaries, timelines and flamegraphs provide the attribution.
+The std base is constructed from canonical std roots in the program's compiler session. The
+isolated preparation command uses the same roots; program-specific main, mono items, native inputs
+and allocator shims stay in the delta. Stable identities and semantic profile checks make the base
+reusable. Fresh mappings and immutable function archives survive publication in memory, so a miss
+needs neither a second compiler session nor a readback of the new base. The contract is specified
+in [startup-cache-design.md](designs/startup-cache-design.md#std-base-loading).
 
-The release executable directly depends on `librustc_driver`, including when no compiler session is
-needed. The shared engine has a compiler-free test build, but its product adapters and omitted JIT
-mean a complete compiler-independent runtime remains unproven. No product source was changed by
-this investigation and no repository test suite was run. The proposed experiments and compatibility
-requirements are in [frontend-boundary.md](designs/frontend-boundary.md).
+Alternating release controls use five samples per fib state and three per flate2 state. Isolated
+derived stores share managed sysroot contents and existing dependency metadata, with valid receipts;
+OS page caches are not flushed. Both binaries publish program caches, and unchanged reruns must
+report hits. An edit changes fib's result and is checked for invalidation. The reference already
+uses archived base bodies and the same small-call JIT optimization.
+
+| State | Isolated builder, whole process | Single session, whole process | Maximum RSS, reference → single session |
+|---|---:|---:|---:|
+| fib, empty derived caches | 432.1 ms | 400.1 ms | 261.8 → 260.4 MiB |
+| fib, only a compatible base prepared | 119.5 ms | 126.3 ms | 149.7 → 147.8 MiB |
+| Another fib program sharing the base | 104.3 ms | 106.7 ms | 149.3 → 148.5 MiB |
+| Edited fib program | 174.0 ms | 165.0 ms | 150.5 → 149.5 MiB |
+| Unchanged fib rerun | 43.2 ms | 42.8 ms | 69.7 → 66.8 MiB |
+
+These are medians, not latency guarantees. Empty-cache ranges are 418.4–442.8 ms and 394.8–403.2 ms;
+prepared-base ranges are 117.7–138.5 ms and 121.3–137.6 ms. Cold wall time falls by 7.4%, while a
+prepared compatible base is 6.8 ms slower in this sample. Second-program and unchanged reruns remain
+close to the reference. The cold driver total is 415.1 → 375.4 ms. Reference base construction is
+324.8 ms plus a 14.1 ms load; in-session construction is 267.4 ms with no readback. These build fields
+have different boundaries: the reference includes child startup and teardown, while the combined
+session's compiler finalization remains outside its build field. The wall-time comparison includes
+that cost on both sides. Maximum RSS is the process-tree maximum reported by GNU time, not aggregate
+simultaneously resident parent and child memory.
+
+The base artifact is 19.98 → 19.61 MiB. Cold peak memory remains about 260 MiB: compiler queries,
+owned bytecode and archive buffers still coexist during construction. flate2 with a compatible base
+has a median wall time of 2081.4 → 2035.2 ms and driver total of 1607.1 → 1579.8 ms. An 8.23 s
+whole-process outlier in the candidate is retained in the evidence; guest execution and filesystem
+or scheduling variability dominate this workload, so no runtime speedup is claimed. All 62 recorded
+runs preserve expected output and publication. Four separate CPU captures report zero lost samples;
+std lowering, compiler queries, allocation and destruction remain the main cold costs.
+
+The `base-image` contract checks isolated/in-session byte equality, different main return types,
+custom allocation and caught panic, native-input isolation, cross-program reuse, edits, corruption,
+failed publication, compiler errors and profile compatibility. Focused unit, release fork/unwind,
+package and capture probes cover the affected ownership paths. No full test tier or sanitizer gate
+is claimed for this change.
+
+The release executable still directly depends on `librustc_driver`, including when no compiler
+session is needed. A complete compiler-independent runtime remains unproven. Remaining experiments
+and compatibility requirements are in [frontend-boundary.md](designs/frontend-boundary.md).
+
+### Runtime generics evaluation
+
+A separate research build records each lowered instance, its definition, phase costs and canonical
+fragment, plus pure-interpreter function entries and executed IR statements/terminators. Every
+runtime function joins a lowering record. The production reference executable is unchanged. Counts
+below exclude its prepared 9,479-function std base and include all newly lowered program/dependency
+instances with type or const arguments; lifetime-only parameters are excluded. A definition group
+is `DefPathHash` plus instance-kind discriminator, not a proven shareable template.
+
+| Input | New generic instances | Definition groups | Entered | Unentered | Instances covering 90% / 99% of generic IR operations |
+|---|---:|---:|---:|---:|---:|
+| serde_json corpus | 1,318 | 599 | 786 | 532 (40.4%) | 311 / 619 |
+| flate2, input reduced to 2 KiB | 1,081 | 498 | 728 | 353 (32.7%) | 38 / 289 |
+| Eight-type serde matrix, one type used | 1,048 | 575 | 259 | 789 (75.3%) | 99 / 218 |
+| Same matrix, all eight types used | 1,048 | 575 | 469 | 579 (55.2%) | 100 / 303 |
+
+The matrix executes two roundtrips per selected type; it is a controlled sparse-use case, not a
+representative application. Operation counts are unweighted and exclude native work: they establish
+execution concentration, not CPU-time percentages or safe reachability pruning. Existing fragments
+already deduplicate storage: the serde instances have 645 unique canonical fragments, flate2 616,
+and the matrix 652. Instance reduction cannot be claimed as proportional artifact-size reduction.
+
+One instrumented lowering pass attributes 74.8 / 53.1 / 49.7 ms to the new generic bodies in
+serde / flate / matrix. Of that, 30.0 / 18.8 / 35.7 ms belongs to bodies unentered in serde / flate /
+the one-type matrix; using all matrix types reduces that exposure to 28.8 ms. Direct MIR parameter
+substitution takes only 6.3 / 4.9 / 6.9 ms. The rest includes metadata, further layout/constant/call
+queries and bytecode construction. These are attribution samples, affected by instrumentation and
+query sharing; required validation and descriptor/template preparation prevent treating them as
+predicted savings. These census timings do not include shared execution or specialization costs.
+
+Uninstrumented controls use one fixed installation per input, prepared dependency MIR and std base,
+and three first/repeated pairs, clearing derived execution/sharing/JIT products before each first
+run. Whole-process medians are 371.3 / 87.1 ms for serde and 418.4 / 147.7 ms for small flate. Root
+lowering medians are 148.3 and 127.9 ms. The one-type matrix is 335.9 / 250.4 ms, but its first
+repeated run still performs analysis/lowering, so that second number is not a bound-image-hit
+baseline. A later diagnostic run reaches the bound image. A fresh-installation-directory control
+also rebuilds dependency/host artifacts; its whole-process times are excluded from the isolated
+comparison. OS caches are not flushed, and these sample medians are not latency guarantees.
+
+All 54 uninstrumented samples and five final census runs match independently compiled native output.
+A separate prepared-dependency serde CPU capture has 866 samples and zero lost samples; metadata,
+query execution, hashing, allocation and archive verification remain visible. This assessment
+supports the execution prototype below. No whole-program generic execution improvement or full
+test tier is established by the census.
+
+### Runtime generics prototype
+
+`experiments/runtime-generics` contains a reproducible, isolated prototype using the existing
+bytecode interpreter, verifier and Cranelift pipeline. Shared instance adapters pass immutable
+dictionaries; promotion creates and verifies concrete IR before requesting machine code for the
+same FuncId. A compiled shared-template control distinguishes specialization from merely compiling
+the common loop. The production source and cache formats are unchanged by this experiment.
+
+A bounded frontend exports an actual generic MIR copy loop once, without a concrete-body clone per
+instance. Five rustc-derived layout/const descriptors cover `(size, alignment, length)` values
+`(1, 1, 0)`, `(1, 1, 17)`, `(8, 8, 31)`, `(64, 8, 7)` and `(0, 64, 9)`. Each execution mode loads the
+owned artifact in a fresh process after compiler teardown. Three export runs give median template
+export / descriptor construction / preceding mono validation-collection of 7.8 / 19.6 / 2,227.0 µs.
+Export can reuse queries warmed by collection; these are not independent cold frontend costs.
+An invalid instantiation in an unentered branch still fails before artifact publication. Unsupported
+MIR is rejected by the experiment; product integration requires eager fallback.
+
+The execution measurements use hand-authored templates, three alternating release samples per
+mode, and no persistent JIT cache or automatic call/backedge compilation. Times below include
+execution plus concrete emission, verification and synchronous JIT publication where applicable;
+they exclude initial body/Engine construction. They are medians of each sample's summed costs.
+
+| Workload | Shared interpretation | Concrete interpretation | Shared then specialized JIT |
+|---|---:|---:|---:|
+| 256 calls × 256 copied elements | 4.387 ms | 4.047 ms | 1.427 ms |
+| 2,048 one-element calls | 4.451 ms | 4.458 ms | 5.093 ms |
+| 64 calls × 32 native Clone/Drop witnesses | 0.827 ms | 0.817 ms | 1.803 ms |
+| 64 instances × two 32-element calls | 0.553 ms | 0.529 ms | 0.559 ms, no promotion |
+
+Concrete emission takes roughly 2–3 µs per promoted loop; machine-code publication takes hundreds
+of microseconds to over a millisecond in these samples. The uniform work policy repays its cost on
+the repeated copy loop and loses on short/native-call-heavy work. Compiling just the shared template
+also has a startup cost: for the 64 briefly used instances it costs about 0.977 ms plus 0.317 ms of
+execution, while compiling all 64 concrete entries costs about 13.7 ms. These controls support
+cost-aware policy selection, not unconditional compilation of either form.
+
+For 4,096 synthetic nominal entries with equal descriptors, preparing adapters takes 0.919 ms versus
+4.454 ms for concrete bodies. First result excluding audit serialization is 2.361 versus 6.025 ms;
+peak process RSS is 33 versus 45 MiB. This isolates IR construction and is not a measurement of
+4,096 real type/layout queries. Existing canonical fragments deduplicate the concrete controls,
+and the experiment's transient adapter pointer literals are not a production storage design;
+serialized-body reduction is not a disk-saving claim.
+
+The final binary passes 30 synthetic differentials, 90 timing-sample result checks, six execution
+checks of the real exported MIR, native descriptor agreement, and two rejection checks. Coverage
+includes mixed layouts, aligned ZSTs, const lengths distinct from the runtime argument, native Rust
+Clone/Drop C-unwind cleanup and reentry, and a single long invocation that never promotes despite
+crossing its work threshold. Native witnesses do not prove guest panic ownership or a general
+trait resolver. No full repository test tier is claimed.
+
+The prototype's serial, process-global body override is confined to a disposable source copy.
+Production needs per-Engine entries and activation-pinned bodies before concurrent promotion,
+then reusable generic products and real-workload cold/warm validation. The selected integration
+roadmap and acceptance gates are owned by
+[runtime-generics-design.md](designs/runtime-generics-design.md); OSR is T13.
 
 ## 4. Gaps and honest limits
 
@@ -263,7 +405,7 @@ What is refused or not yet claimed — not what is planned.
 - **Arbitrary Rust**: not supported. The corpus holds real projects and a small workload set; those
   are not a continuous gate and do not generalize.
 - **JIT**: no OSR, no deopt, and no within-run tier upgrade — a function's tier is the previous run's
-  heat order (E42). Close stops and joins compile workers and releases `Shared`, but published JIT code
+  heat order (E42; OSR is T13). Close stops and joins compile workers and releases `Shared`, but published JIT code
   and its `.eh_frame` live to process end.
 - **Signals**: synchronous faults in a guest handler, realtime signals and
   `SA_SIGINFO`/`SA_ONSTACK`/`SA_NODEFER`/`SA_RESETHAND` are refused. Process-directed external signals
@@ -288,7 +430,7 @@ What is refused or not yet claimed — not what is planned.
   two-machine-word exports must be trusted, `Shared` is not public, and no safe typed export bindings
   are generated. Third-party callbacks have no universal revocation, so published closure/JIT/MC/native
   code lives to process end.
-- **Distribution**: `.mirvm` is at unstable format v5 with direct archive verification and demand
+- **Distribution**: `.mirvm` is at unstable format v7 with direct archive verification and demand
   body decoding. Cross-build_id/target compatibility, fat artifacts and format freeze are unfinished. No daemon, REPL, checked mode, resource governance or real sandbox.
 - **Cargo config**: Git source replacement, patches targeting a Git URL, and parts of the Cargo config
   surface such as `paths`/`HOST_RUSTFLAGS` are not implemented.

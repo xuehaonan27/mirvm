@@ -42,12 +42,17 @@ pub(super) use builtin_table;
 /// Non-special entries are generated and resolved by rustc inside the final crate, not rewritten at
 /// the std external-declaration boundary; the four ordinary `__rust_*` entries for a custom
 /// #[global_allocator] are routed uniformly at the Module level.
-pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
+pub(super) fn engine_builtins(tcx: TyCtxt<'_>, base: bool) -> FxHashMap<Symbol, ir::Builtin> {
     use rustc_ast::expand::allocator::{self, SpecialAllocatorMethod as S};
     use rustc_symbol_mangling::mangle_internal_symbol;
 
     let mut out = FxHashMap::default();
-    if let Some(kind) = tcx.allocator_kind(()) {
+    let kind = if base {
+        Some(allocator::AllocatorKind::Default)
+    } else {
+        tcx.allocator_kind(())
+    };
+    if let Some(kind) = kind {
         for method in rustc_codegen_ssa::base::allocator_shim_contents(tcx, kind) {
             let Some(special) = method.special else {
                 continue;

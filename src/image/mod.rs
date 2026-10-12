@@ -294,7 +294,7 @@ impl ImageStack {
     /// load). Each image's frozen region moves into the delta instance's mounted arenas to keep it
     /// alive.
     pub fn absorb_into(self, delta: &mut Module, delta_instance: &mut Instance) {
-        let mut funcs = Vec::with_capacity(self.total_fns);
+        let mut funcs = crate::vm::ir::FuncTable::default();
         let mut function_names = Vec::with_capacity(self.total_fns + delta.funcs.len());
         let mut tls = Vec::with_capacity(self.total_tls);
         let mut sites = Vec::with_capacity(self.total_asm);
@@ -303,7 +303,7 @@ impl ImageStack {
             let mut m = img.module;
             let mut i = img.instance;
             function_names.append(&mut m.function_names);
-            m.funcs.drain_into(&mut funcs);
+            funcs.append(m.funcs);
             tls.append(&mut m.tls);
             sites.append(&mut m.asm_sites);
             for (a, f) in i.fn_addrs {
@@ -348,9 +348,9 @@ impl ImageStack {
                 frozens.push(fr);
             }
         }
-        delta.funcs.drain_into(&mut funcs);
+        funcs.append(std::mem::take(&mut delta.funcs));
         function_names.append(&mut delta.function_names);
-        delta.funcs = funcs.into();
+        delta.funcs = funcs;
         delta.function_names = function_names;
         delta.ensure_function_names();
         tls.append(&mut delta.tls);

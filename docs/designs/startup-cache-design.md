@@ -1,6 +1,6 @@
 # Startup cache
 
-> Status: Implemented. Owns managed compiler-input identity and bound execution images.
+> Status: Implemented. Owns managed compiler-input identity, base construction/loading and bound execution images.
 > Shared fragments and collection remain owned by [dep-sharing-design.md](dep-sharing-design.md);
 > the package container remains owned by [modeb-mirvmar-design.md](modeb-mirvmar-design.md).
 
@@ -40,6 +40,57 @@ Input manifests record managed member references separately from external file s
 the recorded generation with the current request's pinned generation: an old generation remaining on
 disk is insufficient. Compilation records the handle it actually used, not a path resolved again
 after compilation. Managed provenance expands into ordinary stamps when writing a package.
+
+## Std base loading
+
+The base is a pre-lowered std runtime closure, not the MIR-rich compiler sysroot and not every
+possible std generic instance. The current producer and loader below use a disposable local cache.
+The installed-std lifetime and release delivery contract belong to
+[distribution-design.md](distribution-design.md#27-installed-execution-products).
+
+A base miss is constructed in the user's `after_analysis` callback before program lowering. Its
+roots are `std::rt::lang_start::<()>`, the guest panic cleanup function and its payload drop glue.
+The worklist closes over these roots without the user's mono collector, main address, native
+archives/global assembly or allocator shims. Link simulation accepts only definitions from the
+selected sysroot; every enqueued instance must remain sysroot-owned. Program lowering still
+materializes the complete native link inputs and supplies the main entry and custom allocator.
+Base allocation operations use Engine builtins, which dispatch through that program's allocator.
+
+Base function identities use the defining crate as the instantiating crate in rustc's mangling
+routine. This prevents a user's crate name from entering shared generic identities; native symbol
+resolution retains rustc's actual names. The isolated preparation command uses the same roots.
+Equal producer settings yield equal base bytes across programs, including different main return
+types and allocators.
+
+The lookup key includes build identity, sysroot stamp and the semantic compiler profile. Check
+flags are normalized to their effective defaults so scripts and Cargo's explicit dev defaults
+share a base. Target/layout flags, cfg and remaps affecting imported sysroot source locations remain
+in the profile. Program identity, native inputs, debug output, codegen partitioning, thread count
+and MIR optimization level do not partition it. MIR optimization is a producer choice with the same
+runtime semantics; the layer key also includes the whole-file content digest, so a rebuilt base
+with different bodies or ids invalidates every consumer of the old absolute layout.
+
+Postcard metadata excludes bodies and stores export and entry-link indexes in sorted order. An
+aligned function archive follows; a BLAKE3 checksum covers both. Loading checks integrity,
+generation, stamp, full profile and fixed domain before mapping. Structural and semantic checks
+inspect archive views without decoding owned functions. The session also checks the lowering
+fingerprint. A fresh base retains its mapping, replaces its owned bodies with the just-encoded
+archive and publishes best effort, without another compiler or a file reload. Publication failure
+still permits execution and a self-contained bound image. An unpublishable fixed domain falls back
+to ordinary lowering. A frontend error never starts base construction.
+
+Layer merging moves function-table segments and their immutable owners, preserving absolute ids,
+entry identity and initialized decode cells. Verification walks owned or archived bodies against the
+merged metadata. Bound-image publication copies existing archive chunks and encodes only owned
+segments; it does not force base decoding. A function is decoded on demand for interpretation or JIT.
+Fork preparation and the capture-domain rewrite deliberately materialize bodies when their existing
+lifecycle rules require it. The shared archive wire layout is specified by the package
+[FUNCS contract](modeb-mirvmar-design.md#22-container).
+
+The driver ledger's `base-load` is nested inside `frontend` or `cache-load`. On a miss, `base-build`
+runs after analysis and measures std lowering, encoding, validation and publication separately from
+program `lower`. `layer-load` sums manifest loading before analysis and after a newly built base.
+Compiler finalization still completes before Engine entry.
 
 ## Bound execution images
 
@@ -83,5 +134,6 @@ unwind, signal and JIT cache oracles remain authoritative.
 Unprofiled release measurements distinguish empty derived caches, small cache hits and populated
 stores, with alternating binaries and identical inputs. Managed steady-state hits must stop reading
 the sysroot payload for freshness. Execution-image hits must avoid shared pack discovery and binding.
-Archive verification must avoid eager function-body construction and repeated whole-module walks.
+Base loading, layer merging, verification and bound-image publication must preserve demand decoding.
+Archive verification must avoid temporary owned bodies and redundant instantiation.
 CPU profiles and syscall counts establish which work disappeared; elapsed time alone is insufficient.

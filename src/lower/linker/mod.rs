@@ -23,7 +23,10 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) split: Option<Split<'tcx>>,
     /// ① Engine primitive table: mangled symbol → Builtin
     pub(crate) builtins: FxHashMap<Symbol, ir::Builtin>,
-    /// ② Link emulation: exported symbol name → (defining instance, is_weak) (strong overrides weak; built lazily)
+    /// Restrict canonical base resolution to artifacts owned by the selected sysroot.
+    pub(super) base_crates:
+        Option<rustc_data_structures::fx::FxHashSet<rustc_span::def_id::CrateNum>>,
+    /// Link emulation: exported name -> (instance, weak), built lazily.
     pub(crate) exports: Option<FxHashMap<Symbol, (Instance<'tcx>, bool)>>,
     /// Frozen area (statics / const pool / fn entries) — materialized during lowering, handed off to Module at end
     pub(crate) frozen: FrozenArena,
@@ -130,7 +133,8 @@ impl<'tcx> Linker<'tcx> {
             tcx,
             ids: FxHashMap::default(),
             queue: VecDeque::new(),
-            builtins: engine_builtins(tcx),
+            builtins: engine_builtins(tcx, false),
+            base_crates: None,
             exports: None,
             frozen,
             alloc_addrs: FxHashMap::default(),
@@ -163,6 +167,24 @@ impl<'tcx> Linker<'tcx> {
             next_fn: delta_first_fn,
             static_defs: Vec::new(),
             main_catch_site: None,
+        }
+    }
+
+    /// Stable lookup identity for shared std instances. Native symbol resolution continues to use
+    /// rustc's actual symbol; only the base's internal index fixes the instantiating crate.
+    pub(super) fn base_symbol(&self, inst: Instance<'tcx>) -> String {
+        rustc_symbol_mangling::symbol_name_for_instance_in_crate(
+            self.tcx,
+            inst,
+            inst.def_id().krate,
+        )
+    }
+
+    pub(super) fn image_symbol(&self, inst: Instance<'tcx>) -> String {
+        if self.base_crates.is_some() {
+            self.base_symbol(inst)
+        } else {
+            self.tcx.symbol_name(inst).name.to_owned()
         }
     }
 

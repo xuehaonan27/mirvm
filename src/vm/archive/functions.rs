@@ -10,7 +10,12 @@ use crate::vm::ir::{ArchivedFuncBody, FuncBody, FuncTable};
 
 pub(crate) struct Functions {
     bytes: Arc<super::bytes::Bytes>,
+    chunks: Vec<Chunk>,
+}
+
+struct Chunk {
     range: Range<usize>,
+    end: usize,
 }
 
 impl Functions {
@@ -18,45 +23,151 @@ impl Functions {
         bytes: Arc<super::bytes::Bytes>,
         range: Range<usize>,
     ) -> Result<Self, Error> {
-        let data = bytes.get(range.clone()).ok_or_else(|| {
-            crate::fail!(
-                Engine,
-                "function archive range is outside its immutable owner"
+        let invalid = || crate::fail!(Engine, "invalid function archive chunk table");
+        let data = bytes.get(range.clone()).ok_or_else(invalid)?;
+        if data.as_ptr().align_offset(rkyv::AlignedVec::ALIGNMENT) != 0 {
+            return Err(invalid());
+        }
+        let word = |at: usize| -> Result<usize, Error> {
+            let value = u64::from_le_bytes(
+                data.get(at..at.checked_add(8).ok_or_else(invalid)?)
+                    .ok_or_else(invalid)?
+                    .try_into()
+                    .map_err(|_| invalid())?,
+            );
+            usize::try_from(value).map_err(|_| invalid())
+        };
+        let count = word(0)?;
+        let mut pos = count
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(8))
+            .filter(|&n| n <= data.len())
+            .ok_or_else(invalid)?;
+        let mut chunks = Vec::with_capacity(count);
+        let mut total = 0usize;
+        for index in 0..count {
+            pos = pos
+                .checked_next_multiple_of(rkyv::AlignedVec::ALIGNMENT)
+                .ok_or_else(invalid)?;
+            let end = pos
+                .checked_add(word((index + 1) * 8)?)
+                .ok_or_else(invalid)?;
+            let chunk = data.get(pos..end).ok_or_else(invalid)?;
+            // Each chunk is a self-contained tree. No relative pointer may cross its boundary,
+            // allowing its bytes to move intact when an image stack is concatenated or published.
+            let mut validator =
+                rkyv::validation::validators::ArchiveValidator::with_max_depth(chunk, 128);
+            let bodies = rkyv::validation::check_archived_root_with_context::<Vec<FuncBody>, _>(
+                chunk,
+                &mut validator,
             )
-        })?;
-        // There are no shared pointers in bytecode. A bounded tree validator rejects cycles,
-        // aliasing, out-of-bounds pointers and excessive nesting before the semantic walk.
-        let mut validator =
-            rkyv::validation::validators::ArchiveValidator::with_max_depth(data, 128);
-        rkyv::validation::check_archived_root_with_context::<Vec<FuncBody>, _>(
-            data,
-            &mut validator,
-        )
-        .map_err(|error| crate::fail!(Engine, format!("invalid function archive: {error}")))?;
-        Ok(Self { bytes, range })
+            .map_err(|error| crate::fail!(Engine, format!("invalid function archive: {error}")))?;
+            if bodies.is_empty() {
+                return Err(invalid());
+            }
+            total = total
+                .checked_add(bodies.len())
+                .filter(|&n| n <= u32::MAX as usize)
+                .ok_or_else(invalid)?;
+            chunks.push(Chunk {
+                range: range.start + pos..range.start + end,
+                end: total,
+            });
+            pos = end;
+        }
+        if pos != data.len() {
+            return Err(invalid());
+        }
+        Ok(Self { bytes, chunks })
     }
 
-    pub(crate) fn bodies(&self) -> &[ArchivedFuncBody] {
-        // SAFETY: load checked the entire archive, the aligned allocation never moves or changes,
+    fn chunk_bodies(&self, chunk: &Chunk) -> &[ArchivedFuncBody] {
+        // SAFETY: load checked each complete chunk, the aligned allocation never moves or changes,
         // and this borrow cannot outlive it. No filesystem mapping backs this allocation.
-        unsafe { rkyv::archived_root::<Vec<FuncBody>>(&self.bytes[self.range.clone()]).as_slice() }
+        unsafe { rkyv::archived_root::<Vec<FuncBody>>(&self.bytes[chunk.range.clone()]).as_slice() }
+    }
+
+    pub(crate) fn bodies(&self) -> impl Iterator<Item = &ArchivedFuncBody> {
+        self.chunks
+            .iter()
+            .flat_map(|chunk| self.chunk_bodies(chunk))
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.bodies().len()
+        self.chunks.last().map_or(0, |chunk| chunk.end)
     }
 
     pub(crate) fn decode(&self, index: usize) -> FuncBody {
-        match self.bodies()[index].deserialize(&mut rkyv::Infallible) {
+        let chunk_index = self.chunks.partition_point(|chunk| chunk.end <= index);
+        let start = chunk_index.checked_sub(1).map_or(0, |i| self.chunks[i].end);
+        match self.chunk_bodies(&self.chunks[chunk_index])[index - start]
+            .deserialize(&mut rkyv::Infallible)
+        {
             Ok(body) => body,
             Err(never) => match never {},
         }
     }
 }
 
-/// Serialize borrowed bodies directly into the Vec archive layout, without cloning the IR.
+/// Copy immutable chunks and encode only owned bodies. The chunk table stores byte lengths;
+/// ids inside each chunk retain their absolute positions in the concatenated function table.
 pub(crate) fn encode(funcs: &FuncTable) -> Result<rkyv::AlignedVec, Error> {
-    struct Borrowed<'a>(&'a FuncTable);
+    enum ChunkBytes<'a> {
+        Borrowed(&'a [u8]),
+        Owned(rkyv::AlignedVec),
+    }
+    impl ChunkBytes<'_> {
+        fn bytes(&self) -> &[u8] {
+            match self {
+                Self::Borrowed(bytes) => bytes,
+                Self::Owned(bytes) => bytes,
+            }
+        }
+    }
+    let mut chunks = Vec::new();
+    for part in funcs.parts() {
+        match part {
+            crate::vm::ir::FuncPart::Owned(bodies) if !bodies.is_empty() => {
+                chunks.push(ChunkBytes::Owned(encode_owned(bodies)?));
+            }
+            crate::vm::ir::FuncPart::Archived(archive) => {
+                chunks.extend(
+                    archive
+                        .chunks
+                        .iter()
+                        .map(|chunk| ChunkBytes::Borrowed(&archive.bytes[chunk.range.clone()])),
+                );
+            }
+            _ => {}
+        }
+    }
+    if let [ChunkBytes::Owned(bytes)] = chunks.as_mut_slice() {
+        // A fresh lowering product already owns the entire payload. Shift it within its allocation
+        // to prepend the table; relative pointers stay unchanged and no second archive is needed.
+        let len = bytes.len();
+        let start = 16usize.next_multiple_of(rkyv::AlignedVec::ALIGNMENT);
+        bytes.resize(start + len, 0);
+        bytes.as_mut_slice().copy_within(..len, start);
+        bytes[..start].fill(0);
+        bytes[..8].copy_from_slice(&1u64.to_le_bytes());
+        bytes[8..16].copy_from_slice(&(len as u64).to_le_bytes());
+        return Ok(std::mem::take(bytes));
+    }
+    let mut bytes = rkyv::AlignedVec::new();
+    bytes.extend_from_slice(&(chunks.len() as u64).to_le_bytes());
+    for chunk in &chunks {
+        bytes.extend_from_slice(&(chunk.bytes().len() as u64).to_le_bytes());
+    }
+    for chunk in chunks {
+        bytes.resize(bytes.len().next_multiple_of(rkyv::AlignedVec::ALIGNMENT), 0);
+        bytes.extend_from_slice(chunk.bytes());
+    }
+    Ok(bytes)
+}
+
+/// Serialize borrowed bodies directly into the Vec archive layout, without cloning the IR.
+fn encode_owned(funcs: &[FuncBody]) -> Result<rkyv::AlignedVec, Error> {
+    struct Borrowed<'a>(&'a [FuncBody]);
 
     impl Archive for Borrowed<'_> {
         type Archived = rkyv::vec::ArchivedVec<ArchivedFuncBody>;
@@ -196,10 +307,19 @@ mod tests {
         unaligned.extend_from_slice(&encoded);
         let owner = super::super::bytes::Bytes::new(unaligned);
         assert!(Functions::load(owner.clone(), 1..owner.len()).is_err());
-        let offset =
-            &archive.bodies()[0].ret as *const _ as usize - archive.bytes.as_ptr() as usize;
+        let offset = &archive.bodies().next().unwrap().ret as *const _ as usize
+            - archive.bytes.as_ptr() as usize;
         let mut corrupt = encoded.clone();
         corrupt[offset] = 255;
+        assert!(load(&corrupt).is_err());
+        let mut corrupt = encoded.clone();
+        corrupt[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(load(&corrupt).is_err());
+        let mut corrupt = encoded.clone();
+        corrupt[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(load(&corrupt).is_err());
+        let mut corrupt = encoded.clone();
+        corrupt.push(0);
         assert!(load(&corrupt).is_err());
         let mut corrupt = encoded;
         let root = corrupt.len() - std::mem::size_of::<rkyv::Archived<Vec<FuncBody>>>();

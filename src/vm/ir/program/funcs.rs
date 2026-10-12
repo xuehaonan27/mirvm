@@ -4,6 +4,11 @@
 use super::*;
 
 pub struct FuncTable {
+    parts: Vec<Part>,
+}
+
+struct Part {
+    end: usize,
     storage: FuncStorage,
 }
 
@@ -17,6 +22,12 @@ struct LazyFuncs {
     cells: Box<[std::sync::OnceLock<FuncBody>]>,
 }
 
+/// Borrow a table's storage without initializing its demand-decoded bodies.
+pub(crate) enum FuncPart<'a> {
+    Owned(&'a [FuncBody]),
+    Archived(&'a crate::vm::archive::functions::Functions),
+}
+
 impl Default for FuncTable {
     fn default() -> Self {
         Self::from(Vec::new())
@@ -26,7 +37,10 @@ impl Default for FuncTable {
 impl From<Vec<FuncBody>> for FuncTable {
     fn from(funcs: Vec<FuncBody>) -> Self {
         Self {
-            storage: FuncStorage::Eager(funcs),
+            parts: vec![Part {
+                end: funcs.len(),
+                storage: FuncStorage::Eager(funcs),
+            }],
         }
     }
 }
@@ -45,37 +59,64 @@ impl FuncTable {
             .map(|_| std::sync::OnceLock::new())
             .collect();
         Self {
-            storage: FuncStorage::Lazy(LazyFuncs { archive, cells }),
+            parts: vec![Part {
+                end: archive.len(),
+                storage: FuncStorage::Lazy(LazyFuncs { archive, cells }),
+            }],
         }
+    }
+
+    /// Layer ids already occupy consecutive ranges. Moving the owners preserves both those ids
+    /// and any initialized decode cells; no function body needs to be read during the merge.
+    pub(crate) fn append(&mut self, other: Self) {
+        let offset = self.len();
+        self.parts
+            .extend(other.parts.into_iter().filter_map(|mut part| {
+                let len = match &part.storage {
+                    FuncStorage::Eager(funcs) => funcs.len(),
+                    FuncStorage::Lazy(lazy) => lazy.archive.len(),
+                };
+                part.end += offset;
+                (len != 0).then_some(part)
+            }));
+    }
+
+    pub(crate) fn parts(&self) -> impl Iterator<Item = FuncPart<'_>> {
+        self.parts.iter().map(|part| match &part.storage {
+            FuncStorage::Eager(funcs) => FuncPart::Owned(funcs),
+            FuncStorage::Lazy(lazy) => FuncPart::Archived(&lazy.archive),
+        })
     }
 
     /// Settle every publish slot before fork. The child must never inherit a OnceLock whose
     /// initializer was a JIT thread that did not survive the fork.
     pub(crate) fn prepare_for_fork(&self) {
-        if let FuncStorage::Lazy(lazy) = &self.storage {
-            for index in 0..lazy.cells.len() {
-                lazy.get(index);
+        for part in &self.parts {
+            if let FuncStorage::Lazy(lazy) = &part.storage {
+                for index in 0..lazy.cells.len() {
+                    lazy.get(index);
+                }
             }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn decoded_count(&self) -> usize {
-        match &self.storage {
-            FuncStorage::Eager(funcs) => funcs.len(),
-            FuncStorage::Lazy(lazy) => lazy
-                .cells
-                .iter()
-                .filter(|cell| cell.get().is_some())
-                .count(),
-        }
+        self.parts
+            .iter()
+            .map(|part| match &part.storage {
+                FuncStorage::Eager(funcs) => funcs.len(),
+                FuncStorage::Lazy(lazy) => lazy
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.get().is_some())
+                    .count(),
+            })
+            .sum()
     }
 
     pub fn len(&self) -> usize {
-        match &self.storage {
-            FuncStorage::Eager(funcs) => funcs.len(),
-            FuncStorage::Lazy(lazy) => lazy.archive.len(),
-        }
+        self.parts.last().map_or(0, |part| part.end)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -86,7 +127,10 @@ impl FuncTable {
         if index >= self.len() {
             return None;
         }
-        Some(match &self.storage {
+        let part_index = self.parts.partition_point(|part| part.end <= index);
+        let start = part_index.checked_sub(1).map_or(0, |i| self.parts[i].end);
+        let index = index - start;
+        Some(match &self.parts[part_index].storage {
             FuncStorage::Eager(funcs) => &funcs[index],
             FuncStorage::Lazy(lazy) => lazy.get(index),
         })
@@ -101,7 +145,7 @@ impl FuncTable {
 
     pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, FuncBody> {
         self.make_eager();
-        let FuncStorage::Eager(funcs) = &mut self.storage else {
+        let FuncStorage::Eager(funcs) = &mut self.parts[0].storage else {
             unreachable!()
         };
         funcs.iter_mut()
@@ -109,26 +153,44 @@ impl FuncTable {
 
     pub fn push(&mut self, body: FuncBody) {
         self.make_eager();
-        let FuncStorage::Eager(funcs) = &mut self.storage else {
+        let FuncStorage::Eager(funcs) = &mut self.parts[0].storage else {
             unreachable!()
         };
         funcs.push(body);
+        self.parts[0].end += 1;
     }
 
     pub fn drain_into(&mut self, out: &mut Vec<FuncBody>) {
         self.make_eager();
-        let FuncStorage::Eager(funcs) = &mut self.storage else {
+        let FuncStorage::Eager(funcs) = &mut self.parts[0].storage else {
             unreachable!()
         };
         out.append(funcs);
+        self.parts[0].end = 0;
     }
 
     fn make_eager(&mut self) {
-        if matches!(self.storage, FuncStorage::Eager(_)) {
+        if self.parts.len() == 1 && matches!(self.parts[0].storage, FuncStorage::Eager(_)) {
             return;
         }
-        let funcs = self.iter().cloned().collect();
-        self.storage = FuncStorage::Eager(funcs);
+        let mut funcs = Vec::with_capacity(self.len());
+        for part in std::mem::take(&mut self.parts) {
+            match part.storage {
+                FuncStorage::Eager(mut owned) => funcs.append(&mut owned),
+                FuncStorage::Lazy(lazy) => {
+                    funcs.extend(
+                        lazy.cells
+                            .into_vec()
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, cell)| {
+                                cell.into_inner().unwrap_or_else(|| lazy.archive.decode(i))
+                            }),
+                    );
+                }
+            }
+        }
+        *self = Self::from(funcs);
     }
 }
 

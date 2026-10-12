@@ -122,10 +122,20 @@ const CACHE_FORMAT_VERSION: &[u8] = b"mirvm-native-archive-v4";
 /// Static { bundle: None | Some(true) } are true static archives that go entirely into the rlib
 /// (handled by the archive path above, skipped here); Framework / LinkArg / wasm are not handled.
 pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
+    system_dylibs_for(tcx, None)
+}
+
+/// Limit a shared base to sysroot metadata; CLI libraries belong to the program.
+pub(crate) fn system_dylibs_for(
+    tcx: TyCtxt<'_>,
+    crates: Option<&rustc_data_structures::fx::FxHashSet<rustc_hir::def_id::CrateNum>>,
+) -> Vec<Box<str>> {
     let sess = tcx.sess;
     let mut names: Vec<Box<str>> = Vec::new();
     for cnum in std::iter::once(LOCAL_CRATE).chain(tcx.used_crates(()).iter().copied()) {
-        if cnum != LOCAL_CRATE && tcx.crate_dep_kind(cnum).macros_only() {
+        if crates.is_some_and(|crates| !crates.contains(&cnum))
+            || (cnum != LOCAL_CRATE && tcx.crate_dep_kind(cnum).macros_only())
+        {
             continue;
         }
         for lib in tcx.native_libraries(cnum) {
@@ -159,7 +169,7 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
         }
     }
     // Same scope as CLI `-l` (search-path form is handled by the caller separately)
-    for lib in &sess.opts.libs {
+    for lib in sess.opts.libs.iter().filter(|_| crates.is_none()) {
         if matches!(lib.kind, NativeLibKind::Static { .. }) {
             continue;
         }
@@ -167,6 +177,9 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
         if !names.contains(&name) {
             names.push(name);
         }
+    }
+    if crates.is_some() {
+        names.sort_unstable();
     }
     names
 }

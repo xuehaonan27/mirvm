@@ -438,11 +438,8 @@ pub fn lower_program(
     (module, instance, split_images)
 }
 
-/// Base-image build lowering (synthetic empty main): empty stack, frozen area in the base domain,
-/// and an export symbol index.
-/// LOCAL_CRATE is excluded: the synthetic crate's items (empty main and its shim) carry a local
-/// disambiguator in their symbol names, do not belong to the "sysroot face", and cannot collide
-/// with a real program.
+/// Lower the fixed std roots, without collecting user mono items or native inputs. The base has
+/// no program entry or allocator; the program delta supplies both when the stack is merged.
 pub fn lower_for_base_build(
     tcx: TyCtxt<'_>,
 ) -> (ir::Module, crate::vm::instance::Instance, BaseExports) {
@@ -494,12 +491,11 @@ fn lower_one<'tcx>(
     purity: &mut Option<PurityStats>,
     inst: Instance<'tcx>,
 ) -> ir::FuncBody {
-    let sym = tcx.symbol_name(inst).name.to_owned();
     let started = purity.as_ref().map(|_| std::time::Instant::now());
     let body = func::lower_instance(tcx, typing_env, inst, linker)
-        .unwrap_or_else(|reason| func::trap_body(&sym, &reason.to_string()));
+        .unwrap_or_else(|reason| func::trap_body(&linker.image_symbol(inst), &reason.to_string()));
     if let (Some(p), Some(t0)) = (purity.as_mut(), started) {
-        p.record(tcx, inst, &sym, t0.elapsed().as_nanos());
+        p.record(tcx, inst, &body.name, t0.elapsed().as_nanos());
     }
     body
 }
@@ -558,7 +554,7 @@ fn lower_inner(
     stack: &crate::image::ImageStack,
     frozen: FrozenArena,
     emit_exports: bool,
-    exclude_local: bool,
+    base_build: bool,
     split: bool,
 ) -> (
     ir::Module,
@@ -578,6 +574,23 @@ fn lower_inner(
         frozen,
         crate::vm::codearena::StubArena::new_at(code_home),
     );
+    if base_build {
+        let root = crate::sysroot::effective_dir();
+        linker.base_crates = Some(
+            tcx.used_crates(())
+                .iter()
+                .copied()
+                .filter(|&cnum| {
+                    !tcx.crate_dep_kind(cnum).macros_only()
+                        && tcx
+                            .used_crate_source(cnum)
+                            .paths()
+                            .any(|path| path.starts_with(&root))
+                })
+                .collect(),
+        );
+        linker.builtins = builtins::engine_builtins(tcx, true);
+    }
     if split {
         // The homes the stack already provides: lowering must not create a second layer for one and
         // rewrite a unit's manifest from this program's view of it.
@@ -597,7 +610,9 @@ fn lower_inner(
     // Order-sensitive: `reject_symbol_ambiguity` relies on the RTLD_DEFAULT state "nothing has been
     // dlopen'd yet", so the whole module's libraries are materialized here and only here (later
     // assembly reuses the segment list without re-auditing). Failures are loud.
-    let required_native_libs: Vec<Box<str>> = {
+    let required_native_libs: Vec<Box<str>> = if base_build {
+        Vec::new()
+    } else {
         let mut v =
             crate::native::artifact::archive::materialize_static_libraries(tcx, &mut linker)
                 .unwrap_or_else(|reason| panic!("Static native library loading failed: {reason}"));
@@ -670,7 +685,8 @@ fn lower_inner(
     // same source, since its `#[link]` attributes live in libstd.
     // Static libraries go through the archive path above; Framework/wasm kinds are not handled.
     // The collection scope is shared with the native archive link line.
-    let dylib_names = crate::native::artifact::archive::system_dylibs(tcx);
+    let dylib_names =
+        crate::native::artifact::archive::system_dylibs_for(tcx, linker.base_crates.as_ref());
     let dylib_candidates = soname_candidates(&dylib_names);
     // Best-effort preload: a missing library is left to the loud diagnostics at its real use site.
     // The handles live for the process lifetime.
@@ -682,8 +698,10 @@ fn lower_inner(
     }
 
     // Seed: the mono collector's set, the same starting point native codegen uses.
-    for inst in collect::collect(tcx) {
-        linker.func_id(inst);
+    if !base_build {
+        for inst in collect::collect(tcx) {
+            linker.func_id(inst);
+        }
     }
 
     // The Engine top level may catch a guest panic outside lang_start (run_export / embedded calls),
@@ -698,7 +716,8 @@ fn lower_inner(
     // through them. Allocation is program-level semantics: bytecode baked by a Default-session image
     // and the user allocator cannot coexist, because freeing across two heaps corrupts allocator
     // metadata.
-    let mut custom_alloc_shims: Option<ir::AllocShims> = if let Some(kind) = tcx.allocator_kind(())
+    let mut custom_alloc_shims: Option<ir::AllocShims> = if !base_build
+        && let Some(kind) = tcx.allocator_kind(())
         && matches!(kind, rustc_ast::expand::allocator::AllocatorKind::Global)
     {
         use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags as F;
@@ -743,20 +762,16 @@ fn lower_inner(
 
     // Main entry plan, shaped like cg_ssa's create_entry_fn:
     // `lang_start::<main_ret>(main fn-ptr, argc, argv, sigpipe) -> isize`
-    let entry = tcx.entry_fn(()).map(|(main_def, entry_ty)| {
-        let rustc_session::config::EntryFnType::Main { sigpipe } = entry_ty;
-        let main_inst = Instance::mono(tcx, main_def);
-        // main is a local Rust fn, never foreign, so taking its address cannot fail.
-        let main_addr = linker
-            .fn_entry_addr(main_inst)
-            .expect("main fn entry address (local fn, not foreign)");
-        let main_ret = tcx
-            .fn_sig(main_def)
+    let main = (!base_build).then(|| tcx.entry_fn(())).flatten();
+    let main_ret = main.map_or(tcx.types.unit, |(main_def, _)| {
+        tcx.fn_sig(main_def)
             .no_bound_vars()
             .expect("main has no late-bound regions")
             .output()
             .no_bound_vars()
-            .expect("main return has no late-bound regions");
+            .expect("main return has no late-bound regions")
+    });
+    let lang_start = (base_build || main.is_some()).then(|| {
         let start_def = tcx.require_lang_item(rustc_hir::LangItem::Start, rustc_span::DUMMY_SP);
         let start_inst = Instance::expect_resolve(
             tcx,
@@ -776,11 +791,17 @@ fn lower_inner(
             catcher_caller,
             catcher_intrinsic,
         });
-        let lang_start = linker.func_id(start_inst);
+        linker.func_id(start_inst)
+    });
+    let entry = main.map(|(main_def, entry_ty)| {
+        let rustc_session::config::EntryFnType::Main { sigpipe } = entry_ty;
+        let main_addr = linker
+            .fn_entry_addr(Instance::mono(tcx, main_def))
+            .expect("main fn entry address (local fn, not foreign)");
         // argc/argv start as a zero placeholder; `finalize_entry_argv` backfills them on every run,
         // because the runtime argv must not enter the snapshot.
         ir::EntryPlan {
-            lang_start,
+            lang_start: lang_start.expect("entry root registered"),
             main_addr: ir::LinkAddr(main_addr),
             argc: 0,
             argv_ptr: 0,
@@ -822,9 +843,9 @@ fn lower_inner(
                     progressed = true;
                     linker.split.as_mut().expect("split").current = Some(home);
                     let body = lower_one(tcx, typing_env, &mut linker, &mut purity, inst);
+                    module.exports.insert(body.name.clone(), id);
                     linker.split.as_mut().expect("split").home_mut(home).funcs
                         [id_ordinal(id) as usize] = Some(body);
-                    module.exports.insert(tcx.symbol_name(inst).name.into(), id);
                 }
             }
             while let Some((id, inst)) = linker.queue.pop_front() {
@@ -835,8 +856,8 @@ fn lower_inner(
                 if funcs.len() <= slot {
                     funcs.resize_with(slot + 1, || None);
                 }
+                module.exports.insert(body.name.clone(), id);
                 funcs[slot] = Some(body);
-                module.exports.insert(tcx.symbol_name(inst).name.into(), id);
             }
             if !progressed {
                 break;
@@ -849,8 +870,8 @@ fn lower_inner(
             if funcs.len() <= slot {
                 funcs.resize_with(slot + 1, || None);
             }
+            module.exports.insert(body.name.clone(), id);
             funcs[slot] = Some(body);
-            module.exports.insert(tcx.symbol_name(inst).name.into(), id);
         }
     }
     if let Some(p) = &purity {
@@ -1097,7 +1118,7 @@ fn lower_inner(
     // CLI `-l` additionally contributes the search-path-limited `lib<name>.so` form. Static libraries
     // are deliberately skipped here: they went through the required-archive path above and must not
     // masquerade as optional `.so` candidates.
-    for lib in &sess.opts.libs {
+    for lib in sess.opts.libs.iter().filter(|_| !base_build) {
         if matches!(lib.kind, rustc_hir::attrs::NativeLibKind::Static { .. }) {
             continue;
         }
@@ -1122,40 +1143,36 @@ fn lower_inner(
     // under the same contract as a warm load.
     module.asm_sites = std::mem::take(&mut linker.asm_sites);
     instance.asm_stub_addrs = asm::materialize(&module.asm_sites);
-    // Base export material, computed once in build mode and free of any `tcx` dependency on the
-    // loader side.
-    // The synthetic crate's own items (empty main and its shim) stay out of the index: their symbol
-    // names carry a local disambiguator and cannot collide with a real program, and the index
-    // describes the "sysroot face", so they must be excluded.
-    let base_exports = emit_exports.then(|| {
-        use rustc_hir::def_id::LOCAL_CRATE;
-        let keep = |krate| !exclude_local || krate != LOCAL_CRATE;
-        BaseExports {
-            fn_entry_syms: linker
-                .fn_entries
-                .iter()
-                .filter(|(inst, _)| keep(inst.def_id().krate))
-                .map(|(inst, &addr)| (Box::from(tcx.symbol_name(*inst).name), addr))
-                .collect(),
-            static_syms: linker
-                .static_defs
-                .iter()
-                .filter(|(def_id, _)| keep(def_id.krate))
-                .map(|&(def_id, addr)| {
-                    let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
-                    (Box::from(sym), addr)
-                })
-                .collect(),
-            tls_syms: linker
-                .tls_ids
-                .iter()
-                .filter(|(def_id, _)| keep(def_id.krate))
-                .map(|(&def_id, &id)| {
-                    let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
-                    (Box::from(sym), id)
-                })
-                .collect(),
-        }
+    // The exported index and body names use the same stable identity for base instances.
+    let base_exports = emit_exports.then(|| BaseExports {
+        fn_entry_syms: linker
+            .fn_entries
+            .iter()
+            .map(|(inst, &addr)| {
+                let name = if base_build {
+                    module.function_names[linker.ids[inst] as usize].clone()
+                } else {
+                    tcx.symbol_name(*inst).name.into()
+                };
+                (name, addr)
+            })
+            .collect(),
+        static_syms: linker
+            .static_defs
+            .iter()
+            .map(|&(def_id, addr)| {
+                let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
+                (Box::from(sym), addr)
+            })
+            .collect(),
+        tls_syms: linker
+            .tls_ids
+            .iter()
+            .map(|(&def_id, &id)| {
+                let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
+                (Box::from(sym), id)
+            })
+            .collect(),
     });
 
     // Hand the frozen area and the fn-entry reverse lookup table to the execution phase. The module

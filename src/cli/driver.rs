@@ -232,11 +232,12 @@ struct MirvmCallbacks {
 /// dependency metadata loading); `lower` = mono collection + lowering + frozen materialization.
 /// `run_driver` records the engine phase after interpretation ends. `cache_load` = L2 hit
 /// deserialization + verification (the warm path replaces frontend+lower entirely);
-/// `cache_store` = clean-snapshot entry on the cold path. `layer_load` = the pre-session layer
-/// load (manifest decode plus the binding walk that resolves every stored ordinal against the
-/// stack below), which `cache_load` covers on a hit and `frontend` covers otherwise.
+/// `cache_store` = clean-snapshot publication. Base loading is inside `frontend` or `cache_load`;
+/// base construction follows analysis and precedes program lowering. `layer_load` sums manifest
+/// loading before analysis and, on a base miss, after base construction.
 #[derive(Default)]
 struct PhaseTiming {
+    base: crate::image::base::Timing,
     frontend: Option<std::time::Duration>,
     lower: Option<std::time::Duration>,
     cache_load: Option<std::time::Duration>,
@@ -258,6 +259,12 @@ fn print_phase_timing(
     }
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
     let mut line = String::from("mirvm-timing:");
+    if !timing.base.load.is_zero() {
+        line.push_str(&format!(" base-load={:.1}ms", ms(timing.base.load)));
+    }
+    if let Some(d) = timing.base.build {
+        line.push_str(&format!(" base-build={:.1}ms", ms(d)));
+    }
     if let Some(d) = timing.layer_load {
         line.push_str(&format!(" layer-load={:.1}ms", ms(d)));
     }
@@ -334,6 +341,20 @@ impl Callbacks for MirvmCallbacks {
             self.session_fp = Some(fp);
             if !self.stack.fp_matches(fp) {
                 self.stack = crate::image::ImageStack::empty();
+            }
+            if self.stack.is_empty()
+                && self.pack_out.is_none()
+                && let Some(base) = crate::image::base::build_in_session(
+                    tcx,
+                    &self.rustc_args,
+                    fp,
+                    &mut self.timing.base,
+                )
+            {
+                self.stack.push(base);
+                let started = std::time::Instant::now();
+                self.deps_image_loaded = load_dependency_layers(&mut self.stack, &self.rustc_args);
+                *self.timing.layer_load.get_or_insert_default() += started.elapsed();
             }
             // The callback performs only the loading phase; execution must wait until tcx.finish,
             // diagnostic finalization and compiler drop have all completed.
@@ -766,6 +787,71 @@ fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), crate::error::Error> 
     Ok((name, args))
 }
 
+/// Load dependency manifests only after a compatible base exists. The same operation serves a
+/// prepared base before rustc and a newly built base inside the session.
+fn load_dependency_layers(stack: &mut crate::image::ImageStack, rustc_args: &[String]) -> bool {
+    let mut deps_image_loaded = false;
+    if !crate::image::deps::bypassed() {
+        match crate::image::units::current() {
+            Some(table) => {
+                let base_key = stack.base_image().map(|base| base.key.clone());
+                if let Some(base_key) = base_key {
+                    // Whole or nothing: a manifest the store holds must fit this stack, and if one does
+                    // not, no layer is used at all. A layer's ids are laid out against the layers below
+                    // it, so a stack assembled from a *subset* of what the store can provide is a stack
+                    // no manifest above it was written against — and the session's own lowering would
+                    // lay the remaining units out differently from every manifest the last cold session
+                    // wrote. Lowering everything instead is the state that converges: the manifests it
+                    // writes are the ones a cold session would have written.
+                    let before = stack.layers().len();
+                    let mut unusable = false;
+                    for index in 0..table.len() as u32 {
+                        if !crate::image::units::has_manifest(index, &base_key) {
+                            continue;
+                        }
+                        let layer = {
+                            let base = stack.base_image().expect("checked above");
+                            crate::image::units::try_load(index, base, stack, &base_key)
+                        };
+                        match layer {
+                            Some(layer) => {
+                                if crate::options::a2_debug() {
+                                    crate::diag::instrument(format_args!(
+                                        "[a2-debug] layer loaded: {}",
+                                        layer.key
+                                    ));
+                                }
+                                stack.push(layer);
+                            }
+                            None => {
+                                unusable = true;
+                                break;
+                            }
+                        }
+                    }
+                    if unusable {
+                        if crate::options::a2_debug() {
+                            crate::diag::instrument(format_args!(
+                                "[a2-debug] unit store not usable whole; lowering every unit instead"
+                            ));
+                        }
+                        stack.truncate(before);
+                    }
+                }
+            }
+            None => {
+                if let Some(base) = stack.base_image()
+                    && let Some(bi) = crate::image::deps::try_load(rustc_args, base)
+                {
+                    deps_image_loaded = true;
+                    stack.push(bi);
+                }
+            }
+        }
+    }
+    deps_image_loaded
+}
+
 pub(crate) fn run_driver(
     rustc_args: Vec<String>,
     program_argv: Vec<String>,
@@ -833,76 +919,14 @@ pub(crate) fn run_driver(
         }
         exit(code);
     }
+    let mut base_timing = crate::image::base::Timing::default();
     let mut stack = if dump_mir {
         crate::image::ImageStack::empty()
     } else {
-        crate::image::base::ensure()
+        crate::image::base::ensure(&rustc_args, &mut base_timing)
     };
-    // Layer load before the compiler runs: not bypassed + a base image is present. A hit is pushed
-    // onto the stack, so the key chain then contains the layer's key and L2 delta entries can be
-    // recorded again. A track with a unit table loads one manifest per unit in topological order, so
-    // each one's symbols resolve against what is already below it; a unit without a usable manifest
-    // is lowered by this session and published for the next one.
-    let mut deps_image_loaded = false;
     let t_layers = std::time::Instant::now();
-    if !dump_mir && !crate::image::deps::bypassed() {
-        match crate::image::units::current() {
-            Some(table) => {
-                let base_key = stack.base_image().map(|base| base.key.clone());
-                if let Some(base_key) = base_key {
-                    // Whole or nothing: a manifest the store holds must fit this stack, and if one does
-                    // not, no layer is used at all. A layer's ids are laid out against the layers below
-                    // it, so a stack assembled from a *subset* of what the store can provide is a stack
-                    // no manifest above it was written against — and the session's own lowering would
-                    // lay the remaining units out differently from every manifest the last cold session
-                    // wrote. Lowering everything instead is the state that converges: the manifests it
-                    // writes are the ones a cold session would have written.
-                    let before = stack.layers().len();
-                    let mut unusable = false;
-                    for index in 0..table.len() as u32 {
-                        if !crate::image::units::has_manifest(index, &base_key) {
-                            continue;
-                        }
-                        let layer = {
-                            let base = stack.base_image().expect("checked above");
-                            crate::image::units::try_load(index, base, &stack, &base_key)
-                        };
-                        match layer {
-                            Some(layer) => {
-                                if crate::options::a2_debug() {
-                                    crate::diag::instrument(format_args!(
-                                        "[a2-debug] layer loaded: {}",
-                                        layer.key
-                                    ));
-                                }
-                                stack.push(layer);
-                            }
-                            None => {
-                                unusable = true;
-                                break;
-                            }
-                        }
-                    }
-                    if unusable {
-                        if crate::options::a2_debug() {
-                            crate::diag::instrument(format_args!(
-                                "[a2-debug] unit store not usable whole; lowering every unit instead"
-                            ));
-                        }
-                        stack.truncate(before);
-                    }
-                }
-            }
-            None => {
-                if let Some(base) = stack.base_image()
-                    && let Some(bi) = crate::image::deps::try_load(&rustc_args, base)
-                {
-                    deps_image_loaded = true;
-                    stack.push(bi);
-                }
-            }
-        }
-    }
+    let deps_image_loaded = !dump_mir && load_dependency_layers(&mut stack, &rustc_args);
     let layer_load = Some(t_layers.elapsed());
     // L2 warm path: a hit skips the entire rustc session (frontend + metadata + mono + lower).
     // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
@@ -916,6 +940,7 @@ pub(crate) fn run_driver(
         diagnostic_router.seal_compiler();
         let timing = PhaseTiming {
             cache_load: Some(t_start.elapsed()),
+            base: base_timing,
             layer_load,
             ..PhaseTiming::default()
         };
@@ -981,6 +1006,7 @@ pub(crate) fn run_driver(
         route_compiler_diagnostics: diagnostic_router.is_active(),
         t_start,
         timing: PhaseTiming {
+            base: base_timing,
             layer_load,
             ..PhaseTiming::default()
         },

@@ -98,7 +98,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
         .map_err(|error| Error::reject(format!("{MODULE_VERIFY_FAILED}: {error}")))?;
     if reloc.requires_fixed_base {
         return Err(Error::reject(
-            "package v6 cannot require a fixed runtime base",
+            "package v7 cannot require a fixed runtime base",
         ));
     }
     if image.native_paths().len() != libs.len()

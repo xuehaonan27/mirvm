@@ -59,7 +59,7 @@ impl Image {
         crate::vm::verify::module_header_with_count(module, instance, functions.len())?;
         let addresses = std::cell::RefCell::new(crate::vm::verify::AddressUses::default());
         let (mut boundaries, mut catchers) = (0, 0);
-        for (index, body) in functions.bodies().iter().enumerate() {
+        for (index, body) in functions.bodies().enumerate() {
             if body.name.as_ref() != module.function_names[index].as_ref() {
                 return Err(crate::fail!(
                     Engine,

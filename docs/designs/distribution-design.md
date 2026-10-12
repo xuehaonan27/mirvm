@@ -23,10 +23,10 @@
   mismatch rebuilds the whole package with no partial reuse, in the AppCDS manner. Because the
   toolchain is self-pinned and the format is ours, a rebuild is always possible and that brittleness
   is harmless.
-- **Trim codegen from dependency builds.** Target dependencies move to the check shape (metadata
-  only), cutting rlib machine code compiled for nothing. Landing must establish empirically how far
-  Cargo tolerates its artifact-existence checks. This saves the first build only, not every run, so it
-  ranks below L2.
+- **Dependency metadata and execution products have separate roles.** Target dependencies use
+  `-Zalways-encode-mir` and `-Zno-codegen`; their rlibs carry the compiler inputs needed to instantiate
+  code. Installation must also prepare MIRVM bytecode. Host build scripts and proc-macros still
+  require native compilation.
 - **The toolchain is bundled, not discovered.** Runtime discovery of a local toolchain is
   architecturally impossible — `rustc_private` is nightly-only, the binary is ABI-locked to its
   toolchain, and rmeta is unstable across versions — so the right analogy is a JDK that bundles
@@ -35,10 +35,14 @@
   rustc, rust-src and Cargo with no rustup dependency for the user. `--sysroot` keeps its boundary: it
   controls where guest std comes from, never who the compiler is. Guest code is not subject to the
   nightly restriction.
-- **Construction order.** Phase timing on the existing `--vm-stats` instrumentation, then the L2
-  engine-IR cache, then dependency codegen trimming, then the mode B `.mirvm` package with `mirvm
-  pack` after the JIT work, then release form and naming. Naming: MRsDK is rejected; "kit" naming
-  waits for a mode B physical artifact, with MDK or "mirvm toolkit" the candidates then.
+- **Preparation belongs to distribution and installation.** Supported releases provide the MIR
+  sysroot and a matching pre-lowered std base. Project installation prepares the selected target's
+  concrete dependency instances and execution image before its first run. The preparation boundary
+  and remaining generic work are specified in §2.7.
+- **Release scope.** Local execution caches and mode B packages supply artifact machinery, but do
+  not themselves deliver an installed runtime. Release production, artifact import and installation
+  lifetime must satisfy §2.7. Kit naming remains open, with MDK or "mirvm toolkit" as candidates;
+  MRsDK is rejected.
 
 ## 2. Model
 
@@ -64,9 +68,11 @@
 - **phase_runner**: when Cargo "runs" the fake binary, control returns to mirvm, which starts the
   front end in-process with Cargo's original rustc arguments and monomorphizes, lowers and interprets.
 
-The division of labour: dependency MIR-ification is front-loaded and parallel in Cargo (crate DAG,
-`-j`, pipelining, fingerprints), while dependency lower-to-bytecode happens in the load phase of every
-run, driven on demand by monomorphization. The guest runtime compiles no dependencies.
+Dependency MIR production is parallelized over the crate DAG. On an image miss, the root compiler
+session determines concrete instances and lowers the missing execution closure; persisted images
+avoid this work on subsequent runs. Installation must drive that session too: `cargo build` alone
+only produces dependency metadata and the root runner recipe. The guest execution phase uses no
+compiler session.
 
 ### 2.3 Sysroot and toolchain pinning
 
@@ -119,8 +125,9 @@ adds `data/` — `--all --data` is a full cold start.
 - **L1.5** — sysroot, native `.so`, asm stubs, script materialization; all content-hash keyed.
 - **L1.7 / L1.8** — per-crate unit manifests and the machine-wide content-addressed fragment store,
   owned by [dep-sharing-design.md](dep-sharing-design.md).
-- **L2** — the post-mono engine-IR whole-package cache. This is the highest-value gap: it turns the
-  load cost paid on every run into "deserialize and run".
+- **L2** — the post-mono engine-IR program cache and bound execution image. A valid bound image
+  loads before shared-layer discovery or compiler entry; otherwise the program entry reuses those
+  layers. [startup-cache-design.md](startup-cache-design.md) owns their loading contract.
 - **L3** — the JIT machine-code cache, owned by [jit-code-cache-design.md](jit-code-cache-design.md):
   relocatable per-function artifacts keyed by fragment id × jit-key, unlocked by the relocation
   choke-point work recorded there.
@@ -143,20 +150,66 @@ L2 design points:
 - Verification is the existing gate: one workload run cold and warm must produce byte-identical
   output, catching "the cache returned old semantics" as a false green. No new harness mechanism.
 
-### 2.6 Measured baseline
+### 2.6 Measurement boundary
 
-Release build, warm cache, on an EPYC 7773X:
+[current-status.md](../current-status.md) owns measured timings; the frontend/base attribution is
+explained in [frontend-boundary.md](frontend-boundary.md). Report installation, the first program
+with an installed std base, the first run after project installation, and repeated runs separately.
+Empty derived caches measure a reconstruction path, not the intended installed-product experience.
+Moving work into installation improves first-run latency without reducing total preparation work.
 
-- `tests/data/programs/args_env.rs`, std-only: **0.40s** — front end, monomorphization, lowering and run over
-  a std-only graph.
-- `tests/data/programs/ecosystem.rs`, serde + serde_json + rand + regex: **3.07s**, reproducible, with all
-  dependency rmeta cached. Those 3s are **paid on every run**: leaf front end, pulling dependency MIR,
-  whole-graph monomorphization, lowering and run.
+### 2.7 Installed execution products
 
-So the cold-start pain is neither dependency resolution (one-time) nor dependency compilation
-(one-time, parallel, incremental) but the load phase paid on every run. The split *inside* that phase
-— front end, metadata, monomorphization, lowering, guest — is unmeasured; measuring it precedes cache
-design.
+This is the product contract; release delivery and the `install` command are not implemented.
+The current CLI exposes `prepare`. Its default dependency track lowers the selected program, but
+the cold path returns before bound-image publication; its Cargo track stops at `cargo build`.
+Neither path yet fulfills the complete installation contract below.
+
+**Runtime distribution** provides the pinned compiler inputs and pre-lowered std together. Building
+the MIR-rich sysroot produces compiler metadata; building the std base translates a canonical
+runtime closure into MIRVM bytecode, frozen data and binding recipes. The base is not all possible
+std instantiations and contains no portable promise for JIT machine code. Its roots, format and
+identity are owned by [startup-cache-design.md](startup-cache-design.md#std-base-loading).
+
+For every advertised target and default semantic profile, a release bundles or fetches a matching
+MIR sysroot generation and base artifact. The release manifest binds their content digests to the
+MIRVM build, target/ABI and profile. The installed sysroot goes through the managed-generation
+owner's verification and publication; copying files into a managed-looking path is insufficient.
+Relocation must preserve content identity and reconstruct local receipts. Runtime native bindings
+must not depend on the producer's absolute library paths or live process state. Download/import and
+cross-installation relocation need validation before the local base file is treated as distributable.
+
+Downloaded std products are immutable installation data, outside disposable execution caches.
+Cache-only purging must leave a loadable installed base; it must not make the next supported-default
+run lower std again. This requires a registered installed-artifact owner and lookup path. Local base
+construction remains the recovery path for development builds, custom sysroots and unshipped
+profiles, rather than the default release installation path.
+
+**Project installation** means preparing a script or project with a selected target, resolved
+dependencies, features and compiler profile. It resolves/fetches sources, runs necessary host build
+scripts and proc-macros, produces MIR metadata, then analyzes the selected root and prepares its
+validated execution closure. Reusable dependency products follow
+[dep-sharing-design.md](dep-sharing-design.md); instances involving application types remain in the
+program delta. Installation binds and validates the complete image, publishes the required products
+and records their input identity before reporting success. It does not invoke the program entry.
+`install` and `prepare` should share this preparation pipeline on both dependency tracks.
+
+For cacheable programs, the first unchanged run after successful installation must load the bound
+image without frontend or lowering work. Changes to source, lockfile, features, target/profile,
+build-script inputs or compiler inputs invalidate the affected products under the existing identity
+rules. Failure to publish required installation products is an installation failure, even though
+ordinary `run` may still execute after a best-effort cache publication failure.
+
+Installing a library without a consumer can prepare its non-generic roots and concrete instances
+reachable from them. It cannot enumerate future `Vec<UserType>` or `deserialize::<UserType>`
+instances. Retain generic MIR metadata and prepare those instances when a consuming project is
+installed. With the current concrete-only representation, this includes their concrete bytecode.
+The [shared-generics direction](runtime-generics-design.md) can fulfill the ready-to-execute contract
+with owned templates and validated instance descriptors, while specializing hot bodies at runtime.
+Library preparation can then export admitted templates without enumerating future consumers.
+Installation must still settle known semantic errors and runtime bindings before guest entry;
+deferred specialization must not require a new rustc session. JIT compilation and per-process
+native binding remain governed by their runtime contracts.
 
 ## 3. Boundaries
 
@@ -173,25 +226,22 @@ design.
 
 - **L2 acceptance**: one workload run cold and warm must be byte-identical through the existing gate's
   diff channel, which catches a cache hit returning stale semantics.
+- **Installed std**: relocate a release payload into a fresh installation with empty derived
+  caches; a supported-default program loads std with no sysroot or base build. Repeat after a
+  cache-only purge, and reject mismatched target/profile/build or damaged artifacts.
+- **Project installation**: on both dependency tracks, install a cacheable generic-heavy program
+  without invoking its entry; the first run must hit its bound image and match native output.
+  Source/feature/input edits must invalidate it, and failed publication must fail installation.
 - **Gate**: `make test` / `make smoke` / `make gate`, plus `make case C=<id>`; L2 adds an acceptance
   dimension to this gate rather than a parallel harness.
-- **Phase timing**: a time dimension on the existing `--vm-stats` instrumentation, producing the
-  per-phase numbers §2.6 lacks.
+- **Phase timing**: use `MIRVM_TIMING` for the preparation/execution split described in §2.6.
 - **Cache management**: `mirvm cache status|purge`, with the root at `$HOME/.mirvm`. `MIRVM_BUILD_ID`
   keys every layer, so a rebuild invalidates base, deps and L2 images by design.
-- **Baseline reproduction**: release build (a debug build distorts every timing gate), warm cache, the
-  two workloads above.
+- **Baseline reproduction**: release builds and explicitly recorded installation/cache states;
+  measure ordinary wall time separately from instrumented profiles.
 
 ## 5. Open items
 
-- Release form and naming are open: MRsDK is rejected, and "kit" naming waits for a mode B physical
-  artifact.
-- Of the original order — phase timing, the L2 engine-IR cache, dependency codegen trimming, the mode B
-  package, release form — dependency codegen trimming is the one still unbuilt. The load phase's
-  per-phase split is measured by `MIRVM_TIMING`.
-- Reopens and their triggers: frequent `program.rs` churn hurting the L2 hit rate (the key contains the
-  build id, so it stays correct; re-estimate the format freeze once the IR settles); Cargo not
-  tolerating artifact-existence checks after emit trimming (establish empirically on landing, else
-  keep the status quo); a dangling FnPtr or handle in the relink section yielding silent wrong values
-  (validation section, prefer Trap); semantic drift on the cache-hit path (cold/warm byte diff in the
-  gate).
+[open-issues.md](../open-issues.md) owns release delivery, project installation and compatibility
+work. Format stability and cache invalidation remain constrained by exact build identity and the
+validation contracts above.

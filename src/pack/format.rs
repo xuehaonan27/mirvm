@@ -9,7 +9,7 @@ use crate::utils::bytes::{take_bytes, take_u32, take_u64, take_u128};
 /// Container magic: eight bytes, and the sniffer's whole criterion.
 pub(super) const MAGIC: &[u8; 8] = b"MIRVMAR\0";
 /// Format generation. A different value makes a package incompatible rather than corrupt.
-pub(super) const FMT_VER: u32 = 6;
+pub(super) const FMT_VER: u32 = 7;
 /// One section table entry: tag, offset, length, checksum.
 pub(super) const SECTION_ENTRY_LEN: usize = 36;
 /// The whole-file checksum trailer.

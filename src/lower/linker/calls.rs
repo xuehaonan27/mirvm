@@ -20,8 +20,31 @@ impl<'tcx> Linker<'tcx> {
         if let Some(&id) = self.ids.get(&inst) {
             return id;
         }
+        if let Some(crates) = &self.base_crates {
+            assert!(
+                crates.contains(&inst.def_id().krate) && classify_purity(inst).is_image(),
+                "base closure escaped the sysroot: {inst:?}"
+            );
+            for arg in inst
+                .args
+                .iter()
+                .chain(crate::lower::purity::shim_def(inst).map(Into::into))
+            {
+                for nested in arg.walk() {
+                    crate::lower::purity::ty_def_ids(nested, &mut |did| {
+                        assert!(
+                            crates.contains(&did.krate),
+                            "base type escaped the sysroot: {inst:?}"
+                        );
+                    });
+                }
+            }
+        }
         if !self.base_fns.is_empty()
-            && let Some(&bid) = self.base_fns.get(self.tcx.symbol_name(inst).name)
+            && let Some(&bid) = self
+                .base_fns
+                .get(self.tcx.symbol_name(inst).name)
+                .or_else(|| self.base_fns.get(self.base_symbol(inst).as_str()))
         {
             self.ids.insert(inst, bid);
             return bid;
@@ -267,6 +290,7 @@ impl<'tcx> Linker<'tcx> {
     /// test reads the same table, mapping a name to a materializable P1 entry.
     pub(crate) fn exported_defs(&mut self) -> &FxHashMap<Symbol, (Instance<'tcx>, bool)> {
         let tcx = self.tcx;
+        let base_crates = &self.base_crates;
         self.exports.get_or_insert_with(|| {
             use rustc_hir::def_id::LOCAL_CRATE;
             use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
@@ -276,7 +300,10 @@ impl<'tcx> Linker<'tcx> {
             // (instance, is_weak): a non-weak entry overrides a weak one
             let mut map: FxHashMap<Symbol, (Instance<'tcx>, bool)> = FxHashMap::default();
             let mut add = |def_id: rustc_hir::def_id::DefId| {
-                if tcx.is_foreign_item(def_id)
+                if base_crates
+                    .as_ref()
+                    .is_some_and(|crates| !crates.contains(&def_id.krate))
+                    || tcx.is_foreign_item(def_id)
                     || !matches!(tcx.def_kind(def_id), rustc_hir::def::DefKind::Fn)
                 {
                     return;

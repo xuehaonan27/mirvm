@@ -68,6 +68,14 @@ pub(crate) fn function(
     let mut context =
         super::Verifier::new_with_count(module, instance, super::Prefix::default(), &[], funcs)?;
     context.address_uses = Some(addresses);
+    function_in(context, index, body)
+}
+
+pub(super) fn function_in(
+    context: super::Verifier<'_>,
+    index: usize,
+    body: &FuncBody,
+) -> Result<(usize, usize), crate::error::Error> {
     let verifier = Verifier(context);
     verifier.body(body).map_err(|error| {
         crate::fail!(Engine, format!("function {index} `{}`: {error}", body.name))

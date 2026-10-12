@@ -1,6 +1,6 @@
 # Mode B: the `.mirvm` package format, pack/run, the MC machine-code section, multi-Engine
 
-> Status: Implemented · Scope: the `.mirvm` container v6, `mirvm pack` and `mirvm run x.mirvm`, the
+> Status: Implemented · Scope: the `.mirvm` container v7, `mirvm pack` and `mirvm run x.mirvm`, the
 > machine-code section, and repeatable multi-Engine instantiation. Parent case:
 > [distribution-design.md](distribution-design.md) — a package is the L2 engine-IR cache made
 > portable.
@@ -36,7 +36,7 @@ cache. Each violation is a rejection:
 - **C6** — the FUNCS archive's lengths, discriminants, relative pointers, alignment, aliasing and
   nesting depth must pass structural validation before any view is used. Full semantic verification
   precedes native materialization. An owned immutable archive makes later file replacement irrelevant.
-- **C7** — a v6 package that still declares `requires_fixed_base` must be rejected; every run instance
+- **C7** — a v7 package that still declares `requires_fixed_base` must be rejected; every run instance
   maps dynamically.
 - **C8** — in the strict address table, every guest function address outside the frozen range must have
   exactly one P1 entry recipe with the same FuncId. A missing recipe, a duplicate, or an overlap with a
@@ -46,7 +46,7 @@ cache. Each violation is a rejection:
 
 ### 2.1 Goals and non-goals
 
-Goals: a single-file package format v6; `mirvm pack` from a Cargo project or script; `mirvm run
+Goals: a single-file package format v7; `mirvm pack` from a Cargo project or script; `mirvm run
 x.mirvm` to validate, load and execute; and three-dimensional acceptance — pack plus run must be
 byte-identical to a direct `mirvm run` on three loads, while refusal probes must be loud.
 
@@ -59,7 +59,7 @@ materializes it and then dlopens it; and L3 JIT machine-code caching, which is u
 
 ```text
 offset 0   magic        8B   "MIRVMAR\0"
-           fmt_ver      u32  = 6
+           fmt_ver      u32  = 7
            build_id     u32 length + UTF-8 (MIRVM_BUILD_ID, exact match)
            section_cnt  u32
 sections   tag u32 | off u64 | len u64 | BLAKE3-128 (content checksum)
@@ -83,13 +83,15 @@ An unknown tag is skipped for forward compatibility; a missing required tag is a
 - **RELOC** (required) — postcard `{requires_fixed_base: bool, entry: Box<str>}`.
 - **MC** (optional) — the complete ELF bytes of global_asm/dep_asm, parsed, relocated and
   symbol-registered in-process by mcload.
-- **FUNCS** (required) — a rkyv 0.7 `Vec<FuncBody>` archive, using native endianness and 32-bit
-  relative pointers. Container target and build-id checks restrict compatibility. Its offset is padded
-  to a 16-byte boundary. The loader borrows the section from its immutable file allocation, copying
-  that allocation only if its actual alignment is insufficient. Structural validation checks a maximum
-  subtree depth of 128 before exposing function views. The outer section and whole-file digests
-  protect the complete representation. Address-expression operands and foreign-call signatures use
-  archive-only indirection; runtime IR and the shared-fragment encoding retain their inline fields.
+- **FUNCS** (required) — a little-endian `u64` chunk count and `u64` byte lengths, followed by
+  independently aligned rkyv 0.7 `Vec<FuncBody>` chunks. Each chunk starts at a 16-byte boundary and
+  uses native endianness and 32-bit relative pointers; pointers cannot cross chunk boundaries.
+  Concatenated chunk order defines absolute function ids. Empty tables have zero chunks; individual
+  chunks must be nonempty, and the section must end exactly with its last chunk. Container target
+  and build-id checks restrict compatibility. The loader retains an immutable aligned allocation
+  and structurally validates every chunk with a maximum subtree depth of 128. The section and
+  whole-file digests protect the complete representation. Address expressions and foreign signatures
+  use archive-only indirection; runtime IR and shared fragments retain their inline fields.
 
 ### 2.3 pack flow
 
@@ -244,7 +246,7 @@ permanent `wait_closed` stall, at the cost of a permanent process-level address 
 constructors run, an instantiation failure is reclaimable; after that, escaped addresses never are.
 
 **Not frozen.** Cross-version bytecode requires an exact `build_id` today, and external format freezing
-awaits its own review; `fmt_ver` only separates generations. A v6 package does not occupy the
+awaits its own review; `fmt_ver` only separates generations. A v7 package does not occupy the
 artifact's fixed base at run time — every Engine uses its own anonymous mapping. A multi-target fat
 artifact is only a reserved section-table tag, to be judged after the freeze review.
 

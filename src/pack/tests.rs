@@ -45,6 +45,14 @@ fn header_with_count(count: u32) -> Vec<u8> {
     body
 }
 
+#[test]
+fn parser_rejects_the_previous_function_archive_format() {
+    let mut raw = header_with_count(0);
+    raw[MAGIC.len()..MAGIC.len() + 4].copy_from_slice(&6u32.to_le_bytes());
+    replace_whole_hash(&mut raw);
+    assert!(parse_container(&raw).is_err());
+}
+
 fn table_start() -> usize {
     MAGIC.len() + 4 + 4 + crate::options::build::BUILD_ID.len() + 4
 }
@@ -138,7 +146,7 @@ fn function_archive_indexes_checked_bodies_without_decoding() {
     )
     .unwrap();
     assert_eq!(archive.len(), 2);
-    for (index, body) in archive.bodies().iter().enumerate() {
+    for (index, body) in archive.bodies().enumerate() {
         assert_eq!(&*body.name, ["first", "second"][index]);
         assert_eq!(
             archive.decode(index).name.as_ref(),

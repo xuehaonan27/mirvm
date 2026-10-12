@@ -1880,7 +1880,7 @@ pub(crate) fn lower_instance<'tcx>(
         None
     };
 
-    let name = tcx.symbol_name(instance).name.to_owned();
+    let name = linker.image_symbol(instance);
     let mir_block_count = body.basic_blocks.len();
     let mut cx = LowerCx {
         tcx,

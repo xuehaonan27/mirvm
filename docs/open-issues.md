@@ -67,6 +67,13 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Approved, awaiting construction
 
+- **T13** `APPROVED`: on-stack replacement (OSR) for long-running interpreted loops. Backedge heat
+  can request compilation, but an active invocation cannot enter the published body. Define safe
+  transfer points and maps for live locals, operand regions, pending cleanup/drop state, shadow
+  frames and the plain/trace code domain. Preserve stack checks, signals, unwind ownership and
+  function-pointer identity. Validate a single long invocation as well as repeated calls, and
+  measure polling and transfer costs. Runtime generic specialization must use the same transfer
+  contract; entry-only promotion is not OSR. Coordinate with E42's within-run tier policy.
 - **T8** `APPROVED`: HostSyscall direct hot path. Three pieces remain — dropping the per-record cold
   sequence update on the healthy pair (needs a separate ruling, since `next_sequence` is also the
   producer-end ledger's `attempted` and deriving it in-page changes the v0 file/sequence contract);
@@ -202,10 +209,13 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Distribution and product
 
-- **D2** `UNSCHEDULED`: release form and naming — miri-style first, JDK-style self-contained tarball
-  later. Kit naming candidates are MDK/mirvm toolkit; MRsDK is rejected. The design prerequisite (the
-  mode B `.mirvm` package and `mirvm pack`) has landed, so only the form/naming ruling remains.
-- **D4** `UNSCHEDULED`: public format freeze. `fmt_ver` is 5 and merely separates generations
+- **D2** `OPEN`: deliver the MIR sysroot and matching pre-lowered std with each supported release,
+  following [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
+  Add release production/import, exact build/target/profile/content validation and an installed-data
+  owner; prove relocation into a fresh installation and std reuse after cache-only purging. A local
+  base cache alone does not meet the distribution contract. Release form remains miri-style first,
+  self-contained tarball later; kit naming is unscheduled (MDK/mirvm toolkit; MRsDK is rejected).
+- **D4** `UNSCHEDULED`: public format freeze. `fmt_ver` is 7 and merely separates generations
   (`src/pack/format.rs`). Review compatibility windows, capability bits, migration tooling and
   corruption/signature policy before making an external compatibility promise.
 - **D6** `UNSCHEDULED`: the residual cross-project sharing work. Machine-wide sharing of lowered
@@ -216,17 +226,32 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   target dir is still not delivered. Schedule on real need.
 - **D7** `OPEN`: change frontend/base preparation at the boundaries identified in
   [frontend-boundary.md](designs/frontend-boundary.md):
-  - Compare a prepared compatible base with a single-session miss path that publishes both a
-    cacheable program and reusable std content. Include another program, an edit and a warm rerun;
-    evaluate immutable base loading instead of reconstructing all bodies. A no-base timing without
-    equivalent publication is not an accepted optimization.
+  - Implement project `install` through a shared preparation pipeline with `prepare`: lower the
+    selected target's concrete dependency instances, publish shared products and a complete bound
+    image, and stop before program entry. Fix the default cold preparation path's early return and
+    drive root lowering on the Cargo track, which currently stops at `cargo build`. Verify the first
+    unchanged run needs no frontend/lowering and publication failures cannot report installation
+    success; the product contract is in distribution §2.7 above.
+  - Explain the prepared-base setup regression with separate measurements of canonical-symbol
+    lookup and first-program native materialization; a cold-build gain does not establish a gain
+    when the base is already present.
   - Prove a real package/bound-image runner can avoid loading compiler libraries. Measure cache hits
     and compiler-worker misses, including transfer and diagnostics, before selecting a process split.
   - Record the reasons functions enter the guest closure and evaluate smaller/lazy products while
     retaining runtime roots, indirect targets, pointer identity and deterministic ownership.
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a
-    generic semantic IR, dedicated frontend or source interpreter. Preserve the selected Rust,
-    diagnostics, build-script/proc-macro, layout/ABI, std and input-invalidation contracts.
+    generic semantic IR, dedicated frontend or source interpreter. Evaluate
+    [runtime generics](designs/runtime-generics-design.md#5-integration-roadmap-and-gates) through
+    the selected engineering roadmap: production template export/binding with eager fallback,
+    per-Engine entries with pinned activations, reusable generic archives, then measured tier
+    policy and coverage expansion. Replace the experiment's serial global publication hook;
+    verify guest trait/drop/unwind, concurrency, callbacks, fork and trace domains. Require real
+    workload cold/warm measurements and specialization payback before default enablement. Preserve
+    Rust diagnostics, build-script/proc-macro, layout/ABI, std and input-invalidation contracts;
+    coordinate single-invocation optimization with T13.
+  - Diagnose the generic-matrix cache-publication transition: with only std base retained, the first
+    run reports no program-cache store and the second re-enters analysis/lowering with shared units;
+    a later run reaches a bound-image hit. Preserve this distinction in installation acceptance.
 - **D8** `UNSCHEDULED`: the real-project correctness probes still have no timing gate. Only `load`,
   `rayon-gate` and `fib32` carry a ceiling in `tests/manifest`, plus the `resources` metering case; no
   real-project probe has one. Add ceilings on real-workload demand.

@@ -195,7 +195,7 @@ pub(super) fn ty_def_ids(
 }
 
 /// The type a shim is glue over: the crate that owns it is the shim's defining crate.
-fn shim_def(inst: Instance<'_>) -> Option<rustc_middle::ty::Ty<'_>> {
+pub(super) fn shim_def(inst: Instance<'_>) -> Option<rustc_middle::ty::Ty<'_>> {
     use rustc_middle::ty::{ShimKind, Ty};
     let tys: &[Ty<'_>] = match inst.def {
         InstanceKind::Shim(ShimKind::FnPtr(_, t))
