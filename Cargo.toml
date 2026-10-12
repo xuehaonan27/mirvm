@@ -48,6 +48,7 @@ tar = "0.4"
 # The error vocabulary: every mirvm failure class is a typed enum deriving thiserror.
 thiserror = "2"
 memmap2 = "0.2.3"
+rkyv = { version = "0.7.46", features = ["validation"] }
 
 # Lets rust-analyzer see the rustc_private crates (enable
 # rust-analyzer.rustc.source = "discover" on the IDE side).

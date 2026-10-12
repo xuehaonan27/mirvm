@@ -3,7 +3,19 @@
 
 /// Category of one libffi argument or return value, frozen at lower time from the function signature's
 /// layout.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum FfiKind {
     I8,
     I16,
@@ -29,16 +41,46 @@ pub enum FfiKind {
 /// order, with padding implied by their offsets.
 /// An alignment of at most 8 is the construction boundary, because the result buffer is allocated with
 /// 8-byte alignment.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive(bound(serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace"))]
+#[archive_attr(check_bytes(
+    bound = "__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::bytecheck::Error"
+))]
 pub struct FfiAgg {
     pub size: u32,
     pub align: u32,
+    #[omit_bounds]
+    #[archive_attr(omit_bounds)]
     pub fields: Vec<FfiField>,
 }
 
 /// One aggregate field: its offset and leaf. Nesting is recursive; ZST members are omitted, and padding
 /// is implied by the surrounding size and offsets.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub struct FfiField {
     pub off: u32,
     pub leaf: FfiLeaf,
@@ -46,7 +88,19 @@ pub struct FfiField {
 
 /// An aggregate leaf: either a scalar or a nested aggregate, which is how a ScalarPair `{ptr, len}` or
 /// an inner struct of the same shape appears.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum FfiLeaf {
     Scalar(FfiKind),
     Agg(FfiAgg),
@@ -56,7 +110,23 @@ pub enum FfiLeaf {
 /// actual arguments; `fixed` is how many leading parameters are fixed.
 /// The Eq/Hash impls exist because this type keys the thunk cache that maps a function entry address
 /// plus signature to the real thunk code address.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive(bound(serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace"))]
+#[archive_attr(check_bytes(
+    bound = "__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::bytecheck::Error"
+))]
 pub struct ForeignSig {
     pub args: Vec<FfiKind>,
     pub ret: FfiKind,
@@ -67,6 +137,8 @@ pub struct ForeignSig {
     /// `fn_addrs` is swapped for the thunk's real code, while NULL and already-native real code pass
     /// through untouched.
     /// An inner signature's `thunk_args` is always empty, so thunks do not nest.
+    #[omit_bounds]
+    #[archive_attr(omit_bounds)]
     pub thunk_args: Vec<(usize, ForeignSig)>,
     /// The ABI's unwind attribute: false for an ordinary C boundary, true for a C-unwind boundary that
     /// lets exceptions through. Direct foreign calls, callbacks and native fn-ptrs all share this

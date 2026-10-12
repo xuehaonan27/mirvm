@@ -1,6 +1,6 @@
 # Mode B: the `.mirvm` package format, pack/run, the MC machine-code section, multi-Engine
 
-> Status: Implemented · Scope: the `.mirvm` container v4, `mirvm pack` and `mirvm run x.mirvm`, the
+> Status: Implemented · Scope: the `.mirvm` container v6, `mirvm pack` and `mirvm run x.mirvm`, the
 > machine-code section, and repeatable multi-Engine instantiation. Parent case:
 > [distribution-design.md](distribution-design.md) — a package is the L2 engine-IR cache made
 > portable.
@@ -13,10 +13,10 @@
 
 The following properties are normative, not history: all self-produced library bytes are embedded in
 NATIVELIBS and materialize at run time by content hash, while STAMPS and envs are provenance only; the
-loader uses a read-only mmap; MODULE holds only non-function metadata while FUNCS holds a per-function
-index plus independent bodies that become resident lazily, with full semantic validation done as one
-temporary per-function decode at first load; and a fixed address survives only as a logical address in
-the artifact, never as a run address.
+loader owns immutable bytes; MODULE holds non-function metadata while FUNCS holds a checked archive
+whose borrowed views support semantic verification without constructing owned function bodies. A
+function is decoded once, on demand, from those same bytes. Logical addresses are rebound per Engine.
+The ownership and rebinding contract belongs to [startup-cache-design.md](startup-cache-design.md).
 
 ## 1. Contract
 
@@ -33,10 +33,10 @@ cache. Each violation is a rejection:
 - **C5** — the section count must fit the remaining section table; every offset and length conversion
   must be checked; a section must never exceed bounds, overlap or reuse a tag; every section hash is
   checked, unknown tags included.
-- **C6** — FUNCS count, table length, per-function range and overlap must be checked. Per-function
-  hashes are recomputed at load and at every on-demand decode, and corrupt data must not reach
-  execution.
-- **C7** — a v4 package that still declares `requires_fixed_base` must be rejected; every run instance
+- **C6** — the FUNCS archive's lengths, discriminants, relative pointers, alignment, aliasing and
+  nesting depth must pass structural validation before any view is used. Full semantic verification
+  precedes native materialization. An owned immutable archive makes later file replacement irrelevant.
+- **C7** — a v6 package that still declares `requires_fixed_base` must be rejected; every run instance
   maps dynamically.
 - **C8** — in the strict address table, every guest function address outside the frozen range must have
   exactly one P1 entry recipe with the same FuncId. A missing recipe, a duplicate, or an overlap with a
@@ -46,7 +46,7 @@ cache. Each violation is a rejection:
 
 ### 2.1 Goals and non-goals
 
-Goals: a single-file package format v4; `mirvm pack` from a Cargo project or script; `mirvm run
+Goals: a single-file package format v6; `mirvm pack` from a Cargo project or script; `mirvm run
 x.mirvm` to validate, load and execute; and three-dimensional acceptance — pack plus run must be
 byte-identical to a direct `mirvm run` on three loads, while refusal probes must be loud.
 
@@ -59,12 +59,15 @@ materializes it and then dlopens it; and L3 JIT machine-code caching, which is u
 
 ```text
 offset 0   magic        8B   "MIRVMAR\0"
-           fmt_ver      u32  = 4
+           fmt_ver      u32  = 6
            build_id     u32 length + UTF-8 (MIRVM_BUILD_ID, exact match)
            section_cnt  u32
-sections   tag u32 | off u64 | len u64 | fnv1a-128 (content hash)
-tail       whole_hash   u128 fnv1a (the whole file except this field)
+sections   tag u32 | off u64 | len u64 | BLAKE3-128 (content checksum)
+tail       whole_hash   u128 BLAKE3-128 (the whole file except this field)
 ```
+
+BLAKE3-128 stores the first 16 digest bytes. Native-library `fnv128` identities remain independent
+of these container checksums. The format version is checked before applying its checksum algorithm.
 
 An unknown tag is skipped for forward compatibility; a missing required tag is a rejection.
 
@@ -80,8 +83,13 @@ An unknown tag is skipped for forward compatibility; a missing required tag is a
 - **RELOC** (required) — postcard `{requires_fixed_base: bool, entry: Box<str>}`.
 - **MC** (optional) — the complete ELF bytes of global_asm/dep_asm, parsed, relocated and
   symbol-registered in-process by mcload.
-- **FUNCS** (required) — `count u32`, fixed index entries of `offset u64 | len u64 | fnv1a-128`, then
-  the functions' postcard bodies stored contiguously.
+- **FUNCS** (required) — a rkyv 0.7 `Vec<FuncBody>` archive, using native endianness and 32-bit
+  relative pointers. Container target and build-id checks restrict compatibility. Its offset is padded
+  to a 16-byte boundary. The loader borrows the section from its immutable file allocation, copying
+  that allocation only if its actual alignment is insufficient. Structural validation checks a maximum
+  subtree depth of 128 before exposing function views. The outer section and whole-file digests
+  protect the complete representation. Address-expression operands and foreign-call signatures use
+  archive-only indirection; runtime IR and the shared-fragment encoding retain their inline fields.
 
 ### 2.3 pack flow
 
@@ -91,7 +99,7 @@ fork changes, writing to disk instead of executing.
 1. For a Cargo project, a full build through the Cargo shim with a **forced full cold lowering**, so
    the single module is self-contained; deps-image and base layering are bypassed, which is acceptable
    because packing is a build action. No BASE is written: MODULE holds the full module metadata and
-   FUNCS stores every function body independently.
+   FUNCS stores the full function table.
 2. A script or single file takes the single-file variant, with frontmatter dependencies on the same
    Cargo path.
 3. Run full semantic validation on the in-memory Module, then collect META, STAMPS, NATIVELIBS
@@ -107,22 +115,18 @@ fork changes, writing to disk instead of executing.
    the source inode again.
 3. Check META's `build_id`, `fmt_ver` and target; STAMPS and envs are deserialized only to check their
    format.
-4. Restore non-function metadata from MODULE and parse the FUNCS index. To preserve semantic
-   validation, decode every function temporarily and finish validation before any MC or native
-   materialization, then release the temporary objects; the execution-time function table binds the
-   owned snapshot, and a function becomes resident on first access. Every instantiation recovers its
-   dynamic frozen state independently, establishes all P1 `LinkAddr → closure` mappings first, and then
-   applies frozen pointer relocations. Each Engine gets its own `.so` image of a self-produced archive,
-   and MC loads per instance. GOT, the TLS template, statics, address immediates and entries all
-   resolve through the same load map.
+4. Restore MODULE metadata and validate FUNCS structurally and semantically against that metadata.
+   The ordinary and archived forms compile the same semantic verifier source. Retain the immutable
+   archive, metadata and logical address obligations together. Each instantiation restores independent
+   frozen domains and checks its header and recorded address obligations before granting an internal
+   `VerifiedArtifact`; Engine construction consumes it without a second function walk. Native/MC
+   images, GOT and callback closures are materialized per instance.
 5. Start at `RELOC.entry`, the main startup chain, forwarding argv.
 
-Function access records the real order of the run. On release, that order is written atomically to
-`$MIRVM_HOME/cache/package-heat/<hash>.order`, keyed by the FUNCS content hash; the next load prefetches in
-that order in the background from one decode worker. Demand tasks always precede predicted ones, and a
-predicted function that is suddenly demanded moves to the demand queue. The wait bound is the item
-currently decoding plus that demand, so a wrong prediction costs speed only and never changes
-semantics.
+Function bodies are constructed through per-instance `OnceLock` slots by the interpreter or JIT
+thread that first needs them. There is no separate decode queue or speculative decode worker. Before
+`fork`, remaining slots are completed so the child cannot inherit an initializer owned by a vanished
+thread. Program-level JIT heat ordering remains independent of the package representation.
 
 ### 2.5 MC section
 
@@ -240,7 +244,7 @@ permanent `wait_closed` stall, at the cost of a permanent process-level address 
 constructors run, an instantiation failure is reclaimable; after that, escaped addresses never are.
 
 **Not frozen.** Cross-version bytecode requires an exact `build_id` today, and external format freezing
-awaits its own review; `fmt_ver` only separates generations. A v4 package does not occupy the
+awaits its own review; `fmt_ver` only separates generations. A v6 package does not occupy the
 artifact's fixed base at run time — every Engine uses its own anonymous mapping. A multi-target fat
 artifact is only a reserved section-table tag, to be judged after the freeze review.
 
@@ -262,15 +266,15 @@ machine-code cache.
   package runs) over eco (large Cargo project), `c_faer_lu` (dependency global_asm plus pulp LD_ST) and
   `c_wasmtime_wat` (large dependency closure plus the fiber `sym` skip branch) must agree byte for byte.
 - **Refusal probes** — `fmt_ver`, whole and section hashes, duplicate tag, truncated section table,
-  offset overflow, section overlap, FUNCS truncation, out-of-bounds, overlap and per-body hash, and
+  offset overflow, section overlap, FUNCS truncation, invalid tags, relative-pointer bounds and aliasing, and
   NATIVELIBS/MC cross-validation failures must all return errors; a P1 address with a missing recipe, a
   duplicate, or an overlap with frozen must error rather than panic.
 - **Self-containment acid test** — pack with MC disabled, move the original native and global-asm
   caches away, switch to a fresh `MIRVM_HOME`: the package must still materialize by content hash and
   run byte-identically.
-- **Hot-order contract** — a first run produces exactly one non-empty `.order`, and a second run
-  reusing the same `MIRVM_HOME` produces unchanged output, proving the prediction channel does not
-  change results.
+- **Lazy-body contract** — archive validation and Engine construction leave unused function bodies
+  undecoded; concurrent demands publish one body, and the fork preparation settles all remaining
+  slots. Repeated package runs preserve output.
 - **Real embedding contract** — after load, rewrite and delete the source package; build two Engines
   concurrently from the same object; check static and TLS isolation, distinct function-pointer
   addresses, and that global_asm and the archive bridge each return to their own Engine. After closing
@@ -286,7 +290,7 @@ machine-code cache.
   self-produced native archive completes its nested handler before returning.
 - **`make gate`** with the full set, `cargo test` and the SYNC differential stay green.
 
-Implementation locations: `src/pack.rs` for the container and content-addressed materialization;
+Implementation locations: `src/pack/` for the container and content-addressed materialization;
 `src/vm/{mcload,native_instance,signal}.rs` for in-process MC loading, per-Engine native image
 isolation, the P1 hidden slot and the disposition owner chain; `src/vm/ctx/` for close state,
 execution leases, deferred callbacks and `CtxSlot` cleanup; `src/cli/` for the pack subcommand and
@@ -294,12 +298,6 @@ run's magic dispatch.
 
 ## 5. Open items
 
-- **Archive direct verification** still needs a later unstable format: executed function bodies become
-  an offset-based read-only archive representation with every length, offset and enum payload
-  bounds-checked first, validation walking the same bytes through a borrowed view, and `FuncBody`
-  restored from that already-verified representation on first use. The "dual representation plus equal
-  hashes" shortcut is not adopted, because a side-by-side summary cannot prove another postcard
-  representation's executing bytes safe. Reopens at the format-freeze review.
 - **External format freeze**: fix the format and state the migration rules.
 - **Cross-version bytecode**: `build_id` must match exactly today. Reopens at the freeze, or at the
   first need to run a package built by another mirvm version.

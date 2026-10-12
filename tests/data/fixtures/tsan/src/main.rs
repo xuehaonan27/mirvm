@@ -12,7 +12,7 @@
 //!    This is the only check in the repository that can see a data race at all: every other
 //!    gate compares stdout/stderr/exit codes, which is structurally blind to them.
 //! 2. **Purity fence.** Building this crate is what keeps `src/vm` free of `rustc_private`:
-//!    only `blake3`/`libc`/`libffi`/`libmimalloc-sys`/`serde`/`postcard`/`memmap2` are in
+//!    only `blake3`/`libc`/`libffi`/`libmimalloc-sys`/`serde`/`postcard`/`rkyv`/`memmap2` are in
 //!    scope here, so one `rustc` type leaking into the execution phase fails this build.
 //!    `cargo check --all-features` can never catch that, because the root crate has
 //!    `rustc_private` by design.

@@ -4,6 +4,21 @@
 use super::*;
 
 impl Translator<'_, '_> {
+    /// Inline small constant copies; the backend uses memmove for larger ones. Loading before
+    /// storing preserves overlap, and byte alignment also covers packed guest fields.
+    pub(super) fn copy_bytes(&mut self, dst: Value, src: Value, size: u64) {
+        self.b.emit_small_memory_copy(
+            self.module.target_config(),
+            dst,
+            src,
+            size,
+            1,
+            1,
+            false,
+            MemFlagsData::new().with_notrap(),
+        );
+    }
+
     pub(super) fn stmt(&mut self, st: &Stmt) {
         match st {
             Stmt::Assign { dst, rv } => {
@@ -46,14 +61,9 @@ impl Translator<'_, '_> {
                 self.def_slot(sf, flag);
             }
             Stmt::Copy { dst, src, size } => {
-                // memmove semantics, matching the interpreter's std::ptr::copy:
-                // overlap is UB on the guest side, but the engine must not crash over
-                // it, and both sides stay defensive in the same way.
                 let d = self.place_addr(dst);
                 let s = self.place_addr(src);
-                let n = self.b.ins().iconst(types::I64, i64::from(*size));
-                let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
-                self.b.ins().call(fref, &[d, s, n]);
+                self.copy_bytes(d, s, u64::from(*size));
             }
             Stmt::RepeatScalar {
                 dst,

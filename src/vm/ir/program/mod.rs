@@ -26,7 +26,16 @@ mod module;
 
 /// Owned name of an unsupported builtin. Deserialization cannot produce a `&'static str`, so the name
 /// is owned and released together with the Module.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub struct StaticStr(pub Box<str>);
 
 /// Guest TLS slot id: a dense index over `#[thread_local]` statics.

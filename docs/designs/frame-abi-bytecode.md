@@ -73,7 +73,11 @@ cold tier.
 ### 2.2 In-frame layout and guest local storage
 
 A compiled frame is Cranelift's business — this contract defines only its calling convention and
-unwind info.
+unwind info. Scalar locals stay in SSA unless their storage is addressed: dereferencing a pointer
+reads its value and does not by itself require a stack slot. Compiled frame memory starts
+uninitialized, just like the interpreted operand region; guest writes initialize the values a legal
+program reads. Fixed-size copies preserve overlap and byte alignment, with small copies emitted as
+loads and stores and larger copies delegated to `memmove`.
 
 An interpreted frame's size is dynamic (it depends on the function's local count and types) while
 Rust locals are fixed-size, so guest locals cannot be inlined into the native stack. Instead each
@@ -255,7 +259,11 @@ Guest deep recursion becomes host `interp_frame` recursion plus operand-region g
 native stack limit, so it behaves like native Rust. Compiled frames are smaller than interpreted
 frames, so hot recursion goes deeper once compiled. `interp_frame` may check the remaining native
 stack at entry through a guard page or stack-pointer threshold and raise a guest stack overflow at
-the boundary rather than faulting.
+the boundary rather than faulting. Compiled calls check the callee's frame bytes, alignment slack and
+safety margin at the call site, before its prologue, then call its body through the compiled slot.
+Packed boundary entries check through a separate guarded wrapper. Both paths share the check; the
+call site rebinds callee headroom when loading a persisted entry, and every guest return keeps its
+signal safepoint.
 
 ## 3. Boundaries
 

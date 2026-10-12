@@ -1,11 +1,15 @@
-//! What a foreign call signature must satisfy, and the libffi aggregate and scalar layout that a
-//! marshalled argument is handed over under.
+// What a foreign call signature must satisfy, and the libffi aggregate and scalar layout that a
+// marshalled argument is handed over under.
 
 use super::*;
 
 impl<'a> Verifier<'a> {
     pub(super) fn foreign_sig(&self, sig: &ForeignSig) -> Result<(), crate::error::Error> {
-        if sig.fixed.is_some_and(|n| n > sig.args.len()) {
+        if sig
+            .fixed
+            .as_ref()
+            .is_some_and(|&n| ffi_index(n) > sig.args.len())
+        {
             return Err(crate::fail!(
                 Engine,
                 format!(
@@ -24,13 +28,13 @@ impl<'a> Verifier<'a> {
         self.ffi_kind(&sig.ret)
             .map_err(|e| crate::fail!(Engine, format!("return type: {e}")))?;
         for (i, (arg, nested)) in sig.thunk_args.iter().enumerate() {
-            if *arg >= sig.args.len() {
+            if ffi_index(*arg) >= sig.args.len() {
                 return Err(crate::fail!(
                     Engine,
                     format!("callback entry {i} refers to missing argument {arg}")
                 ));
             }
-            if !matches!(sig.args[*arg], FfiKind::Ptr) {
+            if !matches!(sig.args[ffi_index(*arg)], FfiKind::Ptr) {
                 return Err(crate::fail!(
                     Engine,
                     format!("callback argument {arg} is not a pointer")

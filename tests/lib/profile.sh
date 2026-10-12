@@ -16,7 +16,10 @@
 #   tests/run.sh profile vmcall_pure.rs --vm-call 'fib(32)'
 #
 # Environment: MIRVM_PROFILE_DATA and MIRVM_PROFILE_OUT name the raw capture and the text report
-# (both default under /tmp and are kept), MIRVM_PROFILE_FREQ the sampling frequency.
+# (both default under /tmp and are kept), MIRVM_PROFILE_FREQ the sampling frequency, and
+# MIRVM_PROFILE_CALL_GRAPH the unwinder (dwarf,16384 by default; fp for JIT caller chains). Call
+# stacks are kept beside the data file. FlameGraph's stackcollapse-perf.pl and flamegraph.pl on
+# PATH also produce an interactive SVG; neither tool is downloaded by this command.
 
 profile_main() { # <program> [-- guest args...]
     local program=${1:-}
@@ -39,6 +42,10 @@ profile_main() { # <program> [-- guest args...]
     local data=${MIRVM_PROFILE_DATA:-/tmp/mirvm-profile-$$.data}
     local out=${MIRVM_PROFILE_OUT:-/tmp/mirvm-profile-$$.txt}
     local freq=${MIRVM_PROFILE_FREQ:-2999}
+    local call_graph=${MIRVM_PROFILE_CALL_GRAPH:-dwarf,16384}
+    local stacks=${data%.data}.stacks
+    local folded=${data%.data}.folded
+    local svg=${data%.data}.svg
 
     # Arguments before a `--` are the product's own (they precede the program, as the corpus mode
     # passes its `args`), arguments after it belong to the guest.
@@ -52,16 +59,36 @@ profile_main() { # <program> [-- guest args...]
     cmd=("$MIRVM" run ${pre[@]+"${pre[@]}"} "$program")
     [ ${#guest[@]} -gt 0 ] && cmd+=(-- "${guest[@]}")
 
-    echo "== perf record -F $freq -e cycles:u -o $data =="
-    MIRVM_PERF_MAP=1 perf record -F "$freq" -e cycles:u -o "$data" -- "${cmd[@]}" ||
+    echo "== perf record -F $freq -e cycles:u --call-graph $call_graph -o $data =="
+    MIRVM_PERF_MAP=1 perf record -F "$freq" -e cycles:u --call-graph "$call_graph" \
+        -o "$data" -- "${cmd[@]}" ||
         {
             echo "profile: perf record failed" >&2
             return 69
         }
-    perf report -i "$data" --stdio --no-children >"$out" 2>/dev/null || {
+    perf report -i "$data" --stdio --no-children --call-graph none >"$out" || {
         echo "profile: perf report failed" >&2
         return 69
     }
+    perf script -i "$data" >"$stacks" || {
+        echo "profile: perf script failed" >&2
+        return 69
+    }
+    # Some perf builds do not demangle Rust v0 names. Binutils can decode those without debug info.
+    if command -v c++filt >/dev/null 2>&1 && c++filt -s rust </dev/null >/dev/null 2>&1; then
+        local file
+        for file in "$out" "$stacks"; do
+            c++filt -s rust <"$file" >"$file.demangled" && mv "$file.demangled" "$file" || return 69
+        done
+    fi
+
+    grep '^# Total Lost Samples:' "$out" || true
+    if grep -Eq '^# Total Lost Samples: [1-9]' "$out"; then
+        echo "warning: samples were lost; this profile is incomplete" >&2
+    fi
+    if grep -q '\[unknown\]' "$stacks"; then
+        echo "note: unresolved stack frames remain; JIT perf maps name code but do not supply unwind info" >&2
+    fi
 
     echo
     echo "== the run's heaviest symbols =="
@@ -94,4 +121,13 @@ profile_main() { # <program> [-- guest args...]
     echo
     echo "full report: $out"
     echo "raw capture: $data"
+    echo "call stacks: $stacks"
+    if command -v stackcollapse-perf.pl >/dev/null 2>&1 && command -v flamegraph.pl >/dev/null 2>&1; then
+        stackcollapse-perf.pl --all "$stacks" >"$folded" &&
+            flamegraph.pl --title "mirvm user CPU cycles" --countname cycles "$folded" >"$svg" || return 69
+        echo "flame graph: $svg"
+    else
+        echo "note: add FlameGraph's stackcollapse-perf.pl and flamegraph.pl to PATH to render an SVG"
+    fi
+    echo "note: CPU cycles exclude I/O and scheduling waits; measure wall time without perf separately"
 }

@@ -85,14 +85,24 @@ impl Translator<'_, '_> {
     /// Evaluate a `PlaceExpr`, bit-for-bit mirroring `interp::eval_place_addr`.
     /// Deref and Offset use wrapping semantics.
     pub(super) fn place_addr(&mut self, pe: &ir::PlaceExpr) -> Value {
-        let mut addr = match pe.base {
-            ir::PlaceBase::Local(off) => self.addr_of_local(off),
-            ir::PlaceBase::Static(a) => {
-                let runtime = self.shared.instance.resolve_link_addr(a);
-                self.site(Site::Frozen(a), runtime)
+        let (mut addr, steps) = match (&pe.base, pe.steps.as_ref()) {
+            (ir::PlaceBase::Local(off), [ir::PlaceStep::Deref, rest @ ..]) => {
+                // The pointer itself may stay in SSA; only taking its address requires a frame.
+                (
+                    self.read_slot(Slot {
+                        off: *off,
+                        width: Width::W64,
+                    }),
+                    rest,
+                )
+            }
+            (ir::PlaceBase::Local(off), steps) => (self.addr_of_local(*off), steps),
+            (ir::PlaceBase::Static(a), steps) => {
+                let runtime = self.shared.instance.resolve_link_addr(*a);
+                (self.site(Site::Frozen(*a), runtime), steps)
             }
         };
-        for step in pe.steps.iter() {
+        for step in steps {
             match step {
                 ir::PlaceStep::Deref => {
                     addr = self

@@ -20,6 +20,11 @@ fn resolve_signal_handler(
 
 pub(super) fn exec(ctx: *mut Ctx, builtin: &Builtin, av: &[u64]) -> u64 {
     let a = |i: usize| av[i];
+    if matches!(builtin, Builtin::HostSyscall | Builtin::HostSyscallTrace)
+        && a(0) as i64 == crate::os::process::SYS_FORK
+    {
+        unsafe { (*ctx).shared() }.module.funcs.prepare_for_fork();
+    }
     match builtin {
         // Minimal `os::` passthroughs: real addresses, no marshalling.
         Builtin::HostGetenv => crate::os::process::getenv(a(0)),
@@ -40,6 +45,7 @@ pub(super) fn exec(ctx: *mut Ctx, builtin: &Builtin, av: &[u64]) -> u64 {
                      is allowed through",
                 );
             }
+            unsafe { (*ctx).shared() }.module.funcs.prepare_for_fork();
             let pid = crate::os::process::fork();
             if pid == 0 {
                 // The child has no writer thread and must never publish into

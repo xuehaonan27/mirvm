@@ -13,7 +13,8 @@ contracts are its siblings in `docs/designs/`.
 
 - **Interpreter** — a tcx-free tree walk over the typed bytecode: scalar and SIMD intrinsics, true
   stack depth, `f16`/`f128`, atomic ordering, 128-bit forms, nested DSTs, `volatile`, `dyn` tail
-  fields. An exhaustive verifier runs at the pack, image, L2 and final-execution entries.
+  fields. An exhaustive verifier checks raw IR and immutable archives; internal ownership evidence carries
+  validated code into Engine construction without repeating the function walk.
 - **JIT** — method-level Cranelift, on by default (`MIRVM_JIT=off` falls back to pure interpretation).
   The translator is exhaustive over the statement, rvalue and terminator tables: frame model v2 with
   memory operands, the full scalar set, 128-bit and atomics, all ABI shapes, the five call helpers,
@@ -47,8 +48,12 @@ contracts are its siblings in `docs/designs/`.
   and rlib stamp), a stack `[std base, unit…]` serves two programs that share a dependency, and a layer
   the stack provides is never rewritten. An image stack carries multi-source lookup, cumulative
   offsets and a key chain, and an L2 post-mono engine-IR entry is a manifest of fragments behind a
-  header, so an edit reuses the bodies and frozen chunks it did not change. `MIRVM_TIMING` prints a
-  phase ledger.
+  header, so an edit reuses the bodies and frozen chunks it did not change. A disposable bound image
+  in `cache/execution` loads before stack discovery and carries its own complete frozen domains and
+  immutable function archive. Mirvm-owned sysroots publish content-identified generations with local
+  integrity receipts and process leases; ordinary external inputs retain full content hashing.
+  [startup-cache-design.md](designs/startup-cache-design.md) owns these contracts. `MIRVM_TIMING`
+  prints a phase ledger.
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the
   source into a process-owned immutable snapshot and each `unsafe instantiate` builds an independent
   Engine, so one package instantiates repeatedly and concurrently. Artifacts use logical `LinkAddr`
@@ -111,50 +116,89 @@ in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call site n
 
 ## 3. Verified boundaries
 
-Measured on this tree against the Linux x86_64 release build, with network access wherever a case
-fetches; `tests/README.md` documents the suites.
+Linux x86_64 remains the authoritative execution target. Focused verification of the JIT's call boundaries,
+frame storage and constant-copy paths covers:
 
-- `cargo fmt --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
-- `cargo test --locked --all-features`: 501 pass, 0 fail, 1 ignored. E48's flakes were three
-  mechanisms rather than one budget, and each is repaired: a test that armed a capture session in the
-  shared process froze every Engine a concurrent test created to the trace domain, so a plain-domain
-  test read a slot set nothing publishes to; waits whose subject is a child process used 2–5 s
-  constants of their own instead of the suite's one hang bound (`CHILD_HANG_TIMEOUT`, 60 s); and a
-  compiler wrapper written and then executed by the same process answered `ETXTBSY` while another
-  test's `fork` still held the descriptor. The suite's thread count is libtest's — the machine's
-  available parallelism, 64 here by cgroup quota — so it is not a constant the suite owns.
-- `make test` (the fast tier, 77 cases): 73 pass / 4 fail.
-- `make smoke` (fast + smoke, 123 cases): its three own failures were the E47 cases, and each of the
-  three is green through its case now (measurements below); the tier as a whole was not re-run, and
-  the rows it still counts are the four `cargo-diff` cases that report FAIL rather than SKIP when
-  their materialized project directory is absent (G2). An earlier full run measured 116 pass / 7 fail.
-- `telemetry` PASS; `tsan` PASS with zero warnings and all ten concurrency cases; `quality` PASS,
-  which is `repo-quality`'s 17 source checks.
-- Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one key.
-- Timing gates: `load` 155ms against its 1000ms ceiling; `fib32` RED (E40) at 443ms against its 80ms
-  ceiling, down from 8.7s. The corpus drivers are ~150× to ~500× a native build of the same programs
-  (E40) — `flate2` 5.33s, `brotli` 5.43s, `tiny_skia` 4.92s, `rayon` 0.96s cold, against 34ms, 35ms,
-  10ms and 6ms natively — down from 3 700× to 27 000× when D16's campaign started.
+- `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets --all-features -- -D warnings`,
+  and all 14 repository source-boundary checks.
+- All 13 compiler tests on Linux x86_64 and macOS aarch64, including escaped pointer mutation,
+  nested dereferences, unaligned and overlapping copies, execution from reloaded artifacts,
+  pre-callee-frame stack checks, and rebinding callee headroom across programs.
+- Linux release differentials with compilation forced on first call: `jit_abi_probe`,
+  `jit_call_probe`, `jit_builtin_probe`, `jit_foreign_probe`, `jit_unwind_probe`, `simd_probe`,
+  `panic_exit`, `catch` and `signal_probe`; also `recursion-stack-overflow`, `fib32-reload` and
+  `fib32-jit-cache`. The cache check covers cold/warm/bypass, corrupt and missing entries, loaded
+  frame unwinding, and artifact equality across processes and frontend thread counts.
+- Store and input-validation checks: 35 focused unit tests on macOS aarch64 and 36 on Linux x86_64
+  (including manifest-driven collection), covering catalogue reconciliation, damaged and missing
+  packs, file replacement, directory relocation and content changes with restored timestamps.
 
-The fast tier's failures are the four `cargo-diff` rows that report FAIL rather than SKIP when their
-materialized project directory is absent (`ecosystem`, `ffi_zlib`, `ripgrep_regex`, `warning_return`;
-G2).
+Focused validation of the archive/load path passes 18 tests on Linux x86_64 and macOS aarch64.
+They cover archive layout round trips, invalid bounds and references, retained immutable ownership,
+concurrent demand decoding, fork preparation, isolated frozen domains, package mutation and
+bound-image invalidation. Managed-input tests cover generation identity, local receipt recovery and
+publication/collection leases. Linux release checks pass `fork_exec_probe`, `jit_unwind_probe`,
+`fib32-jit-cache`, all eight package assertions and the unchanged `fib32` timing case at 52 ms
+against its 80 ms ceiling. Package checks include concurrent public Engine embedding,
+constructors/destructors and closed callback behavior. The full sanitizer suite is not included.
 
-The three E47 cases were red because the corpus budget was set before their work was measured. Each
-now runs inside a budget its own measurement supports, through the case, on the verify host at load
-60–120: `flate2` 290 s, `brotli` 317 s, `tiny_skia` 273 s, against 400 s each. The drivers themselves
-cost about the same cold and warm (rayon 19/28 s, flate2 230/231 s, brotli 236/245 s, tiny_skia
-213/195 s), so the time is guest work and not the front end. `rayon` finishes inside its own budget.
-`png_round` and `wasmtime_wat` are green: the first reaches
-the 512-bit carryless multiply, which the intrinsic queue now implements, and the second is a guest
-that returns from `main` with its workers parked in guest code, which the process-exit path leaves
-running rather than waiting for ([engine-lifecycle.md](designs/engine-lifecycle.md) §4.1). `tokei` is
-a gate-tier case and is not in this tier.
+Compiled callers check the callee's stack headroom before entering its body through the PLT.
+Interpreter/native packed entries retain their guarded wrapper. This removes a wrapper frame and
+call/return from each compiled-to-compiled call without changing the calling convention, return
+safepoints or unwind registration. Persisted callers name callee headroom through a canonical
+relocation: another program can bind the same caller fragment to a different callee frame layout.
+Focused Linux release checks pass `jit_abi_probe`, `jit_call_probe`, `jit_unwind_probe`, `signal_probe`,
+`recursion-stack-overflow`, `fib32-jit-cache`, `fib32-reload`, `telemetry` and `fib32` (65 ms against
+80 ms). The corruption check flips a payload byte in every stored record and requires zero hits;
+writing a fixed byte at an arbitrary pack offset does not reliably damage the entry being loaded.
 
-`fib(32)` is RED: the best of three runs is about 8.7s against its 80ms gate (E40). Output is correct
-and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not be claimed.
-The gate tier as a whole has not been re-run; the numbers above cover `make test`, `make smoke`, the
-runtime suites and the base image.
+Call-overhead measurements compare alternating release binaries with and without caller-side
+checks. Both use the compact immutable archive, managed generations of identical sysroot contents,
+local derived stores, absolute source paths, the default JIT policy and `MIRVM_OFFLINE=1`. Each
+workload has two preparation runs per binary; every measured run starts a fresh process with
+application caches populated. These are not OS page-cache flushes or empty-cache startup readings.
+All 44 timing, preparation and counter runs completed successfully with expected stdout.
+
+| Workload / measure | Samples per binary | Guarded-call median | Caller-check median | Caller-check range |
+|---|---:|---:|---:|---:|
+| `fib(32)`, whole process | 9 | 53.7 ms | 45.7 ms | 44.7–52.1 ms |
+| `fib(32)`, engine phase | 9 | 22.3 ms | 14.8 ms | — |
+| `flate2`, whole process | 7 | 1476.1 ms | 1336.7 ms | 1179.4–1937.6 ms |
+| `flate2`, engine phase | 7 | 1412.6 ms | 1251.3 ms | — |
+
+The fib whole-process median falls 14.8% and its engine median 33.6%. Image/input loading is
+essentially unchanged at 17.2 versus 17.0 ms; user/system CPU falls from 52.6 to 44.6 ms. Work outside
+the driver ledger contributes about 13.7 ms to the current process time. The `flate2` whole-process
+median falls 9.4% and CPU falls from 1508.4 to 1342.9 ms, but its larger variance does not establish
+a tail-latency improvement. All samples, including the 1937.6 ms run, remain in the comparison.
+
+Four CPU captures have no lost samples. Short fib captures have roughly 125–150 samples, so small
+percentages are approximate. Before the change, fib's guarded wrapper accounts for about 12% of
+sampled CPU; generated code confirms an extra frame and body call. Checks remain in the caller
+and their cost is attributed to the body after the change. Archive hashing/validation and dynamic
+library initialization remain visible; the `flate2` profiles retain small compiled operations and
+compiled/interpreted transitions. Hardware counters were heavily multiplexed and are not used to
+quantify instruction savings. Telemetry syscall events have no timestamps and do not time host
+startup; phase ledgers, whole-process measurements and CPU stacks serve different parts of the
+breakdown.
+
+The code-size tradeoff is explicit: in a synchronous compiled fib probe, the body grows from 429 to
+710 bytes; body plus guarded and packed entries grows from 574 to 846 bytes. A separate repeated
+in-process probe reduces the last ten calls' median from 17.37 to 10.31 ms, but this diagnostic is
+not an alternating whole-process comparison. Selective inlining and smaller call sequences require
+joint time/code-size measurements.
+
+The bound `fib(32)` execution image is approximately 21 MB, with a 17.7 MB function section retaining
+9,486 bodies. Archived blocks occupy 104 bytes and statements 128 bytes. An aligned immutable file
+owner avoids a second archive copy, and an execution-cache hit consumes metadata into its validated
+instance. Reusable packages restore independent frozen domains. Archive pruning, runtime-only
+compiler-library loading, and empty-cache frontend/base preparation remain separate optimization
+questions; caller-side checks do not establish improvements to those paths.
+
+These focused checks do not certify the full fast, smoke or gate tiers. The existing `fib32` case and
+all measured cache-hit fib32 samples meet 80 ms; this does not guarantee that ceiling under arbitrary
+storage or scheduling delays. Large dependency closures retain the fixed-address layout conflict
+recorded in E52. A completely green gate is not claimed.
 
 Build notes: debug and release both build, and only the release binary is executed — under the pinned
 LLVM 22 the release profile must keep `debug=2` with `strip="debuginfo"` and `codegen-units=256`, or
@@ -168,6 +212,47 @@ CI (`.github/workflows/ci.yml`) installs the pinned toolchain plus `strace` and 
 `make test` and `make case C=tsan`. It stops there on purpose: `smoke` and `gate` add the
 corpus and the timing gates, which need a machine larger than a shared runner. GitHub-side operation is
 paused; the local equivalent is authoritative.
+
+### Frontend research
+
+The current binary's driver ledger includes base preparation in `frontend`; its `lower` includes
+rustc queries triggered by MIRVM. These labels do not partition rustc work from MIRVM work.
+An external callback probe linked to the release library uses the pinned `nightly-2026-07-02`, the
+managed MIR sysroot, `-Zmir-opt-level=2` and one frontend thread. Three runs per mode use rustc's
+coarse `time-passes` instrument; a separate self-profile capture provides query attribution.
+The flate probe uses the same driver source with frontmatter removed and an existing MIR dependency
+rlib. Dependency compilation, base serialization and guest execution are outside these probe times.
+
+| Input | Entry through `after_analysis` | Additional native mono collection | MIRVM lowering from an empty image stack | Resulting functions |
+|---|---:|---:|---:|---:|
+| Empty main / std base | 7.3 ms | 4.2 ms | 215.9 ms | 9,480 |
+| Pure integer exports, including fib | 10.7 ms | 4.3 ms | 218.3 ms | 9,486 |
+| flate2 driver | 24.0 ms | 15.9 ms | 253.4 ms | 10,930 |
+
+The columns are medians from separate probe modes, not additive stages: lowering includes its own
+mono collection. Native mono item counts are 10, 16 and 355 respectively. Native dependency code
+already compiled into libraries does not enter that set in the same way as MIRVM's guest execution
+closure; the count difference is not proof that the extra guest functions can be removed.
+
+One self-profiled base lowering takes 255.6 ms: 111.7 ms of outer activity self time and 143.9 ms in
+nested compiler activities. Prominent query self times are symbol names (25.2 ms), optimized-MIR
+metadata decoding (21.3 ms), codegen candidate selection (11.4 ms), layout (7.8 ms), constant
+allocation evaluation (6.8 ms) and instance resolution (6.4 ms). Inclusive query durations overlap.
+The measured outer self time includes allocations and other uninstrumented work, not just emission.
+
+Production-binary controls run fib and flate2 in three isolated homes per cache state and preserve
+guest output. Fib's `frontend` medians are 326.8 ms with empty derived stores, 32.9 ms with a supplied
+base, and 9.4 ms with base bypassed; bypass shifts 234.3 ms into `lower`. A new home can also recover
+managed receipts before driver entry. Bypass disables bound-image caching, and those runs report no
+successful program-cache publication, so whole-run differences do not establish an equivalent
+optimization. All 24 production runs and 36 successful compiler probes are retained. Three CPU
+captures have zero lost samples; query summaries, timelines and flamegraphs provide the attribution.
+
+The release executable directly depends on `librustc_driver`, including when no compiler session is
+needed. The shared engine has a compiler-free test build, but its product adapters and omitted JIT
+mean a complete compiler-independent runtime remains unproven. No product source was changed by
+this investigation and no repository test suite was run. The proposed experiments and compatibility
+requirements are in [frontend-boundary.md](designs/frontend-boundary.md).
 
 ## 4. Gaps and honest limits
 
@@ -193,16 +278,18 @@ What is refused or not yet claimed — not what is planned.
   `UnsafeFnPointer`, `ArrayToPointer`, `ReifyFnPointer`, `ClosureFnPointer`) are all resolved.
 - **Static archives**: non-PIC, thin archives, cross-archive dependency/ordering/duplicate exports and
   export-symbols are refused. There is no multi-archive link plan and this is not a general linker.
-- **Logging / profile**: no 1-byte raw syscall site, no profile command, no separate trace interpreter
-  loop, no 4→64 KiB adaptation; the trace code domain is frozen at Engine construction rather than
-  chosen at the outermost activation.
+- **Logging / profile**: syscall events have no timestamps and do not cover host startup I/O.
+  `make profile` records CPU call stacks and can render a flame graph, but JIT caller unwinding can
+  remain incomplete. No 1-byte raw syscall site, separate trace interpreter loop or 4→64 KiB
+  adaptation; the trace code domain is frozen at Engine construction rather than chosen at the
+  outermost activation. A fork capture's files can inspect clean individually while directory
+  inspect/export rejects their different session IDs.
 - **Embedding**: `instantiate` stays `unsafe` — the native/FFI ABI, hand-written Modules and raw
   two-machine-word exports must be trusted, `Shared` is not public, and no safe typed export bindings
   are generated. Third-party callbacks have no universal revocation, so published closure/JIT/MC/native
   code lives to process end.
-- **Distribution**: `.mirvm` is at unstable format v4; first load still decodes every function, and
-  archive-direct verification, cross-build_id/target compatibility, fat artifacts and format freeze
-  are unfinished. No daemon, REPL, checked mode, resource governance or real sandbox.
+- **Distribution**: `.mirvm` is at unstable format v5 with direct archive verification and demand
+  body decoding. Cross-build_id/target compatibility, fat artifacts and format freeze are unfinished. No daemon, REPL, checked mode, resource governance or real sandbox.
 - **Cargo config**: Git source replacement, patches targeting a Git URL, and parts of the Cargo config
   surface such as `paths`/`HOST_RUSTFLAGS` are not implemented.
 - **`mirvm doc`**: doctests work through a fixed rustdoc front end; independent `mirvm doc`/HTML
@@ -215,13 +302,10 @@ product covering all of Rust.
 ## 5. Development order
 
 1. **Performance (D16).** Close the `fib(32)` RED by making it faster, never by relaxing the gate.
-   `MIRVM_TIMING` and profile data decide JIT code persistence, direct archive verification/loading,
-   background service threads and `-Cincremental`. Starting facts: lowering costs about
-   `0.10 ms/instance` and behaves as a near-constant std tax (the executed set is only 7–29% of the
-   lowered set, and 75% of the phase is rustc query/decoding machinery); the std base image takes a
-   pure-cold script from 385ms to 104ms, a deps image takes an ecosystem cold run from 924ms to 66ms,
-   and an L2 hit takes the warm load phase 11–15×. The gate itself is still RED: `fib(32)` is about
-   8.7s against its 80ms ceiling (E40).
+   Address pack discovery and input/image validation first for startup; measure interpreted calls,
+   compilation throughput and publication latency separately for execution-heavy workloads. Use
+   unprofiled wall-time controls, the timing ledger, CPU call stacks and syscall counts together.
+   A local small-cache result does not qualify a populated or network-backed store.
 2. **Logging and telemetry.** Fork generations are closed. Next: the remaining direct hot path, the
    trace interpreter loop, then stateless inline-asm raw syscall sites — the first internal syscall
    slice must not be claimed complete before those raw sites land. Only variadic `libc::syscall` forms

@@ -29,6 +29,8 @@ mod compiler;
 #[cfg(feature = "cranelift")]
 mod frame;
 #[cfg(feature = "cranelift")]
+mod guard;
+#[cfg(feature = "cranelift")]
 mod helpers;
 #[cfg(all(test, feature = "cranelift"))]
 mod lsda_probe;

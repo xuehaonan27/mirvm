@@ -17,7 +17,6 @@ use super::format::{
     MAGIC, ParsedPackage, TAG_BASE, TAG_FUNCS, TAG_MC, TAG_META, TAG_MODULE, TAG_NATIVELIBS,
     TAG_RELOC, TAG_STAMPS, check_hash, hash128, parse_container,
 };
-use super::funcs::parse_function_section;
 use super::meta::{
     McEntry, Meta, ModuleMeta, NativeLibEntry, Reloc, check_lib_hash, host_target,
     native_entry_for_mc,
@@ -55,9 +54,9 @@ fn section_of<T: DeserializeOwned>(
 pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
     // `Package::load` is safe, so its result must not retain the filesystem's mutable inode.
     // Copy once, then validate and lazily decode exclusively from this immutable snapshot.
-    let raw: std::sync::Arc<[u8]> = std::fs::read(path)
-        .map_err(|e| Error::io("cannot read the package", e))?
-        .into();
+    let raw = crate::vm::archive::bytes::Bytes::new(
+        std::fs::read(path).map_err(|e| Error::io("cannot read the package", e))?,
+    );
     let package = parse_container(&raw)?;
     let meta: Meta = section_of(&package, TAG_META, "META")?;
     let current_target = host_target();
@@ -88,53 +87,23 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
         )));
     }
     let module_meta: ModuleMeta = section_of(&package, TAG_MODULE, "MODULE")?;
-    let (module, instance) = module_meta.instantiate()?;
     let function_section = package.section(TAG_FUNCS)?;
-    let mapped_offset = function_section.as_ptr() as usize - raw.as_ptr() as usize;
-    let function_blobs = parse_function_section(function_section, mapped_offset)?;
-    if module.function_names.len() != function_blobs.len() {
-        return Err(Error::corrupt(format!(
-            "MODULE function name table has {} entries, expected {}",
-            module.function_names.len(),
-            function_blobs.len()
-        )));
-    }
-    crate::vm::verify::module_header_with_count(&module, &instance, function_blobs.len())
-        .map_err(|e| Error::reject(format!("{MODULE_VERIFY_FAILED}: {e}")))?;
-    // Before any MC/native materialization, every function gets full semantic verification.
-    // Temporary objects are dropped each round; the run phase still decodes on demand from the owned
-    // snapshot instead of keeping every function resident.
-    let mut main_boundaries = 0;
-    let mut main_catchers = 0;
-    for (index, blob) in function_blobs.iter().enumerate() {
-        let body: crate::vm::ir::FuncBody = postcard::from_bytes(&raw[blob.start..blob.end])
-            .map_err(|e| {
-                Error::corrupt(format!(
-                    "function {index} decode failed during verification: {e}"
-                ))
-            })?;
-        crate::vm::verify::function_with_count(
-            &module,
-            &instance,
-            function_blobs.len(),
-            index,
-            &body,
-        )
-        .map_err(|e| Error::reject(format!("{MODULE_VERIFY_FAILED}: {e}")))?;
-        let (boundaries, catchers) = crate::vm::verify::body_main_role_counts(&body);
-        main_boundaries += boundaries;
-        main_catchers += catchers;
-    }
-    crate::vm::verify::main_role_counts(&module, main_boundaries, main_catchers)
-        .map_err(|e| Error::reject(format!("{MODULE_VERIFY_FAILED}: {e}")))?;
+    let start = function_section.as_ptr() as usize - raw.as_ptr() as usize;
+    let functions = crate::vm::archive::functions::Functions::load(
+        raw.clone(),
+        start..start + function_section.len(),
+    )
+    .map_err(|error| Error::reject(format!("{MODULE_VERIFY_FAILED}: {error}")))?;
+    let image = crate::vm::archive::Image::load(module_meta, functions)
+        .map_err(|error| Error::reject(format!("{MODULE_VERIFY_FAILED}: {error}")))?;
     if reloc.requires_fixed_base {
         return Err(Error::reject(
-            "package v4 cannot require a fixed runtime base",
+            "package v6 cannot require a fixed runtime base",
         ));
     }
-    if module.required_native_libs.len() != libs.len()
-        || module
-            .required_native_libs
+    if image.native_paths().len() != libs.len()
+        || image
+            .native_paths()
             .iter()
             .zip(&libs)
             .any(|(path, lib)| path.as_ref() != lib.path.as_str())
@@ -167,27 +136,19 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
             ));
         }
     }
-    let heat_key = format!("{:032x}", hash128(function_section));
-    let heat_path = crate::store::PACKAGE_HEAT
-        .dir()
-        .join(format!("{heat_key}.order"));
-    drop(module);
-    drop(instance);
     Ok(LoadedPackage {
-        raw,
-        module_meta,
-        function_blobs,
+        image,
         libs,
         mc_entries,
-        heat_path,
     })
 }
 
 impl LoadedPackage {
-    pub(crate) fn instantiate(
-        &self,
-    ) -> Result<(crate::vm::ir::Module, crate::vm::instance::Instance), Error> {
-        let (mut module, mut instance) = self.module_meta.instantiate()?;
+    pub(crate) fn instantiate(&self) -> Result<crate::vm::archive::VerifiedArtifact, Error> {
+        let mut artifact = self
+            .image
+            .instantiate()
+            .map_err(|error| Error::reject(error.to_string()))?;
         let mut covered_hashes = HashSet::with_capacity(self.mc_entries.len());
         let mut images = Vec::with_capacity(self.mc_entries.len());
         for mc in &self.mc_entries {
@@ -203,7 +164,6 @@ impl LoadedPackage {
             })?;
             images.push(image);
         }
-        instance.mc_images = images;
 
         let mut required_native_libs = Vec::with_capacity(self.libs.len());
         let mut required_native_hashes = Vec::with_capacity(self.libs.len());
@@ -215,14 +175,8 @@ impl LoadedPackage {
             required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
             required_native_hashes.push(lib.fnv);
         }
-        module.required_native_libs = required_native_libs;
-        module.required_native_hashes = required_native_hashes;
-        module.funcs = crate::vm::ir::FuncTable::from_bytes(
-            self.raw.clone(),
-            self.function_blobs.clone(),
-            self.heat_path.clone(),
-        );
-        Ok((module, instance))
+        artifact.set_native_images(required_native_libs, required_native_hashes, images);
+        Ok(artifact)
     }
 }
 

@@ -31,6 +31,51 @@ use crate::cargoless::schedule::Layout;
 use crate::cargoless::vendor::VendorDir;
 use crate::cargoless::{buildrs, resolve};
 
+pub(crate) mod managed;
+
+static GENERATION: std::sync::OnceLock<managed::Generation> = std::sync::OnceLock::new();
+static SELECTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn managed_input(path: &Path) -> Option<managed::Input> {
+    GENERATION.get()?.input(path)
+}
+
+pub(crate) fn managed_inputs_current(inputs: &[managed::Input]) -> bool {
+    inputs.is_empty()
+        || GENERATION.get().is_some_and(|generation| {
+            inputs.iter().all(|input| generation.contains(input)) && generation.validate().is_ok()
+        })
+}
+
+pub(crate) fn managed_provenance(
+    input: &managed::Input,
+) -> Option<crate::utils::content::FileStamp> {
+    GENERATION.get()?.provenance(input)
+}
+
+/// Reopen a producer-selected generation in a child. Ordinary external paths stay external.
+pub(crate) fn select_path(path: PathBuf) -> Result<PathBuf, Error> {
+    if GENERATION.get().is_none() {
+        let _selecting = SELECTING.lock().unwrap_or_else(|error| error.into_inner());
+        if GENERATION.get().is_none()
+            && let Some(generation) =
+                managed::reopen(&crate::store::SYSROOT.dir(), crate::options::home(), &path)?
+        {
+            let _ = GENERATION.set(generation);
+        }
+    }
+    if let Some(generation) = GENERATION.get()
+        && std::fs::canonicalize(&path)? != generation.path
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a compiler session cannot change its pinned sysroot generation",
+        )
+        .into());
+    }
+    Ok(path)
+}
+
 /// Why the MIR-rich sysroot could not be produced.
 ///
 /// The stages that still return `String` (the manifest reader, the resolver, the scheduler) are
@@ -164,74 +209,106 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// with a delta compiled against another puts two copies of the language runtime in a single module,
 /// which is exactly the shape `verify` refuses as two main panic boundaries.
 pub(crate) fn effective_dir() -> PathBuf {
-    crate::options::sysroot().unwrap_or_else(|| crate::store::SYSROOT.dir())
+    GENERATION
+        .get()
+        .map(|generation| generation.path.clone())
+        .or_else(crate::options::sysroot)
+        .unwrap_or_else(|| crate::store::SYSROOT.dir())
 }
 
 /// Ensure the MIR-rich sysroot exists and return its path.
 ///
-/// The fast path recomputes the content key and compares it with the stamp file; any
-/// mismatch (or a missing stamp) triggers a rebuild. A rebuild happens entirely in
-/// staging + tmp directories and is published with an atomic rename, so the old sysroot
-/// stays usable until the moment it is swapped out. A crash mid-build leaves tmp/old
-/// directories behind, and the missing stamp self-heals on the next run.
+/// Select an immutable generation matching the build recipe and hold its lease for this process.
+/// An unchanged local integrity receipt avoids reading member contents. A receipt mismatch
+/// requires full content verification; missing or corrupt generations are rebuilt in staging and
+/// published before replacing the selector. A legacy producer stamp permits one-time import.
 ///
 /// Only the home's own sysroot is built here. A sysroot chosen with `--sysroot`/`MIRVM_SYSROOT` is
 /// the caller's to provide, and mirvm neither writes into it nor replaces it.
 pub fn ensure_sysroot() -> Result<PathBuf, Error> {
-    let sysroot_dir = crate::store::SYSROOT.dir();
     if let Some(chosen) = crate::options::sysroot() {
-        return Ok(chosen);
+        return select_path(chosen);
     }
-    if let Some(want) = stamp_value()
-        && std::fs::read_to_string(stamp_file(&sysroot_dir)).is_ok_and(|have| have == want)
-    {
-        return Ok(sysroot_dir);
+    let _selecting = SELECTING.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(generation) = GENERATION.get() {
+        return Ok(generation.path.clone());
     }
-    build_sysroot(&sysroot_dir)?;
-    Ok(sysroot_dir)
+    let root = crate::store::SYSROOT.dir();
+    let store_root = crate::options::home();
+    let want = stamp_value().ok_or_else(|| {
+        let path = toolchain::std_source();
+        if path.join("std/Cargo.toml").is_file() {
+            Error::StampUnavailable
+        } else {
+            Error::RustSrcMissing { path }
+        }
+    })?;
+    let recipe = build_recipe();
+    let generation = match managed::selected(&root, store_root, &want, &recipe) {
+        Ok(generation) => generation,
+        Err(_) => {
+            let _writer = crate::store::input_writer(store_root)?;
+            match managed::selected(&root, store_root, &want, &recipe) {
+                Ok(generation) => generation,
+                Err(_) => {
+                    if std::fs::read_to_string(stamp_file(&root)).is_ok_and(|have| have == want) {
+                        managed::publish(&root, store_root, &root, &want, &recipe)?
+                    } else {
+                        let built = crate::store::staging_path(&root);
+                        build_sysroot(&built)?;
+                        if std::fs::read_to_string(stamp_file(&built))? != want {
+                            let _ = std::fs::remove_dir_all(built);
+                            return Err(Error::StampUnavailable);
+                        }
+                        let result = managed::publish(&root, store_root, &built, &want, &recipe);
+                        let _ = std::fs::remove_dir_all(built);
+                        result?
+                    }
+                }
+            }
+        }
+    };
+    let path = generation.path.clone();
+    let _ = GENERATION.set(generation);
+    Ok(path)
 }
 
 /// Stamp value of the sysroot in effect (reused in the base-image key); `None` when it is not
 /// built, or was not built by mirvm and so carries no stamp.
 pub(crate) fn current_stamp_value() -> Option<String> {
+    if let Some(generation) = GENERATION.get() {
+        return Some(crate::utils::content::digest_hex(&generation.id));
+    }
     std::fs::read_to_string(stamp_file(&effective_dir())).ok()
 }
 
-/// Content key (the regeneration criterion): the rustc binary stat, the library/ top-level
-/// sentinel, and the serialized build recipe. It catches a toolchain swap (rustc stat plus
-/// sentinel -- a rustup install touches the top-level directory mtime) and a recipe change
-/// (the serialized section).
+/// Local producer freshness: compiler stat, rust-src top-level sentinel and build flags.
+/// This selector hint never enters a managed generation's content identity. MIRVM_BUILD_ID
+/// invalidates derived images independently, without rebuilding the sysroot.
 ///
-/// **MIRVM_BUILD_ID is excluded**: a new mirvm version does not rebuild the sysroot. The
-/// cargo-track dep cache fingerprint cannot see the sysroot contents, so a BUILD_ID-level
-/// rebuild would mix old rmeta into the new sysroot (E0463). mirvm-side invalidation is
-/// covered instead by the BUILD_ID component in each key (cargoless fp and base-image keys
-/// both carry it).
-///
-/// **No whole-tree stat**: recursively stamping 2348 files measured ~20ms per run, which
-/// pushes the fib(32) JIT gate (<80ms) over the line (103ms), and the per-run fast path
-/// cannot afford it. Hand-editing a rust-src leaf file inside the toolchain is therefore
-/// outside the protected surface; the escape hatch is to delete the stamp or the sysroot
-/// directory, and the next run rebuilds.
-///
-/// A missing rust-src (sentinel failure) yields `None` and forces a rebuild, which then
-/// fails loudly on the rust-src check.
+/// Hand-editing a rust-src leaf is outside the sentinel's protected surface. Removing the
+/// sysroot family forces reconstruction. An unreadable compiler or sentinel yields `None`.
 fn stamp_value() -> Option<String> {
     let mut key = rustc_stat()?;
     key.push('\n');
     key.push_str(&library_sentinel()?);
     key.push('\n');
-    // Recipe serialization, from the same profile/rustflags build_sysroot uses
+    key.push_str(&build_recipe());
+    Some(key)
+}
+
+/// Semantic build flags, independent of the producer's filesystem metadata.
+fn build_recipe() -> String {
     let p = sysroot_profile();
-    key.push_str(&format!(
+    let mut key = format!(
         "da{} oc{} opt{}\n",
         p.debug_assertions as u8, p.overflow_checks as u8, p.opt_level
-    ));
+    );
     for f in sysroot_rustflags() {
         key.push_str(&f);
         key.push('\n');
     }
-    Some(key)
+    key
 }
 
 /// rustc binary stat string (len + mtime_ns; `None` when absent).

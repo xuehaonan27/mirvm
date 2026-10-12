@@ -6,7 +6,7 @@
 //! describe these tables must agree with the section headers, or the image is not the
 //! self-produced family this loader reads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::native::object::elf;
 use crate::utils::bytes::{read_u16, read_u32, read_u64};
@@ -102,6 +102,13 @@ impl<'a> Symbols<'a> {
         let entry_size = self.symtab.entsize.max(elf::SYM_ENTRY_SIZE as u64) as usize;
         let count = (self.symtab.size as usize) / entry_size;
         let mut symbols = HashMap::new();
+        let runtime_slots: HashSet<_> = super::super::interpose::INTERPOSED_CALLS
+            .iter()
+            .flat_map(|call| {
+                std::iter::once(super::super::interpose::target_slot(call))
+                    .chain(super::super::interpose::owner_slot(call).map(str::to_owned))
+            })
+            .collect();
         for index in 0..count {
             let symbol = self
                 .static_symbol(index, entry_size)
@@ -118,10 +125,7 @@ impl<'a> Symbols<'a> {
             if bind != elf::STB_GLOBAL
                 && bind != elf::STB_WEAK
                 && !name.starts_with("__mirvm_p1_target_")
-                && !name.starts_with("__mirvm_pthread_")
-                && !name.starts_with("__mirvm_signal_")
-                && name != "__mirvm_sigaction_target"
-                && name != "__mirvm_raise_target"
+                && !runtime_slots.contains(&name)
             {
                 continue;
             }

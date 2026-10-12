@@ -4,7 +4,18 @@
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum IntBinOp {
     Add,
     Sub,
@@ -18,7 +29,18 @@ pub enum IntBinOp {
     Shr,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum IntCc {
     Eq,
     Ne,
@@ -28,7 +50,18 @@ pub enum IntCc {
     Ge,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum OvfOp {
     Add,
     Sub,
@@ -36,7 +69,21 @@ pub enum OvfOp {
 }
 
 /// Scalar floating-point width. f128 is carried by the wide 128-bit channel instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
+#[archive_attr(derive(PartialEq, Eq))]
 pub enum FloatW {
     F16,
     F32,
@@ -45,27 +92,69 @@ pub enum FloatW {
 
 /// Scalar-side category of an operand crossing the f128 wide channel (F128FromScalar/F128ToScalar).
 /// An integer's width is carried by the statement's `w` field.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum F128Scalar {
     F(FloatW),
     Int { signed: bool },
 }
 
 /// f128 unary op: negation or a unary math function.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum F128UnOp {
     Neg,
     Math(MathUnOp),
 }
 
 /// Right-hand operand of F128MathBin. `powi` takes the scalar form, everything else the wide form.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum F128Rhs {
     Wide(PlaceExpr),
     Scalar(Operand),
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum FloatOp {
     Add,
     Sub,
@@ -77,7 +166,18 @@ pub enum FloatOp {
 
 /// Math unary ops, used where the float intrinsic has no instruction equivalent and is computed by
 /// the host's f32/f64 math instead.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum MathUnOp {
     Sqrt,
     Sin,
@@ -96,7 +196,18 @@ pub enum MathUnOp {
 }
 
 /// Math binary ops (powf/powi/copysign/minnum/maxnum). `powi`'s b operand holds i32 bits.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum MathBinOp {
     Pow,
     Powi,
@@ -106,7 +217,18 @@ pub enum MathBinOp {
 }
 
 /// Bitwise unary ops, backing the ctpop/ctlz/cttz/bswap/bitreverse intrinsics.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum BitUnOp {
     Popcount,
     Ctlz,
@@ -119,7 +241,21 @@ pub enum BitUnOp {
 /// real host atomic instructions. Mapping matters for behaviour, not only speed: collapsing every
 /// order to SeqCst is a legal strengthening, but it makes weak-order visibility differ from native,
 /// and it makes an x86 Relaxed store pay an xchg for nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
+#[archive_attr(derive(PartialEq, Eq))]
 pub enum MemOrd {
     Relaxed,
     Acquire,
@@ -131,7 +267,18 @@ pub enum MemOrd {
 /// Atomic RMW (fetch_* family); the order comes from `MemOrd`.
 /// The signedness of fetch_max/min is frozen by the intrinsic name (atomic_max/min are signed,
 /// atomic_umax/umin unsigned), and the executor picks AtomicI* or AtomicU* accordingly.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum RmwOp {
     Xchg,
     Add,
@@ -151,7 +298,21 @@ pub enum RmwOp {
 /// +0.0 == -0.0 is not a bit comparison and NaN is not reflexive. Making the category a field keeps
 /// "forgot the category" unrepresentable.
 /// Pointer lanes are `Int { signed: false }`: the real-address model passes their bits through.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
+#[archive_attr(derive(PartialEq, Eq))]
 pub enum LaneKind {
     Int {
         signed: bool,
@@ -162,7 +323,18 @@ pub enum LaneKind {
 
 /// SIMD per-lane binary op. Signedness and floatness come from `LaneKind`.
 /// Comparisons produce mask lanes: an all-1s lane means true.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum SimdBinOp {
     Eq,
     Ne,
@@ -194,7 +366,18 @@ pub enum SimdBinOp {
 /// SIMD per-lane unary op. The float family requires Float lanes and the bit family Int lanes, which
 /// lower checks. Per-lane transcendentals call host libm, which is exactly what a native build without
 /// fast-math scalarizes to, so the same source yields the same bits.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum SimdUnOp {
     Neg,
     Fabs,
@@ -222,7 +405,18 @@ pub enum SimdUnOp {
 /// reduction may use any associative order, and sequential folding is one of them. Float min/max use
 /// host `f32::min`/`f64::min`, i.e. minnum/maxnum semantics, which is what LLVM's reduce.fmin/fmax
 /// mean.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum SimdReduceOp {
     Add,
     Mul,

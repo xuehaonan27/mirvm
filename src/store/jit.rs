@@ -165,7 +165,7 @@ pub(crate) enum Lookup {
 }
 
 /// One index entry: the key, the fragment it was compiled from, and where the record is.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct Indexed {
     key: [u8; 32],
     fragment: [u8; 32],
@@ -174,8 +174,9 @@ struct Indexed {
 }
 
 /// One pack's index, read from its trailing index.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PackIndex {
-    path: PathBuf,
+    file: super::index::PackFile,
     entries: Vec<Indexed>,
 }
 
@@ -184,7 +185,8 @@ impl PackIndex {
     /// cannot trust is skipped, so a half-written or foreign file cannot fail a run.
     fn load(path: &Path) -> Option<PackIndex> {
         let mut file = std::fs::File::open(path).ok()?;
-        let len = file.metadata().ok()?.len();
+        let metadata = file.metadata().ok()?;
+        let len = metadata.len();
         if len < (HEADER_LEN + FOOTER_LEN) as u64 {
             return None;
         }
@@ -229,8 +231,11 @@ impl PackIndex {
         if !entries.windows(2).all(|w| w[0].key < w[1].key) {
             return None;
         }
+        if !crate::os::fs::same_file(&metadata, &file.metadata().ok()?) {
+            return None;
+        }
         Some(PackIndex {
-            path: path.to_path_buf(),
+            file: super::index::PackFile::new(path, &metadata),
             entries,
         })
     }
@@ -244,7 +249,7 @@ impl PackIndex {
 
     /// Read one entry, verifying it against the hash the record carries.
     fn read(&self, entry: &Indexed) -> Option<Vec<u8>> {
-        let mut file = std::fs::File::open(&self.path).ok()?;
+        let mut file = self.file.open()?;
         file.seek(SeekFrom::Start(entry.offset)).ok()?;
         let mut prefix = [0u8; RECORD_PREFIX_LEN as usize];
         file.read_exact(&mut prefix).ok()?;
@@ -271,25 +276,20 @@ impl Index {
     }
 
     pub(crate) fn load_in(dir: &Path) -> Index {
-        let mut packs = Vec::new();
-        if let Ok(read) = std::fs::read_dir(dir) {
-            let mut paths: Vec<PathBuf> = read
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().is_some_and(|ext| ext == "pack"))
-                .collect();
-            paths.sort();
-            for path in paths {
-                if let Some(pack) = PackIndex::load(&path) {
-                    packs.push(pack);
-                }
-            }
-        }
+        let packs = super::index::load(dir, b"MIRJITI1", PackIndex::load)
+            .into_iter()
+            .map(|(path, mut pack)| {
+                pack.file.path = path;
+                pack
+            })
+            .collect();
         Index { packs }
     }
 
     pub(crate) fn contains(&self, key: &[u8; 32]) -> bool {
-        self.packs.iter().any(|pack| pack.find(key).is_some())
+        self.packs
+            .iter()
+            .any(|pack| pack.find(key).is_some() && pack.file.is_current())
     }
 
     /// What the family holds for one key.
@@ -302,7 +302,10 @@ impl Index {
                 Some(bytes) => Lookup::Entry(bytes),
                 // The pack holds the key and not the entry: unreadable, or bytes that do not hash back
                 // to what the record says they are. The caller compiles instead, and counts it.
-                None => Lookup::Bad(format!("{} holds {key:?} unreadable", pack.path.display())),
+                None => Lookup::Bad(format!(
+                    "{} holds {key:?} unreadable",
+                    pack.file.path.display()
+                )),
             };
         }
         Lookup::Absent
@@ -324,14 +327,14 @@ pub(crate) fn inventory_marked(live: Option<&HashSet<[u8; 32]>>) -> Inventory {
 }
 
 pub(crate) fn inventory_marked_in(dir: &Path, live: Option<&HashSet<[u8; 32]>>) -> Inventory {
-    let index = Index::load_in(dir);
+    let packs = super::index::scan(dir, PackIndex::load);
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
     let mut inventory = Inventory {
-        packs: index.packs.len() as u64,
+        packs: packs.len() as u64,
         liveness: live.map(|_| Liveness::default()),
         ..Inventory::default()
     };
-    for pack in &index.packs {
+    for (_, pack) in &packs {
         for entry in &pack.entries {
             inventory.records += 1;
             if !seen.insert(entry.key) {
@@ -364,6 +367,15 @@ mod tests {
         dir
     }
 
+    fn pack_paths(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "pack"))
+            .collect()
+    }
+
     fn fragment(tag: u8) -> [u8; 32] {
         [tag; 32]
     }
@@ -391,7 +403,7 @@ mod tests {
         let published = staged(&dir, &[1, 2, 3]);
         assert_eq!(published.stored, 3);
         assert!(published.bytes > 0);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(pack_paths(&dir).len(), 1);
 
         let index = Index::load_in(&dir);
         for tag in [1u8, 2, 3] {
@@ -406,18 +418,18 @@ mod tests {
     fn publishing_twice_stores_one_copy_and_names_the_pack_by_its_content() {
         let dir = tmp("dedupe");
         staged(&dir, &[1, 2]);
-        let first: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        let first = pack_paths(&dir);
         assert_eq!(first.len(), 1);
 
         let again = staged(&dir, &[1, 2]);
         assert_eq!(again.stored, 0);
         assert_eq!(again.deduped, 2);
         assert_eq!(again.bytes, 0);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(pack_paths(&dir).len(), 1);
 
         let third = staged(&dir, &[1, 2, 3]);
         assert_eq!((third.stored, third.deduped), (1, 2));
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        assert_eq!(pack_paths(&dir).len(), 2);
     }
 
     /// Bytes that do not hash to what the record says are a miss, not a wrong value.
@@ -430,12 +442,7 @@ mod tests {
         assert!(index.read(&key).is_some());
 
         // Flip one byte of the record body.
-        let pack_path = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .next()
-            .unwrap()
-            .path();
+        let pack_path = pack_paths(&dir).pop().unwrap();
         let mut bytes = std::fs::read(&pack_path).unwrap();
         let at = bytes.len() - FOOTER_LEN - 1;
         bytes[at] ^= 0xff;
@@ -449,12 +456,7 @@ mod tests {
     fn a_truncated_or_foreign_pack_is_skipped() {
         let dir = tmp("foreign");
         staged(&dir, &[5]);
-        let pack_path = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .next()
-            .unwrap()
-            .path();
+        let pack_path = pack_paths(&dir).pop().unwrap();
         std::fs::write(dir.join("foreign.pack"), b"not a pack at all").unwrap();
         let bytes = std::fs::read(&pack_path).unwrap();
         std::fs::write(&pack_path, &bytes[..bytes.len() - 4]).unwrap();

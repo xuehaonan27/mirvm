@@ -62,6 +62,8 @@ impl Kind {
 pub(crate) enum Target {
     /// The id of the function this entry compiles, as the slow-path helpers take it.
     OwnId,
+    /// Required stack headroom of a callee; its frame layout belongs to the loading program.
+    StackNeed(Ref),
     /// A function id the body names, by canonical ordinal, as the helpers take it.
     FuncId(u32),
     /// A guest TLS id the body names, by canonical ordinal.
@@ -167,6 +169,7 @@ impl Ordinals {
                 func: callee(*func)?,
             },
             Site::Stub(id) => Target::Stub(self.ordinal(ir::frag::Target::Asm(*id))?),
+            Site::StackNeed(id) => Target::StackNeed(callee(*id)?),
             Site::Tls(id) => Target::Tls(self.ordinal(ir::frag::Target::Tls(*id))?),
             Site::Body(part) => Target::Body(*part),
             Site::Delivery => Target::Delivery,
@@ -347,7 +350,10 @@ pub(crate) fn capture(input: Captured<'_>) -> Option<Symbol> {
                     Target::Named(canonical_name(&declared))
                 }
             }
-            // A libcall or a named runtime symbol is not part of this engine's vocabulary.
+            FinalizedRelocTarget::ExternalName(ExternalName::LibCall(
+                cranelift_codegen::ir::LibCall::Memmove,
+            )) => Target::Named("memmove".into()),
+            // Other backend libcalls have no declared runtime binding.
             FinalizedRelocTarget::ExternalName(_) => return None,
             FinalizedRelocTarget::Func(offset) => Target::Local(*offset),
         };
@@ -544,6 +550,9 @@ pub(crate) fn target_value(
     match target {
         // The value the helpers take *is* the id.
         Target::OwnId => Some(u64::from(func)),
+        Target::StackNeed(reference) => Some(super::guard::required_headroom(
+            shared.module.funcs.get(callee(reference)? as usize)?,
+        )),
         Target::FuncId(ordinal) => match ordinals.target(*ordinal)? {
             ir::frag::Target::Func(id) => Some(u64::from(id)),
             _ => None,

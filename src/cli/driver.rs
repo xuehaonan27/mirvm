@@ -15,6 +15,21 @@ use super::{
     CAPTURE_DIRECTORY, capture_directory, capture_directory_is_forwarded, compiler_session_guard,
 };
 
+/// Cargo drivers receive the concrete compiler path in their arguments, including when the
+/// producer selected it in another process. Register that selection before loading images.
+fn pin_sysroot(args: &[String]) -> Result<(), crate::sysroot::Error> {
+    if let Some(path) = args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--sysroot=").or_else(|| {
+            (arg == "--sysroot")
+                .then(|| args.get(index + 1).map(String::as_str))
+                .flatten()
+        })
+    }) {
+        crate::sysroot::select_path(path.into())?;
+    }
+    Ok(())
+}
+
 /// Pack driver: the cold half of `run_driver` with an empty image stack and no L2 lookup. The
 /// fork is `callbacks.pack_out`: at the end of `after_analysis` it writes the `.mirvm` package
 /// instead of executing.
@@ -23,6 +38,10 @@ pub(crate) fn pack_driver(
     program_argv: Vec<String>,
     out: std::path::PathBuf,
 ) -> ExitCode {
+    if let Err(error) = pin_sysroot(&rustc_args) {
+        crate::diag::emit(&crate::error::Error::from(error));
+        return ExitCode::from(crate::diag::exit::FAILURE);
+    }
     let t_start = std::time::Instant::now();
     let mut callbacks = MirvmCallbacks {
         dump_mir: false,
@@ -32,6 +51,7 @@ pub(crate) fn pack_driver(
         vm_stats: false,
         module: None,
         instance: None,
+        run_inputs: None,
         suppress_runner_warning_summary: true,
         runner_finalization_filter_installed: false,
         route_compiler_diagnostics: false,
@@ -181,6 +201,7 @@ struct MirvmCallbacks {
     vm_stats: bool,
     module: Option<crate::vm::ir::Module>,
     instance: Option<crate::vm::instance::Instance>,
+    run_inputs: Option<crate::depinfo::InputManifest>,
     suppress_runner_warning_summary: bool,
     runner_finalization_filter_installed: bool,
     route_compiler_diagnostics: bool,
@@ -397,17 +418,17 @@ impl Callbacks for MirvmCallbacks {
             // diagnostics (see SESSION_WARNINGS). Delta entries carry the key chain, which is
             // verified again on load to prevent a mismatched image stack.
             let t_store = std::time::Instant::now();
-            if session_diagnostics_clean()
-                && tcx.sess.dcx().has_errors().is_none()
-                && crate::image::program::store(
+            if session_diagnostics_clean() && tcx.sess.dcx().has_errors().is_none() {
+                self.run_inputs = crate::image::program::store(
                     tcx,
                     &self.rustc_args,
                     self.module.as_mut().expect("just set"),
                     self.instance.as_ref().expect("just set"),
                     &self.stack,
-                )
-            {
-                self.timing.cache_store = Some(t_store.elapsed());
+                );
+                if self.run_inputs.is_some() {
+                    self.timing.cache_store = Some(t_store.elapsed());
+                }
             }
             if self.suppress_runner_warning_summary {
                 install_runner_finalization_filter();
@@ -449,19 +470,32 @@ pub(super) fn parse_stack_size(s: &str) -> Result<usize, crate::error::Error> {
     Ok(bytes)
 }
 
-pub(super) fn run_vm_engine(
-    mut module: crate::vm::ir::Module,
-    mut instance: crate::vm::instance::Instance,
+fn run_vm_engine(
+    module: crate::vm::ir::Module,
+    instance: crate::vm::instance::Instance,
     program_argv: &[String],
     vm_call: Option<&str>,
     vm_stats: bool,
-    already_verified: bool,
     heat: crate::vm::jit::Heat,
 ) -> i32 {
-    if !already_verified && let Err(e) = crate::vm::verify::module(&module, &instance) {
-        crate::diag_error!(Engine, "bytecode verification failed: {e}");
-        return 70;
-    }
+    let artifact = match crate::vm::archive::VerifiedArtifact::verify(module, instance) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            crate::diag_error!(Engine, "bytecode verification failed: {error}");
+            return 70;
+        }
+    };
+    run_verified_engine(artifact, program_argv, vm_call, vm_stats, heat)
+}
+
+pub(super) fn run_verified_engine(
+    artifact: crate::vm::archive::VerifiedArtifact,
+    program_argv: &[String],
+    vm_call: Option<&str>,
+    vm_stats: bool,
+    heat: crate::vm::jit::Heat,
+) -> i32 {
+    let (mut module, mut instance) = artifact.into_parts();
     if crate::options::a2_debug() {
         // A digest over what this session is about to run: the same program lowered cold and one that
         // reused stored layers must produce the same functions, in the same order, with the same
@@ -741,6 +775,10 @@ pub(crate) fn run_driver(
     suppress_runner_warning_summary: bool,
     guest_process: Option<GuestProcessState>,
 ) -> ExitCode {
+    if let Err(error) = pin_sysroot(&rustc_args) {
+        crate::diag::emit(&crate::error::Error::from(error));
+        return ExitCode::from(crate::diag::exit::FAILURE);
+    }
     let mut diagnostic_router = match diagnostics::DiagnosticRouter::start(
         capture_directory(),
         capture_directory_is_forwarded(),
@@ -755,6 +793,46 @@ pub(crate) fn run_driver(
     // Image stack: load the base image plus the dependency image chain (failure or bypass = empty
     // stack, which self-heals onto the full cold path). The lowering fingerprint
     // (ub/overflow/contract checks) can only be verified inside the session; after_analysis does.
+    if !dump_mir && let Some(artifact) = crate::image::execution::lookup(&rustc_args) {
+        diagnostic_router.seal_compiler();
+        let timing = PhaseTiming {
+            cache_load: Some(t_start.elapsed()),
+            ..PhaseTiming::default()
+        };
+        if crate::cli::prepare_only() {
+            print_phase_timing(&timing, None, t_start.elapsed(), crate::diag::verbose());
+            if let Err(error) = diagnostic_router.finish() {
+                crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                return ExitCode::from(crate::diag::exit::SOFTWARE);
+            }
+            return ExitCode::SUCCESS;
+        }
+        if let Some(guest) = &guest_process
+            && let Err(error) = guest.enter()
+        {
+            crate::diag::emit(&crate::error::Error::from(error));
+            return ExitCode::from(crate::diag::exit::FAILURE);
+        }
+        let t_engine = std::time::Instant::now();
+        let code = run_verified_engine(
+            artifact,
+            &program_argv,
+            vm_call.as_deref(),
+            vm_stats,
+            crate::image::program::heat(&rustc_args),
+        );
+        print_phase_timing(
+            &timing,
+            (!vm_stats).then(|| t_engine.elapsed()),
+            t_start.elapsed(),
+            vm_stats,
+        );
+        if let Err(error) = diagnostic_router.finish() {
+            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+            exit(crate::diag::exit::SOFTWARE.into());
+        }
+        exit(code);
+    }
     let mut stack = if dump_mir {
         crate::image::ImageStack::empty()
     } else {
@@ -830,7 +908,8 @@ pub(crate) fn run_driver(
     // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
     // against the key chain.
     if !dump_mir
-        && let Some((mut module, mut instance)) = crate::image::program::lookup(&rustc_args, &stack)
+        && let Some((mut module, mut instance, inputs)) =
+            crate::image::program::lookup(&rustc_args, &stack)
     {
         // A cache hit has no compiler session; seal that empty phase before
         // MIRVM control and guest execution begin.
@@ -847,6 +926,7 @@ pub(crate) fn run_driver(
         } else {
             stack.absorb_into(&mut module, &mut instance); // asm merged and re-materialized
         }
+        crate::image::execution::store(&rustc_args, inputs, &module, &instance);
         if crate::cli::prepare_only() {
             // The cache hit is the preparation: this run found everything already built. Report
             // what was loaded and stop short of the guest.
@@ -877,7 +957,6 @@ pub(crate) fn run_driver(
             &program_argv,
             vm_call.as_deref(),
             vm_stats,
-            false,
             heat,
         );
         let engine = (!vm_stats).then(|| t_engine.elapsed());
@@ -896,6 +975,7 @@ pub(crate) fn run_driver(
         vm_stats,
         module: None,
         instance: None,
+        run_inputs: None,
         suppress_runner_warning_summary,
         runner_finalization_filter_installed: false,
         route_compiler_diagnostics: diagnostic_router.is_active(),
@@ -975,6 +1055,11 @@ pub(crate) fn run_driver(
         if !stack.is_empty() {
             stack.absorb_into(&mut module, &mut instance);
         }
+        if let Some(inputs) = callbacks.run_inputs.take() {
+            let started = std::time::Instant::now();
+            crate::image::execution::store(&callbacks.rustc_args, inputs, &module, &instance);
+            *callbacks.timing.cache_store.get_or_insert_default() += started.elapsed();
+        }
         if let Some(guest) = &guest_process
             && let Err(error) = guest.enter()
         {
@@ -993,7 +1078,6 @@ pub(crate) fn run_driver(
             &callbacks.program_argv,
             callbacks.vm_call.as_deref(),
             callbacks.vm_stats,
-            false,
             heat,
         );
         // The vm-stats branch does not run the guest, so an engine phase would be meaningless and

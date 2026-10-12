@@ -29,6 +29,8 @@ pub(crate) enum Site {
     Frozen(ir::LinkAddr),
     /// A function's absolute id in this program: the body itself, a callee, or a foreign function.
     Func(ir::FuncId),
+    /// Callee frame bytes, alignment slack and safety margin, rebound with the callee.
+    StackNeed(ir::FuncId),
     /// A guest thread-local's id in this program's numbering. The id is the program's, not the
     /// fragment's: a body that binds the same fragment in another program names another slot.
     Tls(ir::TlsId),

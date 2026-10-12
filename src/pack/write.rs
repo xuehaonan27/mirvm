@@ -40,6 +40,9 @@ pub(crate) fn write_package(
     // into the Module, so running a distributed package must not require the source at its original
     // path, nor a replica of the build environment on the target machine.
     let inputs = crate::depinfo::InputManifest::collect(tcx).unwrap_or_default();
+    let stamps = inputs
+        .provenance_files()
+        .ok_or_else(|| Error::build("input provenance unavailable"))?;
     let meta = Meta {
         args: rustc_args.to_vec(),
         envs: inputs.envs,
@@ -81,7 +84,7 @@ pub(crate) fn write_package(
 
     let mut sections: Vec<(u32, Vec<u8>)> = vec![
         (TAG_META, postcard_bytes(&meta)?),
-        (TAG_STAMPS, postcard_bytes(&inputs.files)?),
+        (TAG_STAMPS, postcard_bytes(&stamps)?),
         (TAG_MODULE, module_bytes),
         (TAG_NATIVELIBS, postcard_bytes(&libs)?),
         (TAG_RELOC, postcard_bytes(&reloc)?),

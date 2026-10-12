@@ -55,7 +55,10 @@ Four existing properties make the artifact model natural rather than invasive:
 - **Calls are already a PLT.** Compiled-to-compiled calls go through `slots_fast[callee]` memory
   indirection with an atomic Release/Acquire publication protocol (`src/vm/jit/state`), so machine
   code never bakes a callee's code address, and a loaded entry plugs into dispatch exactly like a
-  freshly compiled one.
+  freshly compiled one. Compiled callers check callee headroom before entering the published body;
+  the packed boundary still calls a guarded wrapper. A callee's frame requirement is rebound through
+  its canonical function reference, so sharing a caller fragment cannot reuse another program's
+  callee layout.
 - **The input is the frozen bytecode.** The translator consumes `ir::FuncBody` with no `tcx`, under
   a bit-identical-to-interpreter contract, so the semantic key of a compile really is the body — and
   the canonical fragment is that body with context factored out.
@@ -63,8 +66,8 @@ Four existing properties make the artifact model natural rather than invasive:
   `.eh_frame` section registered per batch (`compiler/symbols.rs`). The loader reuses the same path
   at the load address; nothing about CFI is inherently placement-bound in the pipeline.
 - **In-process loading has a precedent.** mcload already parses, maps, relocates and
-  `.eh_frame`-registers ELF objects inside the process for the MC section; per-blob content hashes
-  (`FuncBlob.expected_hash`) and the heat-order prefetch worker exist in the package path.
+  `.eh_frame`-registers ELF objects inside the process for the MC section. Immutable archive
+  verification and demand decoding belong to [startup-cache-design.md](startup-cache-design.md).
 
 ### 2.2 The relocation debt (why L3 was forbidden)
 
@@ -88,6 +91,7 @@ One translator-side API replaces every raw `iconst`-of-address; each call record
 Helper(ordinal)        -> the imports.rs whitelist, resolved in-process at load
 SlotBase(domain)       -> this Engine's slots/slots_fast base
 FuncIdImm(binding #i)  -> the fragment binding table -> this program's absolute FuncId
+StackNeed(binding #i)  -> the bound callee's frame size, alignment slack and safety margin
 TlsIdImm(binding #i)   -> the fragment binding table -> this program's absolute guest TlsId
 FrozenAddr(binding #i) -> the fragment binding table -> LoadMap-translated real address
 BodyRef(block, item)   -> the address of that statement/terminator interior (sigs, symbol and

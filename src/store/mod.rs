@@ -30,6 +30,7 @@
 pub(crate) mod entry;
 pub(crate) mod frags;
 pub(crate) mod frozen;
+mod index;
 pub(crate) mod jit;
 pub(crate) mod report;
 
@@ -219,6 +220,9 @@ families! {
     // + dep-info, `build_id` first. The entry is a fragment manifest behind a header, so collection
     // marks the bodies it names.
     Cache IR              "ir"              generation("bin") flag(Ir);
+    // owners: image::execution — independently owned, bound execution images; removing one only
+    // costs reconstruction from the sharing manifests. Cleared with the program IR family.
+    Cache EXECUTION       "execution"       generation("bin") flag(Ir);
     // owners: store::frags, image::collect — the shared canonical function bodies every manifest
     // references by content address; a pack is reachable only through the manifests that name its
     // fragments.
@@ -247,9 +251,8 @@ families! {
     Cache NATIVE_ARCHIVES "native-archives" keyed;
     // owners: pack — native libraries carried inside a `.mirvm`; keyed by their content hash.
     Cache PACKAGE_NATIVE  "package-native"  keyed;
-    // owners: pack, image::program, vm::jit — the function heat order one run leaves for the next;
-    // keyed by the code it was learned from (a package's function section, a program's IR key).
-    // `pack::read` and `image::program` derive the path; the decoder and the compile worker write it.
+    // owners: image::program, vm::jit — the JIT heat order one program run leaves for the next,
+    // keyed by its IR arguments. The compile worker writes the order under the owner's path.
     Cache PACKAGE_HEAT    "package-heat"    keyed;
     // owners: cargoless::registry — crate and git sources, read through to `~/.cargo`; fetched, not derived.
     Data  REGISTRY        "registry"        unit;
@@ -323,6 +326,32 @@ pub(crate) fn publish_bytes(target: &Path, bytes: &[u8]) -> std::io::Result<()> 
             Err(error)
         }
     }
+}
+
+/// A store-wide lease keeps managed input paths alive across compiler and child-process reads.
+/// Lock files are outside removable families, so purging a family cannot change their identity.
+pub(crate) struct InputLease {
+    _file: std::fs::File,
+}
+
+fn input_lock(root: &Path, name: &str, exclusive: bool) -> std::io::Result<InputLease> {
+    std::fs::create_dir_all(root)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(name))?;
+    crate::os::fs::flock(std::os::fd::AsRawFd::as_raw_fd(&file), exclusive)?;
+    Ok(InputLease { _file: file })
+}
+
+pub(crate) fn input_lease(root: &Path, exclusive: bool) -> std::io::Result<InputLease> {
+    input_lock(root, ".managed-inputs.lock", exclusive)
+}
+
+pub(crate) fn input_writer(root: &Path) -> std::io::Result<InputLease> {
+    input_lock(root, ".managed-publish.lock", true)
 }
 
 /// Whether a generational entry belongs to this build.

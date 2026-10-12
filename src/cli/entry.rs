@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use crate::cargo_shim;
 
-use super::driver::{pack_driver, parse_stack_size, run_driver, run_vm_engine};
+use super::driver::{pack_driver, parse_stack_size, run_driver, run_verified_engine};
 use super::frontmatter::{materialize_script, parse_frontmatter};
 use super::usage;
 
@@ -106,10 +106,7 @@ pub(super) fn pack_main(
     }
 
     // Plain single file: pack_driver directly (same args as run form 3)
-    let sysroot = match crate::options::sysroot() {
-        Some(path) => path.display().to_string(),
-        None => crate::sysroot::ensure_sysroot()?.display().to_string(),
-    };
+    let sysroot = crate::sysroot::ensure_sysroot()?.display().to_string();
     let rustc_args = vec![
         "mirvm".to_string(),
         input.clone(),
@@ -587,7 +584,7 @@ pub(super) fn run_main(
 
     // Sniff for a .mirvm package (before the text read -- a package is binary)
     if crate::pack::is_package(&input_path) {
-        let (module, mut instance) = crate::pack::load_package(&input_path)
+        let mut artifact = crate::pack::load_package(&input_path)
             .and_then(|package| package.instantiate())
             .map_err(|reason| {
                 crate::error::Error::software(
@@ -596,18 +593,17 @@ pub(super) fn run_main(
                 )
             })?;
         // warm second half mirrors run_driver hot path (empty image stack: asm recipes idempotently rematerialized)
-        instance.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
+        let addresses = crate::lower::asm::try_materialize(&artifact.module().asm_sites)
+            .map_err(crate::pack::Error::from)?;
+        artifact.set_asm_addrs(addresses)?;
         let mut program_argv = vec![input];
         program_argv.extend(program_args);
-        let code = run_vm_engine(
-            module,
-            instance,
+        let code = run_verified_engine(
+            artifact,
             &program_argv,
             vm_call.as_deref(),
             vm_stats,
-            true,
-            // A package carries its own heat order in its function table; the program-level one does
-            // not apply to code that came from a package.
+            // A program's JIT heat order belongs to its bound ids, not to a distributed package.
             crate::vm::jit::Heat::default(),
         );
         // The guest's own status: not mirvm's to classify.
@@ -635,7 +631,9 @@ pub(super) fn run_main(
     let sysroot = match sysroot
         .or_else(|| crate::options::sysroot().map(|path| path.display().to_string()))
     {
-        Some(sysroot) => sysroot,
+        Some(sysroot) => crate::sysroot::select_path(PathBuf::from(sysroot))?
+            .display()
+            .to_string(),
         None => crate::sysroot::ensure_sysroot()?.display().to_string(),
     };
     let rustc_args = vec![

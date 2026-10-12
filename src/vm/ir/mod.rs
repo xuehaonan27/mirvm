@@ -33,7 +33,16 @@ pub type AsmStubId = u32;
 
 /// One asm-stub materialization recipe. Symbol names are decoupled from bit order; see
 /// `Module.asm_sites`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub struct AsmSite {
     /// dlsym symbol name of the wrapper (baked into `.globl`/`.type`/`.size` when lower emits GAS text)
     pub name: Box<str>,
@@ -45,14 +54,32 @@ pub struct AsmSite {
 /// `Scalar` is an 8-byte value written low in its slot; `VecBytes` is a vector byte channel that
 /// names a real address and the full width (xmm/ymm/zmm = 16/32/64 bytes), the same source the
 /// wrapper reads with `movups`/`vmovups`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum AsmIoVal {
     Scalar(Operand),
     VecBytes(PlaceExpr, u32),
 }
 
 /// InlineAsm output destination channel, the dual of `AsmIoVal`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum AsmIoDst {
     Scalar(ScalarPlace),
     VecBytes(PlaceExpr, u32),
@@ -128,7 +155,16 @@ impl LoadMap {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum Rvalue {
     Use(Operand),
     /// Real address of this thread's guest TLS instance. `Ctx.tls[id]` is materialized lazily on
@@ -324,7 +360,16 @@ pub enum Rvalue {
     },
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum Stmt {
     Assign {
         dst: ScalarPlace,
@@ -707,7 +752,18 @@ pub enum Stmt {
 /// continues.
 /// MIR's Unreachable folds into `Continue`, since unwinding out of such a site is UB and the fast
 /// path does not check for it.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum UnwindAction {
     Continue,
     Cleanup(Bb),
@@ -729,7 +785,7 @@ impl UnwindAction {
 #[cfg(test)]
 mod tests {
     use super::program::{
-        Block, Builtin, BuiltinCallRole, DecodeQueue, FuncBody, Module, RetAbi, RetDest, Terminator,
+        Block, Builtin, BuiltinCallRole, FuncBody, Module, RetAbi, RetDest, Terminator,
     };
     use super::{UnwindAction, Width};
 
@@ -747,19 +803,6 @@ mod tests {
         }
         assert_eq!(Width::from_bytes(0), None);
         assert_eq!(Width::from_bytes(16), None);
-    }
-
-    #[test]
-    fn demanded_function_moves_ahead_of_prediction_queue() {
-        let mut queue = DecodeQueue {
-            predicted: [1, 2, 3].into(),
-            queued: [1, 2, 3].into(),
-            ..DecodeQueue::default()
-        };
-        queue.request_demand(3);
-        assert_eq!(queue.pop_next(), Some(3));
-        assert_eq!(queue.pop_next(), Some(1));
-        assert_eq!(queue.pop_next(), Some(2));
     }
 
     #[test]

@@ -173,6 +173,31 @@ pub fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
         && left.ctime_nsec() == right.ctime_nsec()
 }
 
+/// The identity and revision of an immutable store file. Content readers still verify its hash;
+/// this detects a replaced or edited pack before reusing a persisted index into it.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl FileIdentity {
+    pub(crate) fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
 /// Whether two metadata reads describe the same file in the same state, on a platform that reports
 /// only length and modification time.
 #[cfg(not(unix))]

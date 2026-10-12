@@ -43,12 +43,10 @@ pub(crate) fn stack_overflow(func: u64) -> ! {
     ));
 }
 
-/// Called by the published fast-entry wrapper before entering a compiled body.
-/// The wrapper has no explicit stack slots, so this check runs before the
-/// body's Cranelift prologue reserves its guest frame. A plain entry inlines this comparison
-/// against the floor the pinned register holds and calls [`mirvm_jit_stack_overflow`] instead; this
-/// helper stays for the trace domain, whose register holds the recorder rather than the `Ctx`.
-pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, frame_bytes: u64) {
+/// Checks headroom before a compiled call or a packed boundary enters the callee's prologue.
+/// Plain code with a pinned context inlines the comparison and calls [`mirvm_jit_stack_overflow`]
+/// on failure. Trace code and pairs without a pinned context use this TLS-based check.
+pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, required_headroom: u64) {
     let (ctx, _shared) = active();
     let floor = unsafe { (*ctx).stack_floor };
     if floor == 0 {
@@ -56,7 +54,7 @@ pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, frame_bytes: u64) {
     }
     let marker = 0u8;
     let sp = &marker as *const u8 as usize;
-    let need = (frame_bytes as usize).saturating_add(STACK_GUARD_MARGIN);
+    let need = required_headroom as usize;
     if sp <= floor.saturating_add(need) {
         stack_overflow(func);
     }

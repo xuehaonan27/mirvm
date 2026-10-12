@@ -1,5 +1,5 @@
-//! What a guest function body must satisfy: its parameter and return conventions, and every
-//! statement, rvalue and terminator it is built from.
+// What a guest function body must satisfy: its parameter and return conventions, and every
+// statement, rvalue and terminator it is built from.
 
 use super::*;
 
@@ -28,8 +28,8 @@ impl<'a> Verifier<'a> {
             self.param_abi(body, param)
                 .map_err(|e| crate::fail!(Engine, format!("parameter {i}: {e}")))?;
         }
-        if let Some(off) = body.caller_loc_off {
-            self.span(body, off, 8, "track_caller slot")?;
+        if let Some(off) = body.caller_loc_off.as_ref() {
+            self.span(body, *off, 8, "track_caller slot")?;
         }
         for (bb, block) in body.blocks.iter().enumerate() {
             for (si, stmt) in block.stmts.iter().enumerate() {
@@ -418,7 +418,7 @@ impl<'a> Verifier<'a> {
                 otherwise,
             } => {
                 self.switch_discr(body, discr)?;
-                for (_, bb) in targets {
+                for (_, bb) in targets.iter() {
                     self.bb(body, *bb)?;
                 }
                 self.bb(body, *otherwise)
@@ -432,11 +432,11 @@ impl<'a> Verifier<'a> {
                 role,
             } => {
                 self.func(*callee)?;
-                self.operands(body, args)?;
+                self.operands(body, args.iter())?;
                 self.ret_dest(body, ret)?;
                 self.bb(body, *target)?;
                 self.unwind(body, *unwind)?;
-                if matches!(role, crate::vm::ir::CallRole::MainPanicBoundary)
+                if matches!(role, CallRole::MainPanicBoundary)
                     && !matches!(unwind, UnwindAction::Continue)
                 {
                     return Err(crate::fail!(
@@ -454,7 +454,7 @@ impl<'a> Verifier<'a> {
                 unwind,
                 role,
             } => {
-                self.operands(body, args)?;
+                self.operands(body, args.iter())?;
                 self.ret_dest(body, ret)?;
                 self.bb(body, *target)?;
                 self.unwind(body, *unwind)?;
@@ -493,7 +493,7 @@ impl<'a> Verifier<'a> {
                 ..
             } => {
                 self.foreign_sig(sig)?;
-                self.operands(body, args)?;
+                self.operands(body, args.iter())?;
                 self.ret_dest(body, ret)?;
                 self.bb(body, *target)?;
                 self.unwind(body, *unwind)
@@ -508,9 +508,9 @@ impl<'a> Verifier<'a> {
                 ..
             } => {
                 self.operand(body, callee)?;
-                self.operands(body, args)?;
+                self.operands(body, args.iter())?;
                 self.ret_dest(body, ret)?;
-                if let Some(sig) = native_sig {
+                if let Some(sig) = native_sig.as_ref() {
                     self.foreign_sig(sig)?;
                 }
                 self.bb(body, *target)?;

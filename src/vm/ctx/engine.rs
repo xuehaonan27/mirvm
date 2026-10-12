@@ -589,6 +589,18 @@ impl Engine {
         Self::try_new(Shared::try_new(module, instance)?)
     }
 
+    /// Consume bytecode verification evidence from the immutable artifact loader.
+    ///
+    /// # Safety
+    /// Native code and FFI declarations have the same trust obligations as
+    /// `from_artifact_unchecked`; the artifact proves bytecode and address-context validity only.
+    pub(crate) unsafe fn from_verified_unchecked(
+        artifact: super::super::archive::VerifiedArtifact,
+    ) -> Result<Self, crate::error::Error> {
+        let (module, instance) = artifact.into_parts();
+        Self::try_new(Shared::try_new(module, instance)?)
+    }
+
     pub(crate) fn shared(&self) -> &Arc<Shared> {
         &self.inner.shared
     }
@@ -652,7 +664,6 @@ impl Engine {
             drop(activation);
             drop(lease);
         }
-        shared.module.funcs.flush_heat_order();
         // The compiler service holds entries it has not published yet, and it publishes them when it
         // stops. `std::mem::forget` below skips the close path that would stop it, so a small program
         // -- one that never reaches the batch size mid-run -- would leave the store without the code
@@ -914,7 +925,6 @@ fn finalize_shared(shared: &Shared) {
     }
     super::super::deferred::finish_engine_close(shared);
     shared.release_thread_contexts();
-    shared.module.funcs.flush_heat_order();
     #[cfg(feature = "cranelift")]
     super::super::jit::stop(shared);
     #[cfg(feature = "cranelift")]

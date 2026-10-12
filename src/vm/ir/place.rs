@@ -3,7 +3,21 @@
 //! statement writes, and the operand both are read through.
 
 /// Scalar width. W128 is carried by the wide two-slot channel, not by this enum.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
+#[archive_attr(derive(PartialEq, Eq))]
 pub enum Width {
     W8,
     W16,
@@ -43,7 +57,18 @@ impl Width {
 
 /// Frame-local scalar slot (fast path): the offset is frozen, with any Field projections already
 /// folded into it.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub struct Slot {
     pub off: u32,
     pub width: Width,
@@ -52,7 +77,18 @@ pub struct Slot {
 // ===== Place evaluation =====
 
 /// Base of an address expression.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum PlaceBase {
     /// Frame-local: real address = frame base + off
     Local(u32),
@@ -62,7 +98,22 @@ pub enum PlaceBase {
 
 /// Link-time address recorded in the package. Distinct from ordinary integers so a loaded instance can
 /// uniformly translate it to the instance address.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
+#[archive_attr(derive(PartialEq, Eq))]
 pub struct LinkAddr(pub u64);
 
 impl std::fmt::LowerHex for LinkAddr {
@@ -72,7 +123,16 @@ impl std::fmt::LowerHex for LinkAddr {
 }
 
 /// One step of an address expression (lower has folded Field/Downcast into Offset).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum PlaceStep {
     /// Read a W64 pointer at the current address and switch the address to it
     Deref,
@@ -91,27 +151,71 @@ pub enum PlaceStep {
 }
 
 /// Address expression: the engine evaluates it in order, yielding the real address.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive(bound(serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace"))]
+#[archive_attr(check_bytes(
+    bound = "__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::bytecheck::Error"
+))]
 pub struct PlaceExpr {
     pub base: PlaceBase,
+    #[omit_bounds]
+    #[archive_attr(omit_bounds)]
     pub steps: Box<[PlaceStep]>,
 }
 
 /// Destination of a read or write of a scalar of at most 64 bits.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+// Address expressions are indirect only in the archive, so rare memory operands do not enlarge
+// every scalar slot, enclosing instruction and block. Runtime IR retains its inline layout.
 pub enum ScalarPlace {
     /// Fast path: frame-local static slot
     Slot(Slot),
     /// Slow path: scalar at an address expression
-    Mem { expr: PlaceExpr, width: Width },
+    Mem {
+        #[with(rkyv::with::AsBox)]
+        expr: PlaceExpr,
+        width: Width,
+    },
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive(bound(serialize = "__S: rkyv::ser::Serializer + rkyv::ser::ScratchSpace"))]
+#[archive_attr(check_bytes(
+    bound = "__C: rkyv::validation::ArchiveContext, __C::Error: rkyv::bytecheck::Error"
+))]
 pub enum Operand {
     /// Frame-local static slot (fast path)
     Slot(Slot),
     /// Scalar at an address expression
     Mem {
+        #[with(rkyv::with::AsBox)]
         expr: PlaceExpr,
         width: Width,
     },
@@ -123,9 +227,11 @@ pub enum Operand {
     /// an ordinary integer is never guessed to be an address.
     AddrImm(LinkAddr),
     /// The real address of a place itself (indirect argument: passing an aggregate by address)
-    AddrOf(PlaceExpr),
+    AddrOf(#[with(rkyv::with::AsBox)] PlaceExpr),
     /// Value minus a constant (Subslice slice meta: len' = len - k)
     SubImm {
+        #[omit_bounds]
+        #[archive_attr(omit_bounds)]
         base: Box<Operand>,
         sub: u64,
     },

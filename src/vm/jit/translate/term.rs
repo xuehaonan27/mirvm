@@ -180,6 +180,22 @@ impl Translator<'_, '_> {
                             let cb = &self.shared.module.funcs[*callee as usize];
                             let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
                             if let Some(cabi) = plt {
+                                // Compiled slots point to bodies. Check before entering the callee's
+                                // prologue; packed boundary entries carry their own guarded wrapper.
+                                let fv = self.site(Site::Func(*callee), u64::from(*callee));
+                                let need = self.site(
+                                    Site::StackNeed(*callee),
+                                    super::super::guard::required_headroom(cb),
+                                );
+                                super::super::guard::emit(
+                                    self.module,
+                                    self.b,
+                                    self.domain,
+                                    fv,
+                                    need,
+                                    self.stack_guard,
+                                    self.stack_overflow,
+                                );
                                 // Hot path: indirect through the PLT's memory -- load
                                 // slots_fast[callee], then call_indirect. The shape is
                                 // constant, and the trampoline-to-fast upgrade is invisible to
@@ -285,9 +301,7 @@ impl Translator<'_, '_> {
                             width: Width::W64,
                         });
                         let src = self.addr_of_local(ret_off);
-                        let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
-                        let n = self.b.ins().iconst(types::I64, i64::from(size));
-                        self.b.ins().call(fref, &[dst, src, n]);
+                        self.copy_bytes(dst, src, u64::from(size));
                         self.b.ins().return_(&[]);
                     }
                 }
@@ -404,9 +418,7 @@ impl Translator<'_, '_> {
                         ir::AsmIoVal::VecBytes(pe, size) => {
                             let src = self.place_addr(pe);
                             let dst = self.b.ins().stack_addr(types::I64, buf, *off as i32);
-                            let n = self.b.ins().iconst(types::I64, i64::from(*size));
-                            let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
-                            self.b.ins().call(fref, &[dst, src, n]);
+                            self.copy_bytes(dst, src, u64::from(*size));
                         }
                     }
                 }
@@ -429,9 +441,7 @@ impl Translator<'_, '_> {
                         ir::AsmIoDst::VecBytes(pe, size) => {
                             let dst = self.place_addr(pe);
                             let src = self.b.ins().stack_addr(types::I64, buf, *off as i32);
-                            let n = self.b.ins().iconst(types::I64, i64::from(*size));
-                            let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
-                            self.b.ins().call(fref, &[dst, src, n]);
+                            self.copy_bytes(dst, src, u64::from(*size));
                         }
                     }
                 }

@@ -456,15 +456,12 @@ fn drive(
     }
 
     // 3. sysroot: the option takes priority, otherwise self-built (same measure as the CLI run path)
-    let sysroot = match crate::options::sysroot() {
-        Some(p) => p.to_path_buf(),
-        None => match crate::sysroot::ensure_sysroot() {
-            Ok(p) => p,
-            Err(e) => {
-                crate::diag_error!(Build, "failed to build sysroot: {e}");
-                std::process::exit(crate::diag::exit::FAILURE.into());
-            }
-        },
+    let sysroot = match crate::sysroot::ensure_sysroot() {
+        Ok(p) => p,
+        Err(e) => {
+            crate::diag_error!(Build, "failed to build sysroot: {e}");
+            std::process::exit(crate::diag::exit::FAILURE.into());
+        }
     };
 
     // 4. fingerprint + compile segment (compiled by compile_plan — drive and

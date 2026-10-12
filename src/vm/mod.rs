@@ -18,6 +18,7 @@
 //! [`native_instance`]. Engine substrate: [`deferred`], [`thunks`], [`unwind`]. [`stats`]
 //! reports on a loaded module for the CLI.
 
+pub(crate) mod archive;
 pub(crate) mod atexit;
 pub(crate) mod backtrace;
 pub(crate) mod codearena;

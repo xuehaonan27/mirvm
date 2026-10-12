@@ -125,6 +125,10 @@ fn ensure_base() -> Option<crate::image::BaseImage> {
     let status = std::process::Command::new(self_exe)
         .arg("__build-base-image")
         .arg(&path)
+        .env(
+            crate::options::env_var_name("sysroot"),
+            crate::sysroot::effective_dir(),
+        )
         .stdout(std::process::Stdio::null())
         .stderr(log)
         .status()

@@ -147,7 +147,7 @@ impl<'a> Compiler<'a> {
         self.register_pending_eh_frames();
         let mut ranges = self.finalized_symbol_ranges(symbols);
 
-        let mut fast = self.module.get_finalized_function(guarded_id) as u64;
+        let mut fast = self.module.get_finalized_function(fast_id) as u64;
         let mut packed = self.module.get_finalized_function(packed_id) as u64;
         // One entry for this function, built here and used by everyone below: the store keeps it, and
         // a reload links it back. Building it before either means the two can never disagree.
@@ -164,11 +164,11 @@ impl<'a> Compiler<'a> {
         if self.reload
             && let Some(entry) = &entry
             && let Some(linked) = self.relink(entry, func)
-            && let Some(guarded) = linked.entry(JitSymbolRole::Guarded)
+            && let Some(body_entry) = linked.entry(JitSymbolRole::FastBody)
             && let Some(reloaded) = linked.entry(JitSymbolRole::Packed)
             && let Some(frames) = Self::linked_frames(&linked, entry)
         {
-            fast = guarded;
+            fast = body_entry;
             packed = reloaded;
             ranges = linked_ranges(self.shared, func, &linked);
             // The published code is the linked region, so its CFA programs are registered at the
@@ -307,8 +307,8 @@ impl<'a> Compiler<'a> {
         };
         self.register_eh_frames(frames);
         let ranges = linked_ranges(shared, func, &linked);
-        let (Some(guarded), Some(packed)) = (
-            linked.entry(JitSymbolRole::Guarded),
+        let (Some(body_entry), Some(packed)) = (
+            linked.entry(JitSymbolRole::FastBody),
             linked.entry(JitSymbolRole::Packed),
         ) else {
             helpers::cache_refused();
@@ -326,7 +326,7 @@ impl<'a> Compiler<'a> {
         }
         self.shared
             .jit
-            .publish_compiled_entries_for(self.domain, func, guarded, packed, ranges);
+            .publish_compiled_entries_for(self.domain, func, body_entry, packed, ranges);
         self.published.insert(func);
         if let Some(started) = started {
             let micros = started.elapsed().as_micros() as u64;
@@ -452,9 +452,8 @@ impl<'a> Compiler<'a> {
         Some(linked)
     }
 
-    /// Published fast entry. Keeping the check in a separate slot-free
-    /// function is important: putting it in `define_fast` would run only after
-    /// Cranelift's prologue had already moved the native stack pointer.
+    /// Guarded boundary entry, called by the packed wrapper before the body allocates its frame.
+    /// Compiled callers perform the same check at their call site and enter the body directly.
     pub(super) fn define_guarded_fast(
         &mut self,
         func: u32,
@@ -470,8 +469,6 @@ impl<'a> Compiler<'a> {
         let mut cctx = self.module.make_context();
         cctx.func.signature = sig;
         {
-            // Read before the builder borrows the context and the variable table.
-            let plain = self.plain_pins_ctx();
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
@@ -488,47 +485,19 @@ impl<'a> Compiler<'a> {
                 u64::from(func),
                 &mut self.sites,
             );
-            let explicit = u64::from(body.frame_size)
-                .saturating_add(u64::from(body.frame_align.saturating_sub(16)));
-            if plain {
-                // The plain domain pins this thread's `Ctx` (the packed entry sets it), so the floor
-                // is a register read and the check is a load, an add, a compare and a branch; the
-                // helper runs only when this entry would cross the margin. A floor of zero means no
-                // guest stack limit, and the limit then sits far below any real stack address, so
-                // the same comparison answers that case too.
-                let ctx = b.ins().get_pinned_reg(types::I64);
-                let floor =
-                    b.ins()
-                        .load(types::I64, MemFlagsData::trusted(), ctx, STACK_FLOOR_OFFSET);
-                let sp_slot = b.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    8,
-                    3,
-                ));
-                let sp = b.ins().stack_addr(types::I64, sp_slot, 0);
-                let need = b.ins().iconst(
-                    types::I64,
-                    explicit.saturating_add(STACK_GUARD_MARGIN as u64) as i64,
-                );
-                let limit = b.ins().iadd(floor, need);
-                let crossing = b.ins().icmp(IntCC::UnsignedLessThanOrEqual, sp, limit);
-                let overflow = b.create_block();
-                let cont = b.create_block();
-                b.ins().brif(crossing, overflow, &[], cont, &[]);
-                b.switch_to_block(overflow);
-                let report = self
-                    .module
-                    .declare_func_in_func(self.stack_overflow, b.func);
-                b.ins().call(report, &[fv]);
-                b.ins().trap(TrapCode::STACK_OVERFLOW);
-                b.switch_to_block(cont);
-            } else {
-                // The trace domain's register holds the recorder rather than the `Ctx`, so its
-                // entries ask the helper, which reads the current thread's context itself.
-                let guard = self.module.declare_func_in_func(self.stack_guard, b.func);
-                let frame = b.ins().iconst(types::I64, explicit as i64);
-                b.ins().call(guard, &[fv, frame]);
-            }
+            let need = b.ins().iconst(
+                types::I64,
+                super::super::guard::required_headroom(body) as i64,
+            );
+            super::super::guard::emit(
+                &mut self.module,
+                &mut b,
+                self.domain,
+                fv,
+                need,
+                self.stack_guard,
+                self.stack_overflow,
+            );
             let target = self.module.declare_func_in_func(fast, b.func);
             let call = b.ins().call(target, &params);
             let results = b.inst_results(call).to_vec();
@@ -741,6 +710,8 @@ impl<'a> Compiler<'a> {
                 simd_stmt: self.simd_stmt,
                 simd_rv: self.simd_rv,
                 poll_signals: self.poll_signals,
+                stack_guard: self.stack_guard,
+                stack_overflow: self.stack_overflow,
                 host_syscall_trace: self.host_syscall_trace,
                 exception_var: None,
                 has_try_call: false,
@@ -967,12 +938,6 @@ impl<'a> Compiler<'a> {
         ))
     }
 }
-
-/// Where the stack floor sits in `Ctx`, for the plain guarded entry's inline check. The offset is
-/// this build's own layout, and an entry is only ever reused by the build that made it (the jit-key
-/// carries the build id), so a register read of this offset cannot outlive the layout it was
-/// compiled against.
-const STACK_FLOOR_OFFSET: i32 = std::mem::offset_of!(crate::vm::ctx::Ctx, stack_floor) as i32;
 
 /// The perf-map ranges of linked code: the addresses the link produced, not the module's, with the
 /// same roles and sizes so a profiler reads the running code.

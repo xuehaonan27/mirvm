@@ -58,8 +58,9 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
     let fsz = body.frame_size;
     /// Only the frame-relative prefix before the first Deref or dynamic step is
     /// scanned. With each Offset step added to `pos`:
-    /// - Deref: the 8-byte pointer slot itself lands on the frame; the pointee is
-    ///   not frame-relative, so scanning stops there;
+    /// - leading Deref: read the pointer through the slot channel without forcing it to memory;
+    /// - Deref after an Offset: the 8-byte pointer remains on the frame; the pointee is not
+    ///   frame-relative, so scanning stops there;
     /// - dynamic step (IndexScaled/VTableAlignOffset): the address is only known at
     ///   run time, so conservatively cover `[pos, fsz)`;
     /// - steps exhausted: cover `[pos, pos+n)` or `[pos, fsz)` per the extent.
@@ -67,6 +68,11 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
         let ir::PlaceBase::Local(base) = pe.base else {
             return;
         };
+        // Dereferencing a pointer reads its value, not the address of its slot. The translator
+        // reads that value through read_slot, which also handles a slot another place has escaped.
+        if matches!(pe.steps.first(), Some(ir::PlaceStep::Deref)) {
+            return;
+        }
         let mut pos: i64 = base as i64;
         for step in pe.steps.iter() {
             match step {

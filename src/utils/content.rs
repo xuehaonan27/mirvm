@@ -1,4 +1,4 @@
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -34,7 +34,17 @@ impl FileStamp {
             ));
         }
         let mut hasher = blake3::Hasher::new();
-        hasher.update_reader(&mut file)?;
+        let mut buffer = vec![0; before.len().min(1 << 20) as usize];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(len) => {
+                    hasher.update(&buffer[..len]);
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
         let after = file.metadata()?;
         let path_after = std::fs::metadata(path)?;
         let after_mtime = mtime_ns(&after)?;

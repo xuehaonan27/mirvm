@@ -7,7 +7,16 @@ use super::*;
 /// shims for them at link time, and the engine takes over at the same boundary.
 /// Lower emits a preceding `Stmt::Trap` at these sites so that a missing implementation fails loudly
 /// instead of silently.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum Builtin {
     /// `__rust_alloc(size, align) -> ptr`
     RustAlloc,
@@ -394,7 +403,16 @@ pub enum Builtin {
 
 /// Right-hand operand of Bin128: a 128-bit place, or a scalar of at most 64 bits (the shift amount for
 /// Shl/Shr).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum Bin128Rhs {
     Wide(PlaceExpr),
     Scalar(Operand),
@@ -402,7 +420,18 @@ pub enum Bin128Rhs {
 
 /// Where an argument lands inside the callee frame. The engine calling convention flattens actuals
 /// into a sequence of u64 slots.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum ParamAbi {
     /// ZST: occupies no argument slot
     Zst,
@@ -416,7 +445,18 @@ pub enum ParamAbi {
 }
 
 /// Return channel of the engine calling convention.
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
 pub enum RetAbi {
     Zst,
     /// Scalar: the interpreter returns the low slot.
@@ -434,7 +474,16 @@ pub enum RetAbi {
 }
 
 /// Return landing point of a Call (caller side).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum RetDest {
     /// Ignored (ZST or no destination)
     Ignore,
@@ -448,7 +497,16 @@ pub enum RetDest {
 
 /// `SwitchInt` discriminant. Ordinary integers use a scalar operand; i128/u128 stay in a place and are
 /// read as full 128 bits at runtime, not truncated to u64 first.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum SwitchDiscr {
     Scalar(Operand),
     Wide(PlaceExpr),
@@ -457,7 +515,22 @@ pub enum SwitchDiscr {
 /// Role of a direct guest call in the startup chain. Almost every call is `Normal`; the one
 /// `catch_unwind` call that wraps user `main` is marked `MainPanicBoundary` during lowering, so the
 /// Engine can still keep a structured result after guest std has consumed the exception.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
+#[archive_attr(derive(PartialEq, Eq))]
 pub enum CallRole {
     #[default]
     Normal,
@@ -466,14 +539,38 @@ pub enum CallRole {
 
 /// Role of an engine primitive call in the startup chain. Only the `std::intrinsics::catch_unwind`
 /// call site that passes lowering's structural validation is marked `MainPanicCatcher`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Clone, Copy))]
+#[archive_attr(derive(PartialEq, Eq))]
 pub enum BuiltinCallRole {
     #[default]
     Normal,
     MainPanicCatcher,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub enum Terminator {
     Goto(Bb),
     SwitchInt {
@@ -504,6 +601,7 @@ pub enum Terminator {
     /// pointers are host pointers, no marshalling is needed.
     CallForeign {
         sym: Box<str>,
+        #[with(rkyv::with::AsBox)]
         sig: ForeignSig,
         args: Vec<Operand>,
         ret: RetDest,
@@ -526,6 +624,7 @@ pub enum Terminator {
         target: Bb,
         unwind: UnwindAction,
         null_ok: bool,
+        #[with(rkyv::with::Map<rkyv::with::AsBox>)]
         native_sig: Option<ForeignSig>,
     },
     /// Inline asm site. `stub` indexes the instance's asm-stub address table, the real address of a `fn(*mut u8)`
@@ -588,13 +687,31 @@ impl Terminator {
     }
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub term: Terminator,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub struct FuncBody {
     pub frame_size: u32,
     pub frame_align: u32,

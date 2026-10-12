@@ -347,6 +347,16 @@ mirvm_mc_signal_bridge_probe:
         .unwrap();
         let bytes = std::fs::read(&*path).unwrap();
         let image = load(&bytes).unwrap();
+        for call in crate::vm::interpose::INTERPOSED_CALLS {
+            let target = crate::vm::interpose::target_slot(call);
+            assert!(
+                image.symbols.contains_key(target.as_str()),
+                "missing {target}"
+            );
+            if let Some(owner) = crate::vm::interpose::owner_slot(call) {
+                assert!(image.symbols.contains_key(owner), "missing {owner}");
+            }
+        }
         let patch = |name: &str, value: u64| {
             let offset = image
                 .symbols

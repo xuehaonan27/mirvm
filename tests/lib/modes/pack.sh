@@ -157,18 +157,12 @@ else
     bad "self package run failed: output=$self_output"
     tail -20 "$TMP/self-run.err"
 fi
-mapfile -t heat_files < <(find "$TMP/fresh-run-home/cache/package-heat" -type f -name '*.order' 2>/dev/null)
-if [ "${#heat_files[@]}" = 1 ] && [ -s "${heat_files[0]}" ]; then
-    ok "package recorded real function heat order on first run"
-else
-    bad "package first run did not produce a unique function heat record"
-fi
 second_output=$(MIRVM_HOME="$TMP/fresh-run-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
     "$MIRVM" run "$SELF_PACKAGE" 2>"$TMP/self-run-second.err")
 if [ "$?" -eq 0 ] && [ "$second_output" = 321 ]; then
-    ok "package second run consistent after predicted heat prefetch"
+    ok "package repeated instantiation preserves output"
 else
-    bad "package predicted prefetch second run failed: output=$second_output"
+    bad "package second instantiation failed: output=$second_output"
     tail -20 "$TMP/self-run-second.err"
 fi
 
@@ -230,4 +224,5 @@ elif rg -q 'only accepts `cargo` or `self`' "$TMP/invalid.err"; then
 else
     bad "pack invalid MIRVM_DEPS diagnosis unclear"
 fi
+case_summary "$CASE_NAME"
 }

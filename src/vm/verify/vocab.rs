@@ -1,5 +1,5 @@
-//! The vocabulary the rest of the walk is written in: operands, places, slots, ids, and the
-//! unwind and frozen-range facts they rely on.
+// The vocabulary the rest of the walk is written in: operands, places, slots, ids, and the
+// unwind and frozen-range facts they rely on.
 
 use super::*;
 
@@ -9,11 +9,7 @@ impl<'a> Verifier<'a> {
             Operand::Slot(slot) => self.slot(body, *slot),
             Operand::Mem { expr, .. } | Operand::AddrOf(expr) => self.place(body, expr),
             Operand::Imm { .. } => Ok(()),
-            Operand::AddrImm(addr) => match self.instance.try_resolve_link_addr(*addr) {
-                Ok(runtime) => self.frozen_range(runtime, 0, true),
-                Err(_) if self.instance.link_fn_addrs.contains_key(addr) => Ok(()),
-                Err(error) => Err(error),
-            },
+            Operand::AddrImm(addr) => self.address(crate::vm::ir::LinkAddr(addr.0), true, true),
             Operand::SubImm { base, .. } => self.operand(body, base),
         }
     }
@@ -32,21 +28,21 @@ impl<'a> Verifier<'a> {
                     ));
                 }
             }
-            PlaceBase::Static(addr) => {
-                let runtime = self.instance.try_resolve_link_addr(addr)?;
-                self.frozen_range(
-                    runtime,
-                    0,
-                    self.prefix.funcs != 0 || self.prefix.tls != 0 || self.prefix.asm != 0,
-                )?
-            }
+            PlaceBase::Static(addr) => self.address(
+                crate::vm::ir::LinkAddr(addr.0),
+                false,
+                self.prefix.funcs != 0 || self.prefix.tls != 0 || self.prefix.asm != 0,
+            )?,
         }
-        for step in &place.steps {
+        for step in place.steps.iter() {
             match step {
                 PlaceStep::Deref | PlaceStep::Offset(_) => {}
                 PlaceStep::VTableAlignOffset { meta, packed, .. } => {
                     self.operand(body, meta)?;
-                    if packed.is_some_and(|n| n == 0 || !n.is_power_of_two()) {
+                    if packed
+                        .as_ref()
+                        .is_some_and(|&n| n == 0 || !n.is_power_of_two())
+                    {
                         return Err(crate::fail!(
                             Engine,
                             "vtable packed alignment is not a non-zero power of two"
@@ -210,38 +206,5 @@ impl<'a> Verifier<'a> {
             UnwindAction::Cleanup(bb) => self.bb(body, bb),
             UnwindAction::Continue | UnwindAction::Terminate => Ok(()),
         }
-    }
-
-    pub(super) fn frozen_range(
-        &self,
-        addr: u64,
-        size: u64,
-        allow_prefix: bool,
-    ) -> Result<(), crate::error::Error> {
-        if addr == 0 {
-            return Err(crate::fail!(Engine, "contains a null frozen address"));
-        }
-        let end = addr
-            .checked_add(size)
-            .ok_or(crate::fail!(Engine, "frozen address range overflows"))?;
-        let contains = self
-            .instance
-            .frozen
-            .iter()
-            .chain(self.instance.image_frozens.iter())
-            .any(|arena| {
-                // The whole mapped region, not only the used prefix: a pointer one past the last
-                // allocation is legal, and an arena's bytes are mapped for its full slot.
-                let start = arena.snapshot().as_ptr() as u64;
-                let limit = start + arena.mapped_len();
-                addr >= start && end <= limit
-            });
-        if !contains && !allow_prefix {
-            return Err(crate::fail!(
-                Engine,
-                format!("address range {addr:#x}..{end:#x} is outside frozen memory")
-            ));
-        }
-        Ok(())
     }
 }

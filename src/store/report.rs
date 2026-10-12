@@ -601,6 +601,22 @@ pub fn purge(root: &Path, plan: Purge, swept: Option<store::frags::Sweep>) -> Pu
     }
     for family in store::FAMILIES {
         let dir = family.dir_in(root);
+        let _inputs = if !dry && family.path() == store::SYSROOT.path() && plan.takes(family) {
+            match store::input_lease(root, true) {
+                Ok(lease) => Some(lease),
+                Err(error) => {
+                    report.actions.push(PurgeAction {
+                        deleted: false,
+                        path: dir.display().to_string(),
+                        bytes: 0,
+                        reason: format!("cannot lease managed inputs for deletion: {error}"),
+                    });
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         match family.shape {
             // Generational cache: a stale generation is individually removable, which is what
             // `purge` does by default. Naming the family is the user asking for all of it; `--all`

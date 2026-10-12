@@ -275,15 +275,12 @@ fn prepare_test_package(
         _ => None,
     };
 
-    let sysroot = match crate::options::sysroot() {
-        Some(p) => p.to_path_buf(),
-        None => match crate::sysroot::ensure_sysroot() {
-            Ok(p) => p,
-            Err(e) => {
-                crate::diag_error!(Test, "failed to build sysroot: {e}");
-                return Err(ExitCode::from(crate::diag::exit::FAILURE));
-            }
-        },
+    let sysroot = match crate::sysroot::ensure_sysroot() {
+        Ok(p) => p,
+        Err(e) => {
+            crate::diag_error!(Test, "failed to build sysroot: {e}");
+            return Err(ExitCode::from(crate::diag::exit::FAILURE));
+        }
     };
     let layout = Layout::new();
     let stamp = crate::sysroot::current_stamp_value()

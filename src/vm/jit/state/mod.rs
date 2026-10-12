@@ -150,7 +150,7 @@ pub struct JitCodeRange {
 pub(crate) struct DomainSlots {
     /// interp i2c face: FuncId -> packed entry address (0 = not compiled).
     pub(crate) slots: Vec<AtomicU64>,
-    /// compiled cc->cc face: FuncId -> fast entry / c2i trampoline address.
+    /// compiled cc->cc face: FuncId -> checked-at-call-site body / c2i trampoline address.
     pub(crate) slots_fast: Vec<AtomicU64>,
 }
 
@@ -177,7 +177,7 @@ pub struct JitState {
     /// PLT slots for the interpreter's i2c face: FuncId -> packed entry machine address
     /// (0 = not compiled, interpret instead).
     pub slots: Vec<AtomicU64>,
-    /// PLT slots for the compiled-code cc->cc face: FuncId -> fast entry / c2i trampoline
+    /// PLT slots for the compiled-code cc->cc face: FuncId -> checked-at-call-site body / c2i trampoline
     /// address (0 = none yet). Only compiled call sites read it (load plus
     /// `call_indirect`); the interpreter does not consume it.
     pub slots_fast: Vec<AtomicU64>,
@@ -382,7 +382,7 @@ impl JitState {
         &self,
         domain: CodeDomain,
         func: u32,
-        guarded_entry: u64,
+        body_entry: u64,
         packed_entry: u64,
         ranges: Vec<JitSymbolRange>,
         registry: &Mutex<PerfMapRegistry>,
@@ -405,35 +405,36 @@ impl JitState {
         for range in ranges {
             self.register_symbol_range_with(range, registry);
         }
-        self.publish_entries_to(self.slots_for(domain), func, guarded_entry, packed_entry);
+        self.publish_entries_to(self.slots_for(domain), func, body_entry, packed_entry);
     }
 
     fn publish_entries_to(
         &self,
         slots: DomainSlotSet<'_>,
         func: u32,
-        guarded_entry: u64,
+        body_entry: u64,
         packed_entry: u64,
     ) {
-        slots.slots_fast[func as usize].store(guarded_entry, Ordering::Release);
+        slots.slots_fast[func as usize].store(body_entry, Ordering::Release);
         slots.slots[func as usize].store(packed_entry, Ordering::Release);
     }
 
-    /// Publish a compiled body into its domain's slots, registering ranges with
+    /// Publish a compiled body into its domain's slots. Compiled callers check headroom before
+    /// entering it; packed callers use their own guarded wrapper. Register ranges with
     /// the process registry. This is the production entry point; the `_with`
     /// cores take an injected registry so tests can observe registration.
     pub(crate) fn publish_compiled_entries_for(
         &self,
         domain: CodeDomain,
         func: u32,
-        guarded_entry: u64,
+        body_entry: u64,
         packed_entry: u64,
         ranges: Vec<JitSymbolRange>,
     ) {
         self.publish_compiled_entries_with(
             domain,
             func,
-            guarded_entry,
+            body_entry,
             packed_entry,
             ranges,
             perf_registry(),

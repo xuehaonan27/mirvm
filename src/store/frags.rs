@@ -211,8 +211,9 @@ fn pack_bytes(fragments: &BTreeMap<[u8; 32], Vec<u8>>) -> Vec<u8> {
 }
 
 /// One pack's index, read from its trailing index.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PackIndex {
-    path: PathBuf,
+    file: super::index::PackFile,
     /// (id, record offset, fragment length), sorted by id.
     entries: Vec<([u8; 32], u64, u32)>,
 }
@@ -222,7 +223,8 @@ impl PackIndex {
     /// cannot trust is skipped, so a half-written or foreign file cannot fail a run.
     fn load(path: &Path) -> Option<PackIndex> {
         let mut file = std::fs::File::open(path).ok()?;
-        let len = file.metadata().ok()?.len();
+        let metadata = file.metadata().ok()?;
+        let len = metadata.len();
         if len < (HEADER_LEN + FOOTER_LEN) as u64 {
             return None;
         }
@@ -261,8 +263,11 @@ impl PackIndex {
         if !entries.windows(2).all(|w| w[0].0 < w[1].0) {
             return None;
         }
+        if !crate::os::fs::same_file(&metadata, &file.metadata().ok()?) {
+            return None;
+        }
         Some(PackIndex {
-            path: path.to_path_buf(),
+            file: super::index::PackFile::new(path, &metadata),
             entries,
         })
     }
@@ -277,16 +282,19 @@ impl PackIndex {
 
     /// Read up to `ids` from this pack in one open; an id already in `out` is left alone.
     fn read_into(&self, ids: &[[u8; 32]], out: &mut HashMap<[u8; 32], Vec<u8>>) {
-        let mut file = match std::fs::File::open(&self.path) {
-            Ok(file) => file,
-            Err(_) => return,
-        };
+        let mut file = None;
         for id in ids {
             if out.contains_key(id) {
                 continue;
             }
             let Some((offset, len)) = self.find(id) else {
                 continue;
+            };
+            if file.is_none() {
+                file = self.file.open();
+            }
+            let Some(file) = file.as_mut() else {
+                return;
             };
             if file
                 .seek(SeekFrom::Start(offset + RECORD_PREFIX_LEN))
@@ -318,33 +326,41 @@ impl Index {
     }
 
     pub(crate) fn load_in(dir: &Path) -> Index {
-        let mut packs = Vec::new();
-        if let Ok(read) = std::fs::read_dir(dir) {
-            let mut paths: Vec<PathBuf> = read
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().is_some_and(|ext| ext == "pack"))
-                .collect();
-            // Stable order: two readers of one store agree on which pack answers first.
-            paths.sort();
-            for path in paths {
-                if let Some(pack) = PackIndex::load(&path) {
-                    packs.push(pack);
-                }
-            }
-        }
+        let packs = super::index::load(dir, b"MIRFRGI1", PackIndex::load)
+            .into_iter()
+            .map(|(path, mut pack)| {
+                pack.file.path = path;
+                pack
+            })
+            .collect();
         Index { packs }
     }
 
+    fn scan_in(dir: &Path) -> Index {
+        Index {
+            packs: super::index::scan(dir, PackIndex::load)
+                .into_iter()
+                .map(|(_, pack)| pack)
+                .collect(),
+        }
+    }
+
     pub(crate) fn contains(&self, id: &[u8; 32]) -> bool {
-        self.packs.iter().any(|pack| pack.find(id).is_some())
+        self.packs
+            .iter()
+            .any(|pack| pack.find(id).is_some() && pack.file.is_current())
     }
 
     /// Read a batch, skipping ids the family does not hold or cannot verify.
     pub(crate) fn read_many(&self, ids: &[[u8; 32]]) -> HashMap<[u8; 32], Vec<u8>> {
         let mut out = HashMap::with_capacity(ids.len());
+        let mut pending: Vec<_> = ids.to_vec();
         for pack in &self.packs {
-            pack.read_into(ids, &mut out);
+            if pending.is_empty() {
+                break;
+            }
+            pack.read_into(&pending, &mut out);
+            pending.retain(|id| !out.contains_key(id));
         }
         out
     }
@@ -376,8 +392,10 @@ impl Sweep {
 /// would buy back few bytes. The caller holds the family's exclusive lock.
 pub(crate) fn sweep_in(dir: &Path, live: &HashSet<[u8; 32]>) -> std::io::Result<Sweep> {
     let mut sweep = Sweep::default();
-    for pack in Index::load_in(dir).packs {
-        let size = std::fs::metadata(&pack.path).map(|m| m.len()).unwrap_or(0);
+    for pack in Index::scan_in(dir).packs {
+        let size = std::fs::metadata(&pack.file.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
         let live_bytes: u64 = pack
             .entries
             .iter()
@@ -385,7 +403,7 @@ pub(crate) fn sweep_in(dir: &Path, live: &HashSet<[u8; 32]>) -> std::io::Result<
             .map(|entry| u64::from(entry.2))
             .sum();
         if live_bytes == 0 {
-            std::fs::remove_file(&pack.path)?;
+            std::fs::remove_file(&pack.file.path)?;
             sweep.removed += 1;
             sweep.reclaimed += size;
             continue;
@@ -409,7 +427,7 @@ pub(crate) fn sweep_in(dir: &Path, live: &HashSet<[u8; 32]>) -> std::io::Result<
         }
         let bytes = pack_bytes(&kept.into_iter().collect());
         crate::store::publish_bytes(&pack_path(dir, &bytes), &bytes)?;
-        std::fs::remove_file(&pack.path)?;
+        std::fs::remove_file(&pack.file.path)?;
         sweep.compacted += 1;
         sweep.reclaimed += size;
     }
@@ -450,7 +468,7 @@ pub(crate) fn inventory_marked(live: Option<&HashSet<[u8; 32]>>) -> Inventory {
 /// The same sizing over another directory: the pack format serves more than one family, and a family
 /// sized by a caller's own root (the collection tests) is why this is a directory and not a `Family`.
 pub(crate) fn inventory_marked_in(dir: &Path, live: Option<&HashSet<[u8; 32]>>) -> Inventory {
-    let index = Index::load_in(dir);
+    let index = Index::scan_in(dir);
     let mut seen: HashMap<[u8; 32], u32> = HashMap::new();
     let mut inv = Inventory {
         packs: index.packs.len() as u64,
@@ -593,6 +611,25 @@ mod tests {
             "a wrong body must never be served"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_batch_uses_a_valid_duplicate_after_a_selected_pack_disappears() {
+        let dir = tmp("batch-fallback");
+        let bytes = body(1);
+        let id = crate::vm::ir::frag::id_of(&bytes);
+        let pack = pack_bytes(&[(id, bytes.clone())].into_iter().collect());
+        std::fs::write(dir.join("a.pack"), &pack).unwrap();
+        std::fs::write(dir.join("b.pack"), &pack).unwrap();
+        let index = Index::load_in(&dir);
+        std::fs::remove_file(dir.join("a.pack")).unwrap();
+        let missing = crate::vm::ir::frag::id_of(&body(2));
+        let loaded = index.read_many(&[id, missing, id]);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[&id], bytes);
+        assert!(index.read_many(&[]).is_empty());
+        assert_eq!(Index::load_in(&dir).read_many(&[id])[&id], bytes);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

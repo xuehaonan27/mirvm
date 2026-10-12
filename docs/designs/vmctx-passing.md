@@ -10,24 +10,22 @@
    kernel can invoke on an arbitrary thread must look up the *current* thread's execution state in its
    prologue and lazily attach when the read is null. This is forced, not preferred. Attach logic
    belongs to the thread layer.
-2. **Compiled-to-compiled calls never touch TLS.** They use the internal fast convention on `f_fast`;
-   the plain-C-signature boundary entry `f_boundary` is a separate entry per compiled guest function.
+2. **Compiled-to-compiled calls use the guest signature.** Plain code with a pinned context checks
+   stack headroom without TLS; trace code and pairs without a pinned context use the TLS-based guard
+   helper. Packed boundary entry remains separate from the compiled body.
 3. **Thread-local "current Engine" identity (T) is the verdict.** Each Engine holds its own
    `Arc<Shared>`, the host thread's execution-state table stores `Ctx` keyed by Engine id, a boundary
    entry activates the matching entry, and a nested return restores the outer one. The old
    process-level `SHARED` and the single JIT worker were split into per-Engine state.
 4. **The T/R choice was not a performance judgment.** A reserved register (R) makes an
    already-selected context read faster, but it cannot say which Engine the thread has entered;
-   multi-instance identity must be established by T first. R remains a performance candidate for the
-   point where the allocation or guest-TLS fast path enters compiled code, and cannot replace T.
+   multi-instance identity must be established by T first. R accelerates plain stack checks where
+   the platform pair supports it, and cannot replace T.
 5. **The fast signature is the pure guest signature** (all ABI forms). The single context seam is
-   `get_ctx()`: the shared static plus the boundary TLS attach. No register rent is prepaid for a
-   hypothetical load.
-6. **Compiled code today touches per-thread execution state at zero sites.** The three admission
-   tables (statement, rvalue, terminator) are exhaustive: the GC/safepoint/TLAB/stack-check/linear-
-   memory cell does not exist structurally by architectural commitment; the FFI/c2i/catch/panic cell is
-   helper-shaped, so context acquisition amortizes inside each helper's heavyweight cost; and the
-   allocation/guest-TLS inlining cell has not entered.
+   boundary activation plus the pinned context or TLS helper lookup, without an extra guest argument.
+6. **Stack checks read per-thread execution state.** A plain call site or guarded packed entry reads
+   the stack floor through its pinned context where supported. FFI/c2i/catch/panic paths acquire
+   context in helpers. Inline stack checks are not counted by helper-frequency statistics.
 7. **T-to-R is an ABI-compatible single switch**: enable the pinned-register ISA flag, lower the
    `get_ctx()` TLS load to a pinned-register read, and save/set/restore at the boundary entry. The flip
    granularity is the whole JIT code cache recompiled under the new regime, which is free because
@@ -52,8 +50,9 @@
    restore their own registers through the unwinder, so the normal path is the one that needs the
    restore. Where the pair's JIT output and unwinder cannot carry a pinned context across compiled
    frames (the Mach-O half of the loader is still open), the packed entry keeps its plain
-   `(args, ret)` shape and the guarded entry asks `mirvm_jit_stack_guard`, which reads the same floor
-   through TLS: the check is the same one, without the register.
+   `(args, ret)` shape and stack checks ask `mirvm_jit_stack_guard`, which reads the same floor
+   through TLS. Compiled calls perform the check at the call site before entering the callee's frame;
+   the packed boundary performs it in the guarded wrapper. The check and margin are shared.
 
 ## 2. Model
 
@@ -160,14 +159,13 @@ multi-entry idea: every compiled guest function has two entries.
 
 ```text
 escaped to native ->  f_boundary: plain C signature, context from TLS (lazy attach if null),
-                                   then tail-call f_fast(ctx, args...)
-internal call     ->  f_fast(ctx, args...): fast entry; compiled-to-compiled calls another
-                                   f_fast directly with the context in registers
+                                   then packed -> guarded -> f_fast(args...)
+internal call     ->  stack check -> PLT -> f_fast(args...) or c2i trampoline
 ```
 
-So compiled-to-compiled never touches TLS, a native-to-guest entry pays one TLS read plus a first-time
-attach, and a signal handler uses the same boundary entry and is naturally on the right thread. The
-consequences that decide the design:
+Plain compiled-to-compiled stack checks avoid TLS where the context is pinned; trace and fallback
+checks use the guard helper. A native-to-guest entry establishes the current thread's activation.
+Signal delivery establishes activation at a safepoint. The consequences that decide the design:
 
 - An escaped compiled-state guest function needs **no thunk at all**, because `f_boundary` is itself
   plain-C native code.
@@ -213,8 +211,8 @@ the reopen triggers in §5.
 
 - `MIRVM_JIT_STATS=1` gives 12-bucket atomic helper-frequency counters dumped at exit. All timings are
   JIT-on wall clock.
-- fib(32): 61–80ms against the 80ms hard gate, with all buckets empty — direct proof of zero context
-  sites in a numeric kernel.
+- Empty helper buckets do not establish zero context reads: inline stack checks read the floor
+  without calling a helper. Current fib timings belong to [current-status.md](../current-status.md).
 - rayon (corpus entry): cold 506ms, hot 189ms, with `tls_ref=1392`, `c2i=225467`, `alloc=0`. Under a
   real parallel load the allocation cell is still zero, because allocation has not entered compiled
   code.

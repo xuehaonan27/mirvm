@@ -47,7 +47,7 @@ fn entry_path(rustc_args: &[String]) -> PathBuf {
 }
 
 /// The key of one program's IR, which is what its heat order is filed under.
-fn key_of(rustc_args: &[String]) -> crate::store::entry::Key {
+pub(super) fn key_of(rustc_args: &[String]) -> crate::store::entry::Key {
     let mut key = crate::store::entry::Key::new();
     for arg in rustc_args {
         key.part(arg);
@@ -85,7 +85,7 @@ fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>
 pub fn lookup(
     rustc_args: &[String],
     stack: &crate::image::ImageStack,
-) -> Option<(ir::Module, Instance)> {
+) -> Option<(ir::Module, Instance, InputManifest)> {
     if disabled() {
         return None;
     }
@@ -132,7 +132,7 @@ pub fn lookup(
     if !crate::store::entry::native_libs_present(&f.module) {
         return None;
     }
-    Some((f.module, instance))
+    Some((f.module, instance, header.inputs))
 }
 
 /// Mark the fragments and frozen chunks one L2 entry names, for collection. The entry is
@@ -171,21 +171,21 @@ fn lowering_fp(stack: &crate::image::ImageStack) -> (bool, bool, bool) {
 }
 
 /// Cold-path store (clean state right after lower finishes and before guest runs). Returns whether
-/// the write actually happened.
+/// the input identity used by the published entry.
 pub fn store(
     tcx: TyCtxt<'_>,
     rustc_args: &[String],
     module: &mut ir::Module,
     instance: &Instance,
     stack: &crate::image::ImageStack,
-) -> bool {
+) -> Option<InputManifest> {
     if disabled() {
-        return false;
+        return None;
     }
     let base_key = stack.key();
     let below = stack.below();
     if crate::vm::verify::module_below(module, instance, below).is_err() {
-        return false;
+        return None;
     }
     // The frozen area must be at a fixed base (a concurrent preempt or an ASLR conflict leaves
     // embedded addresses cross-process invalid); a delta may sit at any fixed base, since the file
@@ -194,18 +194,15 @@ pub fn store(
     // through GOT slots since P2 (decision-history §7.5c): the GOT table travels with the snapshot
     // and is refilled with this process's real values at startup, so it is not a cache blocker.
     if !crate::store::entry::snapshot_is_publishable(module, instance, None) {
-        return false;
+        return None;
     }
     let Some(inputs) = InputManifest::collect(tcx) else {
-        return false; // some input could not be stamped (missing/unusual) — prefer not to cache
+        return None; // some input could not be stamped (missing/unusual) — prefer not to cache
     };
-    let Some(frozen) = module
+    let frozen = module
         .frozen
         .as_ref()
-        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))
-    else {
-        return false;
-    };
+        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))?;
 
     // The bodies move into the fragment store — which is what makes this entry incremental across an
     // edit, and what lets two programs share a body they both have — and the manifest keeps the rest.
@@ -220,7 +217,7 @@ pub fn store(
             Ok((records, tables))
         });
     let Ok((records, tables)) = projected else {
-        return false;
+        return None;
     };
     let fp = lowering_fp(stack);
     // A program's frozen region is the part of it that most edits leave alone and every edit
@@ -253,7 +250,7 @@ pub fn store(
         taken.put_back(module);
     }
     let Ok(manifest_bytes) = encoded else {
-        return false;
+        return None;
     };
     let header = Header {
         build_id: crate::options::build::BUILD_ID.to_string(),
@@ -262,7 +259,7 @@ pub fn store(
         base_key: base_key.map(str::to_owned),
     };
     let Ok(mut buf) = postcard::to_stdvec(&header) else {
-        return false;
+        return None;
     };
     buf.extend(manifest_bytes);
 
@@ -273,10 +270,10 @@ pub fn store(
     let chunks_store = crate::store::frozen::System::open();
     let _chunk_publishing = chunks_store.publish_lock();
     let Ok(chunk_published) = chunks_store.publish(chunks) else {
-        return false;
+        return None;
     };
     if session.publish().is_err() {
-        return false;
+        return None;
     }
     if crate::options::a2_debug() {
         // What the entry stores beside its fragments: the frozen region, as the chunks it is cut into,
@@ -292,19 +289,17 @@ pub fn store(
     }
     // Atomic publish: a reader sees either the previous entry or this one, never a half-written file.
     let path = entry_path(rustc_args);
-    let Some(dir) = path.parent() else {
-        return false;
-    };
+    let dir = path.parent()?;
     if std::fs::create_dir_all(dir).is_err() {
-        return false;
+        return None;
     }
     if crate::store::publish_bytes(&path, &buf).is_err() {
-        return false;
+        return None;
     }
     // The entry is written: put this module's own ids back, so the session keeps running the module it
     // just wrote.
     let _ = tables.restore(module, &unit, &symbols);
-    true
+    Some(header.inputs)
 }
 
 #[cfg(test)]

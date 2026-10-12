@@ -80,6 +80,8 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) simd_stmt: ClifFuncId,
     pub(super) simd_rv: ClifFuncId,
     pub(super) poll_signals: ClifFuncId,
+    pub(super) stack_guard: ClifFuncId,
+    pub(super) stack_overflow: ClifFuncId,
     /// Trace-domain syscall site helper; its first argument is the recorder pinned
     /// in a register.
     pub(super) host_syscall_trace: ClifFuncId,
@@ -256,11 +258,8 @@ impl Translator<'_, '_> {
             .collect();
 
         self.b.switch_to_block(entry);
-        // Define every SSA slot variable to 0 so the generated code is
-        // deterministic. The interpreter does not zero its frame, but valid MIR has
-        // no read-before-write path.
-        // Frame memory is zeroed for the same reason: a JIT-on/off differential must
-        // be deterministic for any MIR shape.
+        // Give SSA construction a definition on every predecessor. Valid MIR initializes every
+        // value it reads; frame memory, like the interpreter's operand region, stays uninitialized.
         let mut offs: Vec<u32> = Vec::new();
         collect_ssa_offs(body, &self.frame_offs, &mut offs);
         let zero = self.b.ins().iconst(types::I64, 0);
@@ -282,11 +281,6 @@ impl Translator<'_, '_> {
                 self.b.def_var(v, base);
                 self.frame_base_var = Some(v);
             }
-            let fref = self.module.declare_func_in_func(self.memset, self.b.func);
-            let dst = self.frame_addr(0);
-            let c0 = self.b.ins().iconst(types::I64, 0);
-            let n = self.b.ins().iconst(types::I64, i64::from(body.frame_size));
-            self.b.ins().call(fref, &[dst, c0, n]);
         }
         // Resume is the tail of a cleanup chain and is reached through the chain's
         // normal edges, so its block may precede its pad. Declaring exception_var at
@@ -333,9 +327,7 @@ impl Translator<'_, '_> {
                     // An in-frame offset must be in frame memory; analyze_frame's ABI
                     // flattening forces it.
                     let dst = self.addr_of_local(*off);
-                    let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
-                    let n = self.b.ins().iconst(types::I64, i64::from(*size));
-                    self.b.ins().call(fref, &[dst, params[pi], n]);
+                    self.copy_bytes(dst, params[pi], u64::from(*size));
                     pi += 1;
                 }
             }

@@ -33,201 +33,37 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Open defects
 
-- **E40** `OPEN`: `fib32`'s 80ms ceiling is unreachable, and has been: the best of three runs is about
-  8.7s on the Linux verify host, against 9.1s in the round-7 full gate. The `--vm-call fib(32)` path
-  raises one compilation request per function, and the baseline/optimized tier policy with heat-order
-  pre-linking now exists (`src/vm/jit/state/mod.rs`, `src/vm/jit/compiler/mod.rs`), so the open question
-  is which tier `fib` is built at and where the interpreted calls come from. The ceiling is the right
-  number — 80ms is what compiled recursion costs — so this closes with a measurement of the interpreted
-  calls, never by raising it. The same question is what makes the JIT probes expensive: 30000
-  iterations of `jit_builtin_probe` cost 129s on that host with 525 functions compiled and every
-  publish accounted for, against 140s with `MIRVM_JIT=off`, and the cost is linear in the iteration
-  count. Its counters at 3000 iterations (`MIRVM_JIT_STATS=1`) read `c2i=3146740 alloc=42930
-  call_terminate=974353 tls_ref=3503 call_indirect=13524 call_builtin=16070`, so the time is not in the
-  compiled bodies. The corpus drivers put the same fact on real workloads and against a native
-  reference: the pinned toolchain builds these four programs as ordinary binaries (`-O3`, byte-identical
-  stdout) in 34 ms (`flate2`), 35 ms (`brotli`), 10 ms (`tiny_skia`) and 6 ms (`rayon`), where mirvm
-  spends 290 s, 317 s, 273 s and 22 s through their cases — 3 700× to 27 000×. The cost is therefore
-  what one guest operation costs here, not the work the program asks for. On `rayon` the JIT does not
-  pay for itself either: `MIRVM_JIT=off` takes 10.6–11.7 s; JIT on with its artifact cache cold 22.7 s,
-  compiling 594 functions (`tier_baseline=594 tier_optimized=0`); with that cache warm 11.9–12.6 s
-  (`cache_hits=594`). Its counters read `i=3260890 call_indirect=129729 call_terminate=232368
-  tls_ref=130338` — about 3.5 µs per counted event, so the campaign's first question is what one
-  c2i/terminate crossing costs. The campaign's own numbers, all as retired user instructions with the
-  JIT off (deterministic to five digits; the JIT-on count includes compilation work and moves 30% run
-  to run): the safe point's per-block syscall was 87.8% of a profile, and removing it took the drivers
-  from 230-258 s to 10.6 s (`flate2`), 236-245 s to 8.7 s (`brotli`) and 195-213 s to 7.7 s
-  (`tiny_skia`), with `fib32` 8.7 s to 2.6 s; selective `#[inline]` on the small operand helpers then
-  took the interpreter's work down another 11-13% (`flate2` 417.4 G to 364.8 G, `brotli` 416.4 G to
-  367.5 G, `tiny_skia` 347.0 G to 306.9 G, `rayon` 46.0 G to 41.0 G). Two levers that look obvious are
-  dead by the same meter: the guest's MIR level is already 1 (`-Zmir-opt-level=1` is a no-op; level 2
-  buys 2.5% for a MIR shape the differential's authority does not compile), and `lto = "thin"` changes
-  no work while costing 5-13% of wall time, with the guest-panic canaries still green. So more inlining
-  is not the lever; selective inlining is. Three more steps landed on the same meter: a guest call's
-  argument slots come from the operand region instead of a `Vec` (one malloc and free per call;
-  -7.2%/-7.4%/-9.8% on the three drivers, and the per-guest-call cost on the fib series 1505 -> 1369
-  instructions), and the thread's registry is cached in `#[thread_local]` storage instead of a
-  `pthread_getspecific` plus `OnceLock` per compiled-code safe point and per guest call (-27% and -26%
-  wall time on flate2 and tiny_skia with the shipped configuration). The largest single win is not in
-  the engine at all: the guest's MIR. The engine pays per *block*, and rustc's debug default leaves MIR
-  at level 1 with almost nothing inlined, so a hot loop is many tiny blocks; every recipe whose MIR the
-  engine executes now compiles at `-Zmir-opt-level=2` (C10 records why the semantics-carrying profile
-  flags stay pinned while this one is mirvm's own). Paired, best of three, stdout byte-identical:
-  flate2 7910 -> 4981 ms, brotli 9135 -> 6506 ms, tiny_skia 8038 -> 5603 ms, rayon 1099 -> 861 ms. The
-  meters now read: `flate2` 5.33 s, `brotli` 5.43 s, `tiny_skia` 4.92 s and `rayon` 0.96 s cold through
-  the driver (from 230-258 s, 236-245 s, 195-213 s and 19-28 s), `fib32` 443 ms in its case (from
-  8.7 s, still RED against the 80 ms ceiling), against native builds of the same programs at 34 ms,
-  35 ms, 10 ms and 6 ms -- a gap of ~150x to ~500x where the campaign started at 3 700x to 27 000x. Two more answers from this campaign
-  narrow where that time is: the tier is not a lever (a script run writes no heat order, so every
-  corpus run compiles baseline-tier code -- cranelift `opt_level="none"` -- and forcing every request
-  to the optimized tier changes the engine time by nothing measurable, flate2 4711 -> 5022 ms and
-  tiny_skia 4342 -> 4551 ms), the compile policy is the biggest lever the campaign has found after the
-  safe point, and it had to stop being a single call count to take it. A lower count is a win for three
-  drivers and a loss for rayon, whether the count is 8, 1, or "loopy bodies after their second call":
-  measured wall, best of five, alternating in one session, the second-call rule moved flate2 4118 -> 3197
-  ms, brotli 5994 -> 3554 ms and tiny_skia 4423 -> 3813 ms while rayon went 1489 -> 1612 ms, because
-  rayon's sort is thousands of single-shot small loop bodies and compiling them costs more than
-  interpreting them. What separates the two is not the call count but the work: a body whose loop the
-  interpreter runs for tens of thousands of iterations is worth compiling however rarely it is called.
-  The interpreter now reports its back edges to `JitState` in batches of 256 and crossing 65536
-  interpreted iterations raises the same request the call threshold raises (asked once, since a request
-  the worker already answered is a no-op). That keeps the three wins and leaves rayon where it was:
-  flate2 4433 -> 3453 ms, brotli 4059 -> 3630 ms, tiny_skia 4669 -> 3788 ms, rayon 1466 -> 1505 ms, with
-  `flate2`, `brotli`, `tiny_skia`, `rayon`, `jit-stats`, `fib32-jit-cache`, `recursion-stack-overflow`,
-  `signal`, `tsan` and `quality` green and the library suite at 468/0/1. The default-configuration
-  `fib32` case is where the rule shows most: 3576 -> 890 ms in one session (still RED against its 80 ms
-  ceiling), since the loop it spends its time in is a body called once and interpreted for the whole run,
-  while the all-compiled reading is unchanged (232 -> 231 ms) and the deterministic interpreter meter
-  (JIT off) moves by less than 1% (flate2 309.49 G -> 307.10 G, tiny_skia 228.55 G -> 227.70 G).
-  Five measured refutations stand between that point and the compiled call path, and each is worth
-  recording so it is not retried. Asking the iteration signal for the *optimized* tier is mixed, not a
-  win: brotli and tiny_skia improve (-10%/-6% of user instructions) while flate2 loses 5% and rayon more,
-  because the optimized build costs more to make and the function it makes better is often executed too
-  few times to pay for it. The program's entry function cannot be reached by any threshold -- the
-  interpreter is inside the body it is already executing, so a count of calls or of iterations only ever
-  compiles it for a call that never comes -- but compiling it eagerly is *worse*, not better: flate2's
-  user instructions rise from 30.5 G to 31.9 G (+4%), so the interpreter's per-block dispatch is
-  competitive for that body while a compiled entry pays its guard and its safe point on every call, and
-  the `@entry` marking came back out. Asking for every function at the optimized tier is worth 7-9% of
-  wall time (flate2 3835 -> 3508 ms, brotli 4348 -> 4035 ms) but breaks `fib32-jit-cache`, whose cold leg
-  requires baseline build. A tail call from the guarded wrapper into the fast body -- one call and one
-  frame less per compiled call -- broke `jit-stats`, `fib32-jit-cache`, `recursion-stack-overflow` and
-  `quality` and inflated user instructions tenfold (32.7 G to 319 G): the wrapper's frame is not free to
-  disappear while its published entry and CFA program are what the link and the unwinder depend on. And
-  polling the *return* only for bodies that enter other code is worth -7% to -10% of flate2's user
-  instructions (32.7 G to 29.4-30.3 G) but seven signal embed tests pin every body's return as a safe
-  point (`blocked_host_raise_runs_once_at_the_target_pthreads_next_safe_point` and its six siblings), so
-  it is a contract change rather than an optimization. Those readings are user instructions with the JIT
-  on and each binary's packs warmed first, which is comparable only while the compiled set is unchanged;
-  where a change moves the set (the tier experiments) the wall time is the reading that counts, and the
-  two disagreed exactly there -- which is why the tier question is recorded as mixed rather than won.
-  The cheapest form of the code-quality lever did land: the *baseline* tier now builds at cranelift's
-  `speed_and_size` instead of `none`, which is not a tier-policy change (the name a run reports is
-  unchanged, so `fib32-jit-cache`'s cold leg is still all-baseline) but a change in what the tier a
-  program mostly runs is worth. Warm and paired with warm packs: user instructions flate2 33.03/32.79 G
-  -> 29.78/28.24 G, brotli 42.02/41.88 G -> 37.04/37.37 G, tiny_skia 33.98/33.58 G -> 31.49/32.03 G,
-  and the flate2 driver cases 3777-5346 ms -> 3304-3740 ms (best 3777 -> 3304). Rayon's instruction
-  count rises because its compilation runs on the worker thread while its wall time does not move
-  (1575 -> 1465 ms in one session, flat in another), and with only the JIT cache dropped the cold
-  readings did not regress (flate2 3701-7779 -> 3529-6096 ms, rayon 1586-1690 -> 1520-1535 ms).
-  A full re-profile through the new `make profile` shows where each workload's time now sits, one warm
-  run each: flate2 56% compiled guest bodies, 9.9% the compiled entry's stack guard, 6.7% memory moves,
-  5.7% image load and verify, 5.1% interpreter and 3.7% guest call dispatch; tiny_skia 24% compiled
-  bodies against 11.5% stack guard; brotli 28% against 8.2% (its own run paid a 39% guest build,
-  because a rebuilt mirvm invalidates the dependency cache it reads); rayon 36.5% guest call dispatch
-  and 19.1% interpreter against 5.8% compiled bodies, so its parallel sort still runs mostly
-  interpreted; and `fib(32)` 39.8% image load and verify against 18.9% compiled bodies, so that case's
-  distance to its ceiling is startup, not the recursion. The profile re-ranks what is left: the
-  compiled entry's stack guard for the three long drivers, what keeps rayon's functions out of the
-  compiled set, and startup (load and verify) for `fib32`.
-  Rayon's share was then diagnosed rather than guessed. A per-function dispatch dump at exit shows what
-  the counters mean: they count the calls a function answers *before* its entry is published, so a
-  function reading 326k dispatches with a live slot was published late, not never -- and the run's real
-  cost is that publication latency. One rayon run receives 192 compilation requests, publishes 307
-  entries (304 of them prelinked) in 1.6 s and leaves the rest of its hot set interpreting; raising the
-  threshold to 10000 cuts requests to 138 and changes nothing (1576 ms against 1622 ms), lowering it to 1
-  raises them to 582 and changes nothing either (1693 ms). What is left there is the compile service's
-  *throughput*, not its policy: one worker thread compiles ~200 functions during a run that lasts a
-  second and a half, and every call made before a callee's publication pays the interpreter path. That
-  is a parallel or cheaper compiler question, not a threshold one.
-  The compiled entry's stack guard was then attacked with the design's own answer -- the plain domain
-  pinning the current thread's `Ctx` in the register Cranelift reserves (`enable_pinned_reg`, a
-  `set_pinned_reg` in the packed entry, and the floor read with a register load instead of a TLS
-  lookup) -- and it measured as the campaign's largest engine-side win: warm and paired, user
-  instructions flate2 30.58/30.16 G -> 20.24/19.84 G (-34%), brotli 37.04/36.69 G -> 26.92/27.02 G
-  (-27%), tiny_skia 30.84/30.68 G -> 22.06/21.79 G (-29%), and wall best-of-five flate2 3248 -> 3013 ms,
-  brotli 3796 -> 3242 ms, tiny_skia 4009 -> 3554 ms, rayon flat (1511 -> 1516 ms), with the guard's own
-  profile share gone (11.74% -> not present) and the JIT-cold reading better (3632 -> 3317 ms). It also
-  broke two things the suite caught, and both are traps for the next attempt rather than incidental
-  bugs. First, a packed entry's signature is per domain: the trace trampoline calls the trace packed
-  entry as `(args, ret)`, so sharing the plain domain's new `(ctx, args, ret)` shape there broke the
-  capture path (`capture_session_records_automatic_host_syscall_rewrite`). Second, `enable_pinned_reg`
-  makes Cranelift treat the register as *not* callee-saved, so a Rust-to-compiled boundary that pins a
-  value and returns corrupts its Rust caller: the packed entry must save the register, pin the context
-  and restore the old value -- which is exactly what the trace trampoline does -- and without that the
-  TSD-at-thread-exit case hung (`final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback`).
-  With both fixed the Linux side is green (20 targeted cases pass, `quality` and `tsan` included) but
-  the local macOS suite still hangs in the panic/signal tests, and the *unwinding* path is why: a guest
-  panic leaves the entry without running its epilogue. A `try_call` pad that restores the register and
-  resumes the exception -- the trace trampoline's shape -- did not fix macOS either (it turned the
-  hang into `drop of the panic payload panicked`), and on Linux the pad *broke* cases the plain call
-  had passed (`flate2`, `brotli`, `tiny_skia`, `recursion-stack-overflow`, `fib32-jit-cache`,
-  `jit_abi_probe`, `jit_unwind_probe`, `quality`), so it came back out. The step landed as a
-  **pair-gated** switch instead: `os_arch::PLAIN_CODE_PINS_CTX` is true for Linux x86_64, whose
-  emitted CFI and unwinder carry a pinned `Ctx` across compiled frames, and false for macOS aarch64,
-  whose Mach-O loader half is still an open item, so there the packed entry keeps its `(args, ret)`
-  shape and the guarded entry keeps asking the helper. On Linux the win is the same with no pad:
-  instructions flate2 30.20 G -> 22.26 G (-26%), brotli 40.89 G -> 30.77 G (-25%), tiny_skia 30.09 G
-  -> 23.82 G (-21%), wall best-of-five flate2 3594 -> 3152 ms and brotli 3938 -> 3483 ms (-12% each),
-  tiny_skia 4091 -> 4021 ms, rayon 1717 -> 1783 ms, the guard's profile share 17.74% gone, and the
-  JIT-cold reading 6850 -> 4105 ms. What the revert proved is worth keeping: a frame unwound through
-  is destroyed rather than returned into and the frames above it are restored by the unwinder, so the
-  boundary only has to restore the register on the normal path -- which is why the pad was not only
-  unnecessary but harmful.
-  The interpreter's arithmetic mirrors were the one place the campaign's earlier selective-`#[inline]`
-  pass had not reached (`sext` and the memory helpers had it; `int_bin`, `int_cmp`, `int_ovf`,
-  `int_saturating`, `bit_un`, `host_ord` and the f128 pair did not), and marking them changes the
-  deterministic interpreter meter by -0.17% (flate2 307.22 G -> 306.69 G) and -0.08% (tiny_skia
-  227.76 G -> 227.57 G): real, but two orders of magnitude below the pass that reached the operand
-  helpers, which says compiler-unit inlining had already covered most of these call sites.
-  Earlier readings of the same question are worth recording because they misled: with warm packs,
-  compiling every function at its first call took flate2's user instructions from 33.51 G to 28.95 G
-  (-13.6%) where the same experiment read 5% while the packs still had to be filled; with only the JIT
-  cache dropped, threshold 8 read 4.02-4.15 s against the default's 4.22-6.28 s; and the four-driver
-  instruction readings are entangled with what the store happens to hold (the same default configuration
-  read 33.51 G and 43.04 G in two sessions). `MIRVM_JIT_STATS`' `cache_prelinked`/`cache_misses` say what
-  a run did. The compiled form's per-entry
-  calls are where the rest sat: the perf map read a warm flate2 run as 27.4% compiled bodies, 18.0% the
-  interpreter, 12.6% the compiled-code safe point, 8.3% the guest build, 7.3% the compiled entry's
-  stack guard, 3.9% `call_guest`, 3.9% memory moves and the rest below 2% before either call was
-  attacked. The safe point was not doing anything expensive -- about four cycles a call -- so what cost
-  was the frequency: it ran at every block entry, **878 million times** in that flate2 run (904 million
-  for tiny_skia), 24.5% of the engine's self time. It now runs only where the contract puts it, at a loop
-  back edge and at a function return (`modeb-mirvmar-design.md` §2.7), which is **261.7 million** calls
-  in the same run (263.8 million for tiny_skia, 7.0 million against 38.8 million for `fib(32)`) -- the
-  compiled form and the interpreter poll at exactly the same dynamic points, so the two counts agree to
-  the call. That is -2.9%/-3.0% of the interpreter's retired instructions (flate2 318.97 G to 309.82 G,
-  tiny_skia 235.67 G to 228.65 G), -16% to -22% of the drivers' wall time (flate2 6.30 s to 4.89 s,
-  tiny_skia 6.31 s to 5.30 s, paired best of six with the deps, IR and JIT caches dropped before each
-  block) and -31% on `fib(32)` with every function compiled (245 ms to 168 ms), with stdout
-  byte-identical throughout. The call itself is gone too: a compiled safe point loads an Engine-owned
-  delivery word that a publication raises and the drain lowers (`modeb-mirvmar-design.md` §2.7 has the
-  ordering that keeps the ask exact), which took `mirvm_poll_signals` out of the profile entirely
-  (below 0.05%, from 12.6%) and cut a whole run's user instructions by 12% on flate2 (37.44 G to
-  32.97 G), 18% on tiny_skia (43.94 G to 35.92 G) and 11.5% on `fib(32)` with every function compiled
-  (1.227 G to 1.086 G; its cycles 421 M to 381 M) -- wall clock cannot resolve that on a host whose own
-  load varies by half. The word has to be one per Engine rather than one per thread, and a slow path
-  that finds any delivery still pending anywhere in the Engine -- another pthread's cell included --
-  must raise it again: a thread that lowers a word whose event sits in another pthread's cell is
-  exactly the lost-wakeup case a boolean cannot avoid. The largest per-entry overhead left is the
-  compiled entry's stack guard, 12.5% of the shorter run: its limit is a per-thread datum, so the same
-  trick does not reach it while compiled code names nothing per thread. The frontend paid a stall that
-  was not work either: a run whose cached index copies were present but whose
-  registry was unreachable spent the full 60 s download timeout on one revalidation before serving
-  them, 66-75 s per flate2 run against the 5 s of work in it. A revalidation now has a budget of its
-  own -- three seconds, because a cached copy always answers (`d15-cargoless-design.md` C14) -- and the
-  same runs take 9-18 s, with the warning that says the copies may be older than the registry
-  unchanged.
+- **E40** `OPEN`: guest execution remains substantially slower than native. The focused `fib32`
+  startup case meets its 80 ms ceiling; uncached preparation and the corpus execution gap remain.
+  Current measurements belong to [current-status.md](current-status.md). The remaining work is
+  profile-driven:
+  - Small-function calls remain the first execution priority. Measure selective inlining, PLT
+    dispatch, frame setup and compiled/interpreted transitions on real call-heavy workloads. The
+    `flate2` profile retains tiny arithmetic/comparison bodies and c2i/dispatch helpers. Account for
+    code growth as well as latency; preserve pre-frame stack checking, every return safepoint,
+    unwind metadata, plain/trace isolation and persisted JIT reload behavior. Use alternating
+    whole-run and engine measurements, including a non-recursive workload.
+  - Pack discovery still enumerates each family directory and decodes its catalogue. This work grows
+    with the store even though record reads open only selected packs. Network-backed stores retain
+    variable I/O latency on a bound-image miss; bound discovery to requested content without weakening recovery.
+  - Frontend/base preparation is owned by D7; it may change the compiler/runtime boundary rather
+    than only tuning the current rustc invocation.
+  - Bound archives still include thousands of std functions that a small request does not execute.
+    Investigate a smaller reachable image while preserving indirect-call targets, immutable ownership
+    and complete validation. Reusable packages retain the full file allocation alongside decoded
+    metadata/native sections; large native payloads can duplicate resident bytes.
+  - Bound execution images avoid stack reconstruction and managed sysroots avoid full payload
+    hashing. Their remaining costs are archive I/O/validation, instance materialization and process
+    setup; external inputs still require full content hashing. Runtime-only hits also load compiler
+    libraries: evaluate that loading boundary separately from archive pruning. The timing ledger includes base
+    preparation inside `frontend` and excludes work before driver entry, so use whole-process wall
+    measurements alongside its phases.
+  - Rayon's hot functions can execute many interpreted calls before the single compiler worker
+    publishes their entries. Compile throughput and time to publication remain open; lowering the
+    call threshold alone does not establish an improvement.
+  - JIT policy measurements must compare warmed, alternating release binaries and check guest
+    output. Compilation changes the retired-instruction count, so that count alone does not prove
+    faster execution. Keep the existing ceilings and distinguish engine time from whole-run time.
 
 ## Approved, awaiting construction
 
@@ -369,28 +205,28 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 - **D2** `UNSCHEDULED`: release form and naming — miri-style first, JDK-style self-contained tarball
   later. Kit naming candidates are MDK/mirvm toolkit; MRsDK is rejected. The design prerequisite (the
   mode B `.mirvm` package and `mirvm pack`) has landed, so only the form/naming ruling remains.
-- **D3** `UNSCHEDULED`: per-function lazy loading works, and the package is loaded from one immutable
-  copied snapshot (`src/pack/read.rs`), so snapshot ownership and the no-verify-then-swap requirement
-  are met. What remains is archive-direct verification: verifier and executor walking the same
-  bounds-checked immutable bytes, with a function body restored from the already-verified
-  representation on first use; until then loading decodes every function into a temporary `FuncBody`
-  for verification. Do not start D4 before this closes.
-- **D4** `UNSCHEDULED`: public format freeze. `fmt_ver` is 4 and merely separates generations
-  (`src/pack/format.rs`); close D3's archive verification contract first, then review compatibility
-  windows, capability bits, migration tooling and corruption/signature policy. The version reading 4 is
-  not a freeze.
+- **D4** `UNSCHEDULED`: public format freeze. `fmt_ver` is 5 and merely separates generations
+  (`src/pack/format.rs`). Review compatibility windows, capability bits, migration tooling and
+  corruption/signature policy before making an external compatibility promise.
 - **D6** `UNSCHEDULED`: the residual cross-project sharing work. Machine-wide sharing of lowered
   products is delivered — `cache/frags`, `cache/frozen` and `cache/units`, with units keyed by a
   path-independent `unit_key` and a stack `[std base, unit…]` serving two programs — including
   multi-layer stack merging. What remains is tainted-layer merging: `Purity::Tainted` instances still
   land in the per-program delta (`src/lower/purity.rs`), and full cross-project sharing of the L1 rlib
   target dir is still not delivered. Schedule on real need.
-- **D7** `UNSCHEDULED`: frontend-phase cost has no lever owner beyond the rustc thread pool. eco ~143ms
-  and ripgrep ~730–800ms are still unowned. The `-Zthreads` parallel frontend (axis A) is implemented
-  and default-on (`src/options.rs`, injected at the compiler-session boundary), so the "not restarted
-  since V3" framing is obsolete; V5's own parallel lowering (axes B/C, researched in
-  [history/parallel-frontend-research.md](history/parallel-frontend-research.md)) is still unbuilt.
-  Awaiting a scheduling ruling.
+- **D7** `OPEN`: change frontend/base preparation at the boundaries identified in
+  [frontend-boundary.md](designs/frontend-boundary.md):
+  - Compare a prepared compatible base with a single-session miss path that publishes both a
+    cacheable program and reusable std content. Include another program, an edit and a warm rerun;
+    evaluate immutable base loading instead of reconstructing all bodies. A no-base timing without
+    equivalent publication is not an accepted optimization.
+  - Prove a real package/bound-image runner can avoid loading compiler libraries. Measure cache hits
+    and compiler-worker misses, including transfer and diagnostics, before selecting a process split.
+  - Record the reasons functions enter the guest closure and evaluate smaller/lazy products while
+    retaining runtime roots, indirect targets, pointer identity and deterministic ownership.
+  - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a
+    generic semantic IR, dedicated frontend or source interpreter. Preserve the selected Rust,
+    diagnostics, build-script/proc-macro, layout/ABI, std and input-invalidation contracts.
 - **D8** `UNSCHEDULED`: the real-project correctness probes still have no timing gate. Only `load`,
   `rayon-gate` and `fib32` carry a ceiling in `tests/manifest`, plus the `resources` metering case; no
   real-project probe has one. Add ceilings on real-workload demand.
@@ -427,11 +263,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   `paths`, and `HOST_RUSTFLAGS` (`src/cargoless/rustflags.rs`). Cargo is never removed — it stays the
   explicit user fallback, the behavior judge and the continuous differential path, while cargoless
   stays the default.
-- **D16** `APPROVED`: the unified performance campaign, now the whole execution path rather than the
-  syscall hot path first. The meters are the corpus drivers and `fib32` against native builds of the
-  same programs with the pinned toolchain, and E40 carries the numbers: 3 700× to 27 000× on the
-  drivers, with the JIT currently a net loss. The order is set by measurement rather than by the old
-  mainline: T11's profile command is the instrument and lands first, then the heaviest self-time in the
+- **D16** `APPROVED`: the unified performance campaign covers the whole execution path. The meters
+  are the corpus drivers and `fib32` against native builds of the same programs with the pinned
+  toolchain; [current-status.md](current-status.md) owns the readings and E40 the unresolved
+  bottlenecks. The profile command is the instrument: the heaviest self-time in the
   interpreter and in what one guest call costs (the c2i/terminate crossing, TLS, the packed-entry
   boundary, frame setup and teardown) is attacked, and the items already on the list — T8's
   HostSyscall direct hot path, T9's stateless raw-syscall sites, T12's pool and writer parameters,

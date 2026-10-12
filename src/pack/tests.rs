@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::format::{
     FMT_VER, MAGIC, SECTION_ENTRY_LEN, TAG_FUNCS, TAG_META, TAG_MODULE, TAG_NATIVELIBS, TAG_RELOC,
-    TAG_STAMPS, WHOLE_HASH_LEN, build_container, hash128, parse_container,
+    TAG_STAMPS, WHOLE_HASH_LEN, build_container, container_hash, hash128, parse_container,
 };
-use super::funcs::{build_function_section, parse_function_section};
-use super::meta::{Meta, ModuleMetaRef, Reloc, postcard_bytes};
+use super::funcs::build_function_section;
+use super::meta::{Meta, ModuleMeta, ModuleMetaRef, Reloc, postcard_bytes};
 use super::read::materialize_native_blob_at;
 
 use crate::diag::Diagnostic as _;
@@ -30,7 +30,7 @@ fn test_body(name: &str) -> crate::vm::ir::FuncBody {
 
 fn replace_whole_hash(raw: &mut Vec<u8>) {
     raw.truncate(raw.len() - WHOLE_HASH_LEN);
-    raw.extend_from_slice(&hash128(raw).to_le_bytes());
+    raw.extend_from_slice(&container_hash(raw).to_le_bytes());
 }
 
 fn header_with_count(count: u32) -> Vec<u8> {
@@ -41,7 +41,7 @@ fn header_with_count(count: u32) -> Vec<u8> {
     body.extend_from_slice(&(bid.len() as u32).to_le_bytes());
     body.extend_from_slice(bid);
     body.extend_from_slice(&count.to_le_bytes());
-    body.extend_from_slice(&hash128(&body).to_le_bytes());
+    body.extend_from_slice(&container_hash(&body).to_le_bytes());
     body
 }
 
@@ -129,22 +129,31 @@ fn module_section_preserves_guest_panic_cleanup_plan() {
 }
 
 #[test]
-fn function_section_indexes_independent_verified_blobs() {
+fn function_archive_indexes_checked_bodies_without_decoding() {
     let funcs = crate::vm::ir::FuncTable::from(vec![test_body("first"), test_body("second")]);
     let section = build_function_section(&funcs).unwrap();
-    let blobs = parse_function_section(&section, 0).unwrap();
-    assert_eq!(blobs.len(), 2);
-    for (index, blob) in blobs.iter().enumerate() {
-        let body: crate::vm::ir::FuncBody =
-            postcard::from_bytes(&section[blob.start..blob.end]).unwrap();
+    let archive = crate::vm::archive::functions::Functions::load(
+        crate::vm::archive::bytes::Bytes::new(section.clone()),
+        0..section.len(),
+    )
+    .unwrap();
+    assert_eq!(archive.len(), 2);
+    for (index, body) in archive.bodies().iter().enumerate() {
         assert_eq!(&*body.name, ["first", "second"][index]);
+        assert_eq!(
+            archive.decode(index).name.as_ref(),
+            ["first", "second"][index]
+        );
     }
-
     let mut corrupt = section;
-    *corrupt.last_mut().unwrap() ^= 1;
-    let error = parse_function_section(&corrupt, 0).unwrap_err();
-    assert_eq!(error.code(), Some("pack.corrupt"));
-    assert!(error.to_string().contains("wrong hash"), "{error}");
+    *corrupt.last_mut().unwrap() = 0xff;
+    assert!(
+        crate::vm::archive::functions::Functions::load(
+            crate::vm::archive::bytes::Bytes::new(corrupt.clone()),
+            0..corrupt.len(),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -154,7 +163,7 @@ fn parser_rejects_truncated_build_id_without_panicking() {
     body.extend_from_slice(&FMT_VER.to_le_bytes());
     body.extend_from_slice(&u32::MAX.to_le_bytes());
     body.extend_from_slice(&0u32.to_le_bytes());
-    body.extend_from_slice(&hash128(&body).to_le_bytes());
+    body.extend_from_slice(&container_hash(&body).to_le_bytes());
     let err = parse_container(&body).err().unwrap();
     assert_eq!(err.code(), Some("pack.corrupt"));
     assert!(err.to_string().contains("build_id"), "{err}");
@@ -483,12 +492,11 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
     // inode after load must not affect later lazy decoding or instantiation.
     std::fs::write(&path, b"replaced after Package::load").unwrap();
     std::fs::remove_file(&path).unwrap();
-    let (first_module, first_instance) = package.instantiate().unwrap();
-    let first = unsafe { crate::vm::Engine::from_artifact_unchecked(first_module, first_instance) }
-        .unwrap();
-    let (second_module, second_instance) = package.instantiate().unwrap();
+    let first =
+        unsafe { crate::vm::Engine::from_verified_unchecked(package.instantiate().unwrap()) }
+            .unwrap();
     let second =
-        unsafe { crate::vm::Engine::from_artifact_unchecked(second_module, second_instance) }
+        unsafe { crate::vm::Engine::from_verified_unchecked(package.instantiate().unwrap()) }
             .unwrap();
 
     let first_cell = first

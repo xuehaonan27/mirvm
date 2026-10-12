@@ -29,9 +29,9 @@ mod read;
 mod tests;
 mod write;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use meta::{McEntry, ModuleMeta, NativeLibEntry};
+use meta::{McEntry, NativeLibEntry};
 
 // The three free functions the CLI reaches as `crate::pack::…`, the paths its branch criteria and
 // pack step already name them by.
@@ -143,12 +143,9 @@ impl Error {
 /// A validated, immutable package image. Each `instantiate` creates independent frozen memory and
 /// machine-code images.
 pub(crate) struct LoadedPackage {
-    raw: std::sync::Arc<[u8]>,
-    module_meta: ModuleMeta,
-    function_blobs: Vec<crate::vm::ir::FuncBlob>,
+    image: crate::vm::archive::Image,
     libs: Vec<NativeLibEntry>,
     mc_entries: Vec<McEntry>,
-    heat_path: PathBuf,
 }
 
 /// A validated, immutable `.mirvm` artifact that can create multiple independent Engines.
@@ -170,12 +167,15 @@ impl Package {
     /// embedded native libraries, foreign symbol declarations, and FFI signatures agree with
     /// the host process. The caller must trust those package inputs and ABI declarations.
     pub unsafe fn instantiate(&self) -> Result<crate::vm::Engine, Error> {
-        let (mut module, mut instance) = self.loaded.instantiate()?;
-        instance.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
-        instance
-            .finalize_entry_argv(&mut module, &[])
+        let mut artifact = self.loaded.instantiate()?;
+        let addresses = crate::lower::asm::try_materialize(&artifact.module().asm_sites)?;
+        artifact
+            .set_asm_addrs(addresses)
+            .map_err(|error| Error::reject(error.to_string()))?;
+        artifact
+            .finalize_argv(&[])
             .map_err(|e| Error::reject(e.to_string()))?;
-        unsafe { crate::vm::Engine::from_artifact_unchecked(module, instance) }
+        unsafe { crate::vm::Engine::from_verified_unchecked(artifact) }
             .map_err(|e| Error::reject(e.to_string()))
     }
 }

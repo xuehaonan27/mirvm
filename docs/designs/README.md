@@ -63,15 +63,14 @@ built-in virtualization of the operations RAM defines.
 
 ### 2.1 Why the rustc front end is reused
 
-Four walls make a hand-written RAM loader impractical. The front end (trait solver, inference, macro
-hygiene) is a decade of engineering. proc-macros are compile-time native code, so a purely interpreted
-model cannot run them. Generic monomorphization crosses crates, so MIR that depends on it must be
-executable. And std itself rests on unsafe code, intrinsics and syscalls.
+The current frontend reuses rustc's trait solver, inference, macro expansion, constant evaluation and
+layout/ABI queries. This keeps guest semantics and native interoperability aligned with the pinned
+compiler while MIRVM owns execution. Host proc-macros, cross-crate generics and std are part of the
+supported-input contract, regardless of the frontend implementation.
 
-Reusing the front end buys more than saved work: **layout and ABI are bit-identical to native**,
-because they come from rustc's own layout queries. That is the correctness foundation under real
-addresses and FFI. The self-built part is deliberately concentrated in the **execution engine** — the
-part worth owning.
+The frontend and its handoff are replaceable implementation choices. Changes are judged by measured
+preparation cost and the selected compatibility contract; the compiler/runtime boundary and the
+alternatives under investigation belong to [frontend-boundary.md](frontend-boundary.md).
 
 ## 3. What the machine buys
 
@@ -207,7 +206,6 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
   quality property of mirvm rather than its identity.
 - **Not evcxr.** evcxr is a compiler shell, driving rustc and linking per cell; mirvm has its own
   execution engine.
-- **Not a rustc front-end rebuild.** The trait solver and type system are RAM's loader and are reused.
 
 ## 7. Risks and mitigations
 
@@ -253,6 +251,8 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 | [c2-rlib-symbols-design.md](c2-rlib-symbols-design.md) | Decided RFC | closing the `.a` → `.so` gap when a symbol's definition lives in a Rust rlib |
 | [modeb-mirvmar-design.md](modeb-mirvmar-design.md) | Implemented | the `.mirvm` container, `pack`/`run`, the machine-code section, multi-Engine instantiation and the embedding surface |
 | [distribution-design.md](distribution-design.md) | Decided RFC | load ingestion, cache layering, toolchain bundling and release form |
+| [frontend-boundary.md](frontend-boundary.md) | Research | semantic frontend alternatives, compiler/runtime handoff, preparation costs and bounded experiments |
+| [startup-cache-design.md](startup-cache-design.md) | In construction | managed compiler-input identity, bound execution images and immutable verification ownership |
 | [dep-sharing-design.md](dep-sharing-design.md) | Decided RFC | fine-grained reuse of lowered dependency products: per-crate image units, the content-addressed fragment store, the home rule, store collection |
 | [jit-code-cache-design.md](jit-code-cache-design.md) | Decided RFC | the persistent JIT machine-code cache: the translator's relocation choke point, relocatable per-function artifacts, load-time linking, adaptive optimization tiers |
 | [d15-cargoless-design.md](d15-cargoless-design.md) | Implemented | resolving and scheduling without cargo: manifests, versions, topology, build scripts, proc-macros |

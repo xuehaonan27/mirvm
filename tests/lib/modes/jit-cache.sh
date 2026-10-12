@@ -69,7 +69,7 @@ mode_run() {
         && abort_test "the cold run reused an entry no earlier run had written"
     [ -n "$(ls "$JIT_DIR"/*.pack 2>/dev/null)" ] \
         || abort_test "the cold run stored no entry: $(ls "$JIT_DIR" 2>/dev/null | head -3)"
-    "$MIRVM" cache status 2>/dev/null | grep -q "cache/jit" \
+    MIRVM_HOME="$HOME_DIR" "$MIRVM" cache status 2>/dev/null | grep -q "cache/jit" \
         || abort_test "cache status does not report the JIT family"
 
     run warm MIRVM_JIT_STATS=1
@@ -99,19 +99,31 @@ mode_run() {
     cmp -s "$TMP/cold.out" "$TMP/bypass.out" \
         || abort_test "the bypassed run and the stored run disagree on stdout"
 
-    # 4) honesty: what the store holds must be verified before it is used. A byte in the middle of
-    #    every pack breaks the record it lands in, so those entries are refused — the run still produces
-    #    the same output, and it says it refused something instead of linking it.
-    for pack in "$JIT_DIR"/*.pack; do
-        middle=$(( $(wc -c <"$pack") / 2 ))
-        printf '\xff' | dd of="$pack" bs=1 seek="$middle" conv=notrunc 2>/dev/null
-    done
+    # 4) honesty: flip a payload byte in every record, including both compilation tiers. A fixed
+    #    replacement byte might already be present, and an arbitrary pack offset can miss the record
+    #    used by the next run. Keep the index intact so lookup reaches the integrity check.
+    python3 - "$JIT_DIR" <<'CORRUPT'
+import pathlib, struct, sys
+
+for path in pathlib.Path(sys.argv[1]).glob("*.pack"):
+    raw = bytearray(path.read_bytes())
+    count = struct.unpack_from("<I", raw, 12)[0]
+    index = struct.unpack_from("<Q", raw, len(raw) - 20)[0]
+    for i in range(count):
+        offset, length = struct.unpack_from("<QI", raw, index + i * 76 + 64)
+        assert length > 0
+        raw[offset + 36 + length // 2] ^= 0xff
+    path.write_bytes(raw)
+CORRUPT
+    [ "$?" = 0 ] || abort_test "could not corrupt the stored records"
     run corrupt MIRVM_JIT_STATS=1
     [ "$(cat "$TMP/corrupt.code")" = 0 ] || abort_test "corrupt-store run exited $(cat "$TMP/corrupt.code")"
     cmp -s "$TMP/cold.out" "$TMP/corrupt.out" \
         || abort_test "a corrupted entry changed the guest output"
     grep -qE "cache_refused=[1-9]" "$TMP/corrupt.err" \
         || abort_test "no corrupted entry was refused: $(tail -1 "$TMP/corrupt.err")"
+    grep -q "cache_hits=0 " "$TMP/corrupt.err" \
+        || abort_test "a corrupted record was reused: $(tail -1 "$TMP/corrupt.err")"
 
     # 4b) and an empty store is a miss, not a mystery: the same output again, nothing reused.
     rm -f "$JIT_DIR"/*.pack

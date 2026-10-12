@@ -187,10 +187,21 @@ Two new `Class::Cache` families in the register:
   a trailing index (`id`, record offset, fragment length, sorted by id), named by the BLAKE3 of the
   pack's own bytes so republishing one fragment set is idempotent. A fragment averages ~131 bytes
   (measured by the probe below), which is why a pack and not one file per fragment: a filesystem
-  block each would spend roughly thirty times the data. Readers read a pack's trailing index and then
-  only the fragments they ask for, re-hashing each body against its id before the binding walk and
-  postcard decode; writers dedupe against every pack's index before appending, so a re-lowered
-  closure stores no fragment twice and a lost race stores a duplicate that the next repack folds.
+  block each would spend roughly thirty times the data. Readers discover indexes through the family's
+  catalogue and open only packs containing unresolved requested ids, re-hashing each body against its
+  id before the binding walk and postcard decode; writers dedupe against the indexes before appending,
+  so a re-lowered closure stores no fragment twice and a lost race stores a duplicate that the next
+  repack folds.
+
+Fragment, frozen-chunk and JIT packs use a rebuildable `index-v1` catalogue in each family directory.
+It carries a format tag, a payload checksum, relative filenames, file identities and parsed indexes.
+Each load reconciles filenames with the directory: new packs are indexed and removed packs disappear.
+A missing or damaged catalogue falls back to reading the pack indexes and atomically publishes a new
+catalogue. Discovery still enumerates the directory, but unchanged packs need no open or stat until
+selected. A selected pack's descriptor must match its recorded device, inode, size, mtime and ctime;
+a mismatch is a cache miss and invalidates the catalogue. Record content checks remain mandatory.
+Writers check selected pack identities before deduplication. Inventory and collection read the pack
+indexes directly, including packs no lookup selects, so the catalogue cannot decide liveness.
 
 Fragments carry no generation: they are reached only through manifests, manifests are generational,
 and collection is **mark-sweep from current-generation manifests** — refcounts are rejected as
@@ -228,9 +239,9 @@ ones and publishing those) is deferred, and the stable home rule — a placement
 the load set — is its first half. Absorb at the end is unchanged. The L2 chain grows from
 `base ⊕ aggregate` to `base ⊕ (unit_key, manifest_digest)*`, same mechanism.
 
-Decode of one function costs postcard + one binding walk (the `rebase.rs` shape: a few table lookups
-per reference). The lazy table amortizes it behind the heat order; the §2.6 baseline gates of the
-parent document are the regression fence.
+Reconstructing a sharing layer decodes postcard and binds each function's symbolic references.
+A bound execution-image hit bypasses this path; its ownership, invalidation and archive contract are
+specified in [startup-cache-design.md](startup-cache-design.md).
 
 ### 3.6 What deliberately duplicates
 
@@ -350,18 +361,9 @@ deleted and replaced, not phased out.
    `frag-sharing` run leaves 3 chunks (6 113 B) in `cache/frozen`, a warm run loads the entry and the
    closure from them and produces the same guest output, and a purge with the manifests gone empties
    the family.
-   Heat-order-driven pack layout is measured and closed. A fragment is reached by binary search plus
-   one seek, so record order buys nothing for random access, and the only reader that walks a layer in
-   heat order is the lazy decode worker of a package's function table — whose input is not paged at
-   all: `pack::read` copies the whole package into one `Arc<[u8]>` before the worker starts, so no
-   order of the walk is a page-in. Measured on a real package (`frag-sharing`: 9 583 bodies, 2 808 000 B
-   of postcard, 293 B average): the FUNCS section spans 687 pages and one page holds 14 bodies, and the
-   predicted walk decodes the whole learned order, so it touches that same page set whatever the record
-   order is. A reordering could therefore only shrink the *span* of a partial walk, by at most the
-   factor the bodies-per-page ratio bounds (14 here), over a postcard parse of bytes already in RAM.
-   The order it would be driven by also cannot key the layout: the heat file is keyed by the FUNCS section's own
-   hash (`pack::read`), so a reordered section looks up an empty key — the learned order that would
-   justify reordering is the one the reordering invalidates.
+   Fragment record order does not change indexed lookup. Bound execution images and packages own
+   their function bytes and decode bodies on demand; they do not page bodies from the shared packs.
+   Reordering those packs by a program's heat therefore does not improve their load path.
 
 ## 7. Open items
 

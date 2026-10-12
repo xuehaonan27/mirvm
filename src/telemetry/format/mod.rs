@@ -93,7 +93,7 @@ fn require_exact_len(bytes: &[u8], expected: usize, what: &str) -> Result<(), Wi
 }
 
 fn require_magic(bytes: &[u8], magic: &[u8; 8], what: &str) -> Result<(), WireError> {
-    if bytes.get(..8) != Some(magic) {
+    if bytes.get(..8) != Some(magic.as_slice()) {
         return Err(WireError::new(format!("{what} magic mismatch")));
     }
     Ok(())

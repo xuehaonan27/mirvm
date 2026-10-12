@@ -9,7 +9,7 @@ use crate::utils::bytes::{take_bytes, take_u32, take_u64, take_u128};
 /// Container magic: eight bytes, and the sniffer's whole criterion.
 pub(super) const MAGIC: &[u8; 8] = b"MIRVMAR\0";
 /// Format generation. A different value makes a package incompatible rather than corrupt.
-pub(super) const FMT_VER: u32 = 4;
+pub(super) const FMT_VER: u32 = 6;
 /// One section table entry: tag, offset, length, checksum.
 pub(super) const SECTION_ENTRY_LEN: usize = 36;
 /// The whole-file checksum trailer.
@@ -34,6 +34,29 @@ pub(super) fn hash128(data: &[u8]) -> u128 {
         b = b.wrapping_mul(0x0000_0100_0000_01b3);
     }
     ((a as u128) << 64) | b as u128
+}
+
+/// The container checksum is the first 128 BLAKE3 bits.
+/// Native library identities use hash128 independently of the container format.
+pub(super) fn container_hash(data: &[u8]) -> u128 {
+    let digest = blake3::hash(data);
+    u128::from_le_bytes(
+        digest.as_bytes()[..16]
+            .try_into()
+            .expect("sixteen digest bytes"),
+    )
+}
+
+fn check_container_hash(
+    bytes: &[u8],
+    recorded: u128,
+    label: impl Into<String>,
+) -> Result<(), Error> {
+    if container_hash(bytes) == recorded {
+        Ok(())
+    } else {
+        Err(Error::corrupt(label))
+    }
 }
 
 /// Refuse a blob whose content no longer hashes to the digest recorded for it. The label is the
@@ -95,27 +118,35 @@ pub(super) fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, Er
         .ok_or_else(|| Error::build("package size overflow"))?;
     let mut off = u64::try_from(data_start).map_err(|_| Error::build("package offset overflow"))?;
     for (tag, data) in sections {
+        if *tag == TAG_FUNCS {
+            off = off
+                .checked_next_multiple_of(rkyv::AlignedVec::ALIGNMENT as u64)
+                .ok_or_else(|| Error::build("package offset overflow"))?;
+        }
         let len =
             u64::try_from(data.len()).map_err(|_| Error::build("package section is too large"))?;
         buf.extend_from_slice(&tag.to_le_bytes());
         buf.extend_from_slice(&off.to_le_bytes());
         buf.extend_from_slice(&len.to_le_bytes());
-        buf.extend_from_slice(&hash128(data).to_le_bytes());
+        buf.extend_from_slice(&container_hash(data).to_le_bytes());
         off = off
             .checked_add(len)
             .ok_or_else(|| Error::build("package size overflow"))?;
     }
-    for (_, data) in sections {
+    for (tag, data) in sections {
+        if *tag == TAG_FUNCS {
+            buf.resize(buf.len().next_multiple_of(rkyv::AlignedVec::ALIGNMENT), 0);
+        }
         buf.extend_from_slice(data);
     }
-    let whole = hash128(&buf);
+    let whole = container_hash(&buf);
     buf.extend_from_slice(&whole.to_le_bytes());
     Ok(buf)
 }
 
 pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
     const MIN_LEN: usize = 8 + 4 + 4 + 4 + WHOLE_HASH_LEN;
-    if raw.len() < MIN_LEN || raw.get(..MAGIC.len()) != Some(MAGIC) {
+    if raw.len() < MIN_LEN || raw.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
         return Err(Error::not_a_package(
             "not .mirvm package (mismatched or truncated magic header)",
         ));
@@ -126,12 +157,6 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
         .ok_or_else(|| Error::corrupt("package is shorter than its hash trailer"))?;
     let (body, whole) = raw.split_at(body_len);
     let recorded_hash = u128::from_le_bytes(whole.try_into().expect("sixteen-byte trailer"));
-    check_hash(
-        body,
-        recorded_hash,
-        "package content hash mismatched (broken or truncated)",
-    )?;
-
     let mut rest = &body[MAGIC.len()..];
     let package_ver = take_u32(&mut rest).ok_or_else(|| Error::truncated("format version"))?;
     if package_ver != FMT_VER {
@@ -139,6 +164,11 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
             "wrong package format version (package={package_ver}, mirvm={FMT_VER})"
         )));
     }
+    check_container_hash(
+        body,
+        recorded_hash,
+        "package content hash mismatched (broken or truncated)",
+    )?;
     let bid_len =
         usize::try_from(take_u32(&mut rest).ok_or_else(|| Error::truncated("build_id length"))?)
             .map_err(|_| Error::corrupt("package build_id length does not fit this host"))?;
@@ -224,7 +254,7 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
         .map_err(|_| Error::corrupt("package section index is too large for available memory"))?;
     for (tag, start, end, expected_hash) in entries {
         let data = &body[start..end];
-        check_hash(
+        check_container_hash(
             data,
             expected_hash,
             format!("package section with tag={tag} has wrong hash value"),

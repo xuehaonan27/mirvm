@@ -21,6 +21,7 @@
 pub(crate) mod base;
 pub(crate) mod collect;
 pub(crate) mod deps;
+pub(crate) mod execution;
 pub(crate) mod manifest;
 pub(crate) mod program;
 pub(crate) mod units;

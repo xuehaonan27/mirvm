@@ -259,6 +259,144 @@ fn body(name: &str, first: Terminator) -> ir::FuncBody {
 }
 
 #[test]
+fn dereferenced_pointer_slots_stay_in_ssa_unless_their_address_escapes() {
+    let slot = |off| Slot {
+        off,
+        width: Width::W64,
+    };
+    let local = |off, steps: Vec<ir::PlaceStep>| ir::PlaceExpr {
+        base: ir::PlaceBase::Local(off),
+        steps: steps.into(),
+    };
+    for escaped in [false, true] {
+        let mut probe = body("pointer_slot", Terminator::Return);
+        probe.frame_size = 40;
+        probe.params = vec![
+            ParamAbi::Scalar(slot(0)),
+            ParamAbi::Scalar(slot(8)),
+            ParamAbi::Scalar(slot(16)),
+        ];
+        probe.ret = RetAbi::Scalar(slot(24));
+        if escaped {
+            // Change the first parameter through a pointer to its slot. Subsequent dereferences
+            // must read the updated pointer in memory, not the parameter's original SSA value.
+            probe.blocks[0].stmts.extend([
+                Stmt::Assign {
+                    dst: ScalarPlace::Slot(slot(32)),
+                    rv: ir::Rvalue::Ref(local(0, vec![])),
+                },
+                Stmt::Assign {
+                    dst: ScalarPlace::Mem {
+                        expr: local(32, vec![ir::PlaceStep::Deref]),
+                        width: Width::W64,
+                    },
+                    rv: ir::Rvalue::Use(Operand::Slot(slot(8))),
+                },
+            ]);
+        }
+        probe.blocks[0].stmts.push(Stmt::Assign {
+            dst: ScalarPlace::Slot(slot(24)),
+            rv: ir::Rvalue::Use(Operand::Mem {
+                expr: local(
+                    0,
+                    vec![
+                        ir::PlaceStep::Deref,
+                        ir::PlaceStep::Deref,
+                        ir::PlaceStep::IndexScaled {
+                            idx: slot(16),
+                            stride: 8,
+                        },
+                    ],
+                ),
+                width: Width::W64,
+            }),
+        });
+        assert_eq!(analyze_frame(&probe).needs_frame(), escaped);
+        let shared = Shared::new(ir::Module {
+            funcs: vec![probe].into(),
+            ..ir::Module::default()
+        });
+        let mut compiler = test_compiler(&shared, CodeDomain::Plain);
+        compiler.compile(0);
+        let fast = shared
+            .jit
+            .symbol_ranges()
+            .into_iter()
+            .find(|range| range.role == JitSymbolRole::FastBody)
+            .expect("pointer probe compiled");
+        let call: extern "C" fn(*const *const u64, *const *const u64, u64) -> u64 =
+            unsafe { std::mem::transmute(fast.start as usize) };
+        let first = [11u64, 23, 47];
+        let second = [101u64, 211, 431];
+        for index in 0..first.len() {
+            assert_eq!(
+                call(&first.as_ptr(), &second.as_ptr(), index as u64),
+                if escaped { second[index] } else { first[index] },
+            );
+        }
+        // Registered unwind records refer to the module's code for the rest of the process.
+        std::mem::forget(compiler);
+    }
+}
+
+#[test]
+fn constant_copies_preserve_overlap_alignment_and_artifact_reloading() {
+    for size in [0, 1, 3, 8, 16, 24, 32, 33, 64] {
+        let mut probe = body("constant_copy", Terminator::Return);
+        probe.frame_size = 16;
+        probe.params = [0, 8]
+            .map(|off| {
+                ParamAbi::Scalar(Slot {
+                    off,
+                    width: Width::W64,
+                })
+            })
+            .into();
+        let pointer = |off| ir::PlaceExpr {
+            base: ir::PlaceBase::Local(off),
+            steps: vec![ir::PlaceStep::Deref].into(),
+        };
+        probe.blocks[0].stmts.push(Stmt::Copy {
+            dst: pointer(0),
+            src: pointer(8),
+            size,
+        });
+        let shared = Shared::new(ir::Module {
+            funcs: vec![probe].into(),
+            ..ir::Module::default()
+        });
+        let mut compiler = test_compiler(&shared, CodeDomain::Plain);
+        compiler.reload = true;
+        compiler.compile(0);
+        let entry = compiler
+            .last_entry
+            .as_ref()
+            .expect("copy body was captured");
+        let entry = artifact::Entry::decode(&entry.encode().unwrap()).unwrap();
+        let ordinals = artifact::Ordinals::of(&shared.module.funcs[0]).unwrap();
+        let linked = artifact::link(&entry, &[JitSymbolRole::FastBody], |target| match target {
+            artifact::Target::Named(name) => imports::whitelist()
+                .get(name.as_ref())
+                .map(|addr| *addr as u64),
+            target => artifact::target_value(&shared, 0, &ordinals, target),
+        })
+        .expect("copy body links from its artifact");
+        let copy: extern "C" fn(*mut u8, *const u8) =
+            unsafe { std::mem::transmute(linked.entry(JitSymbolRole::FastBody).unwrap() as usize) };
+        for (src, dst) in [(1, 2), (2, 1), (1, 1), (1, 73)] {
+            let mut actual = std::array::from_fn::<_, 160, _>(|i| i as u8);
+            let mut expected = actual;
+            expected.copy_within(src..src + size as usize, dst);
+            copy(unsafe { actual.as_mut_ptr().add(dst) }, unsafe {
+                actual.as_ptr().add(src)
+            });
+            assert_eq!(actual, expected, "copy size={size}, src={src}, dst={dst}");
+        }
+        std::mem::forget(compiler);
+    }
+}
+
+#[test]
 fn real_compilation_registers_every_executable_role() {
     let caller = body(
         "profile_caller",
@@ -282,6 +420,13 @@ fn real_compilation_registers_every_executable_role() {
 
     assert_ne!(shared.jit.slots[0].load(Ordering::Acquire), 0);
     let ranges = shared.jit.symbol_ranges();
+    let published = shared.jit.slots_fast[0].load(Ordering::Acquire);
+    assert!(
+        ranges
+            .iter()
+            .any(|range| { range.start == published && range.role == JitSymbolRole::FastBody }),
+        "compiled callers must enter the body after checking headroom themselves"
+    );
     assert_eq!(ranges.len(), 4);
     assert!(ranges.iter().any(|range| {
         range.func_id == 0 && range.role == JitSymbolRole::FastBody && range.size != 0
@@ -415,11 +560,11 @@ fn a_compiled_body_runs_from_its_artifact() {
         "the body recorded no site, so the reload would prove nothing"
     );
     if cfg!(target_arch = "x86_64") {
-        let module_entry = match compiler.module.get_name("g0") {
+        let module_entry = match compiler.module.get_name("f0") {
             Some(cranelift_module::FuncOrDataId::Func(id)) => {
                 compiler.module.get_finalized_function(id) as u64
             }
-            other => panic!("the module has no guarded entry for f0: {other:?}"),
+            other => panic!("the module has no body entry for f0: {other:?}"),
         };
         assert_ne!(
             published, module_entry,
@@ -542,12 +687,16 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
         entry
     }
 
-    let callee = || body("artifact_callee", Terminator::Return);
+    let callee = |frame_size| {
+        let mut body = body("artifact_callee", Terminator::Return);
+        body.frame_size = frame_size;
+        body
+    };
     // The same fragment at function 0 with its callee at 1 and TLS slot 3, and at function 1 with its
     // callee at 0 and TLS slot 8; the frozen address differs too, because a program places its data
     // where it likes and numbers its thread-locals as it meets them.
-    let first = entry_of(vec![probe(0x6a00_0000_1000, 1, 3), callee()], 0);
-    let second = entry_of(vec![callee(), probe(0x6a00_0000_9000, 0, 8)], 1);
+    let first = entry_of(vec![probe(0x6a00_0000_1000, 1, 3), callee(8)], 0);
+    let second = entry_of(vec![callee(1 << 20), probe(0x6a00_0000_9000, 0, 8)], 1);
 
     assert!(
         first.symbol(JitSymbolRole::FastBody).is_some(),
@@ -560,6 +709,25 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
             .any(|reloc| matches!(reloc.target, artifact::Target::Tls(_)))),
         "the entry names no TLS site, so nothing replays the id the loading session has"
     );
+    let stack_need = first
+        .symbols
+        .iter()
+        .flat_map(|symbol| &symbol.relocs)
+        .find_map(|reloc| {
+            matches!(reloc.target, artifact::Target::StackNeed(_)).then_some(&reloc.target)
+        })
+        .expect("the caller must record its callee's stack requirement");
+    for frame_size in [8, 1 << 20] {
+        let shared = Shared::new(ir::Module {
+            funcs: vec![probe(0x6a00_0000_1000, 1, 3), callee(frame_size)].into(),
+            ..Default::default()
+        });
+        let ordinals = artifact::Ordinals::of(&shared.module.funcs[0]).unwrap();
+        assert_eq!(
+            artifact::target_value(&shared, 0, &ordinals, stack_need),
+            Some(u64::from(frame_size) + STACK_GUARD_MARGIN as u64)
+        );
+    }
     assert_eq!(
         first.fragment, second.fragment,
         "the same body is not the same fragment in two programs"
@@ -722,4 +890,52 @@ fn a_linked_entry_without_a_cfa_program_is_refused() {
         Compiler::linked_frames(&linked, &stripped).is_none(),
         "an entry without a CFA program still reported frames to register"
     );
+}
+
+#[test]
+fn compiled_call_checks_the_callees_frame_before_entering_it() {
+    // The caller fits in the synthetic headroom, but its callee does not. A missing call-site
+    // check returns normally, while checking the caller's frame twice also misses the overflow.
+    for reload in [false, true] {
+        let caller = body(
+            "small_caller",
+            Terminator::Call {
+                callee: 1,
+                args: Vec::new(),
+                ret: RetDest::Ignore,
+                target: 1,
+                unwind: UnwindAction::Continue,
+                role: ir::CallRole::Normal,
+            },
+        );
+        let mut callee = body("large_callee", Terminator::Return);
+        callee.frame_size = 1 << 20;
+        let mut module = ir::Module {
+            funcs: vec![caller, callee].into(),
+            ..Default::default()
+        };
+        module.exports.insert("caller".into(), 0);
+        let engine = crate::vm::ctx::Engine::new(Shared::new(module));
+        let mut compiler = test_compiler(engine.shared(), CodeDomain::Plain);
+        compiler.reload = reload;
+        compiler.compile(1);
+        compiler.compile(0);
+        assert_ne!(engine.shared().jit.slots[0].load(Ordering::Acquire), 0);
+        let activation = crate::vm::ctx::activate(engine.shared());
+        let ctx = activation.ctx();
+        let saved = unsafe { (*ctx).stack_floor };
+        let marker = 0u8;
+        unsafe {
+            (*ctx).stack_floor = &marker as *const u8 as usize - STACK_GUARD_MARGIN - (64 << 10);
+        }
+        let result = unsafe { crate::vm::interp::run_export(&engine, "caller", &[]) };
+        unsafe {
+            (*ctx).stack_floor = saved;
+        }
+        let error = result.expect_err("callee frame was entered without sufficient headroom");
+        assert!(error.message.contains("guest stack overflow"), "{error:?}");
+        assert!(error.message.contains("large_callee"), "{error:?}");
+        drop(activation);
+        std::mem::forget(compiler);
+    }
 }

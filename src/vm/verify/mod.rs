@@ -52,27 +52,13 @@ pub fn module_below(
     Verifier::new(module, instance, below.prefix, below.entries)?.run()
 }
 
-/// Indexed packages first verify module-level references; function bodies are decoded one by one
-/// by the caller from mmap slices via `function_with_count`, so the entire function set is not kept in memory.
+/// Verify module-level references before function archive validation or context rebinding.
 pub(crate) fn module_header_with_count(
     module: &Module,
     instance: &Instance,
     funcs: usize,
 ) -> Result<(), crate::error::Error> {
     Verifier::new_with_count(module, instance, Prefix::default(), &[], funcs)?.run_header()
-}
-
-pub(crate) fn function_with_count(
-    module: &Module,
-    instance: &Instance,
-    funcs: usize,
-    index: usize,
-    body: &FuncBody,
-) -> Result<(), crate::error::Error> {
-    let verifier = Verifier::new_with_count(module, instance, Prefix::default(), &[], funcs)?;
-    verifier
-        .body(body)
-        .map_err(|error| crate::fail!(Engine, format!("function {index} `{}`: {error}", body.name)))
 }
 
 pub(crate) fn main_role_counts(
@@ -122,8 +108,31 @@ struct Verifier<'a> {
     funcs: usize,
     tls: usize,
     asm: usize,
+    address_uses: Option<&'a std::cell::RefCell<AddressUses>>,
 }
 
+/// Logical address obligations collected from immutable functions. Rebinding checks these against
+/// the new instance without walking function bodies or repeating frame/control-flow validation.
+#[derive(Default)]
+pub(crate) struct AddressUses(std::collections::BTreeSet<(u64, bool)>);
+
+impl AddressUses {
+    pub(crate) fn check(
+        &self,
+        module: &Module,
+        instance: &Instance,
+        funcs: usize,
+    ) -> Result<(), crate::error::Error> {
+        let verifier = Verifier::new_with_count(module, instance, Prefix::default(), &[], funcs)?;
+        verifier.run_header()?;
+        for &(address, allow_entry) in &self.0 {
+            verifier.address(LinkAddr(address), allow_entry, false)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) mod archived;
 mod body;
 mod ffi;
 mod vocab;
@@ -156,7 +165,58 @@ impl<'a> Verifier<'a> {
             funcs,
             tls,
             asm,
+            address_uses: None,
         })
+    }
+
+    fn address(
+        &self,
+        address: LinkAddr,
+        allow_entry: bool,
+        allow_prefix: bool,
+    ) -> Result<(), crate::error::Error> {
+        match self.instance.try_resolve_link_addr(address) {
+            Ok(runtime) => self.frozen_range(runtime, 0, allow_prefix)?,
+            Err(_) if allow_entry && self.instance.link_fn_addrs.contains_key(&address) => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(uses) = self.address_uses {
+            uses.borrow_mut().0.insert((address.0, allow_entry));
+        }
+        Ok(())
+    }
+
+    pub(super) fn frozen_range(
+        &self,
+        addr: u64,
+        size: u64,
+        allow_prefix: bool,
+    ) -> Result<(), crate::error::Error> {
+        if addr == 0 {
+            return Err(crate::fail!(Engine, "contains a null frozen address"));
+        }
+        let end = addr
+            .checked_add(size)
+            .ok_or(crate::fail!(Engine, "frozen address range overflows"))?;
+        let contains = self
+            .instance
+            .frozen
+            .iter()
+            .chain(self.instance.image_frozens.iter())
+            .any(|arena| {
+                // The whole mapped region, not only the used prefix: a pointer one past the last
+                // allocation is legal, and an arena's bytes are mapped for its full slot.
+                let start = arena.snapshot().as_ptr() as u64;
+                let limit = start + arena.mapped_len();
+                addr >= start && end <= limit
+            });
+        if !contains && !allow_prefix {
+            return Err(crate::fail!(
+                Engine,
+                format!("address range {addr:#x}..{end:#x} is outside frozen memory")
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn run(&self) -> Result<(), crate::error::Error> {
@@ -446,3 +506,7 @@ pub(super) fn buffer_span(buf_size: u32, off: u32, width: u32) -> Result<(), cra
 
 #[cfg(test)]
 mod tests;
+
+fn ffi_index(index: usize) -> usize {
+    index
+}
