@@ -498,7 +498,6 @@ fn lower_one<'tcx>(
         .lower(tcx, typing_env, inst)
         .map(|bound| bound.link(linker, inst));
     let body = body
-        .map(Ok)
         .unwrap_or_else(|| func::lower_instance(tcx, typing_env, inst, linker))
         .unwrap_or_else(|reason| func::trap_body(&linker.image_symbol(inst), &reason.to_string()));
     if let (Some(p), Some(t0)) = (purity.as_mut(), started) {

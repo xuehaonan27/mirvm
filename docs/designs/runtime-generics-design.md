@@ -16,7 +16,7 @@ instances share instructions, while profitable hot instances obtain concrete byt
 existing JIT. Unsupported functions retain ordinary eager lowering in the product integration.
 
 The production lowerer admits fixed scalar/pair frames, slice metadata and pair moves, fixed-layout
-field projections, scalar const parameters, integer operations and opaque-pointee offset/copy loops
+field projections, slice/array indexing, scalar const parameters, integer operations and opaque-pointee offset/copy loops
 under `MIRVM_GENERIC_TEMPLATES=1` (unset disables it). Direct calls bind concrete guest functions,
 including resolved trait methods and Clone/Drop shims, through the existing linker worklist. One compiler
 session caches both eligible templates and rejected definitions. Only ordinary Item instances are
@@ -24,7 +24,10 @@ eligible; the session's definition identity and semantic profile fix the cache k
 type sizes, const values and callee identities without instantiating a whole concrete MIR body.
 Compiler-owned call recipes remain separate from the owned template and resolve completely before
 the linker allocates any FuncId. Equal-layout types can therefore bind different witnesses. Unsupported
-frames/projections, indirect or foreign calls, cleanup and caller-location ABIs retain eager lowering. Collection still performs
+frames/projections, indirect or foreign calls, cleanup and general caller-location ABIs retain eager lowering.
+Bounds assertions branch to the guest panic lang item with the original source location and unwind
+action. Index strides read type-size bindings through ordinary IR; address temporaries remain live
+through every operand of a statement or terminator and are reused only after it completes. Collection still performs
 required instance validation before export. The owned template carries ordinary IR dictionary reads
 and a positional schema; immediate specialization removes that hidden argument before the existing
 verifier, archive and runtime see the body. This stage neither persists templates nor shares runtime
@@ -116,8 +119,7 @@ are separate policy acceptance cases. Initial thresholds are an experiment, not 
 
 The next changes are ordered so that each produces a usable, reviewable boundary:
 
-1. **Production template export and binding.** Extend slice operations to indexing and checked paths,
-   then layout-dependent locals/projections and Clone/Drop results requiring dynamic frames. Keep
+1. **Production template export and binding.** Extend slice patterns/ranges and layout-dependent locals/projections and Clone/Drop results requiring dynamic frames. Keep
    eager fallback and compile-time diagnostic parity, including an unentered invalid instance.
    Acceptance: one template serves multiple actual Rust types; exported runtime state owns no
    compiler references; all unsupported shapes execute through the current lowerer.

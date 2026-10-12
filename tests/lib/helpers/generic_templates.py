@@ -54,7 +54,9 @@ for mode, settings in [
         assert "generic template fallback: clone_and_unwind\n" in log, log
         for definition, count in [("slice_len", 3), ("slice_identity", 3), ("slice_data", 3),
                                   ("copy_slice", 3), ("fixed_field", 3), ("fixed_ref", 3),
-                                  ("witness", 3), ("clone_reference", 1), ("destroy", 2)]:
+                                  ("witness", 3), ("clone_reference", 1), ("destroy", 2),
+                                  ("index_ref", 4), ("index_mut", 4), ("array_ref", 5),
+                                  ("nested_ref", 4)]:
             assert log.count("generic template exported: " + definition + "\n") == 1, definition
             bound = [line for line in log.splitlines()
                      if "generic template bound:" in line and definition in line]

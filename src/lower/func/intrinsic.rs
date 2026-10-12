@@ -575,7 +575,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         off,
                         width: Width::W64,
                     }),
-                    None => self.caller_location_imm(span)?,
+                    None => self.linker.caller_location_imm(span)?,
                 };
                 vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),

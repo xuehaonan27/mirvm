@@ -4,11 +4,31 @@
 //! `impl Linker` sub-block.
 
 use crate::lower::Error;
+use rustc_middle::mir;
 
 use super::*;
 use crate::lower::purity::arg_mentions_local;
 
 impl<'tcx> Linker<'tcx> {
+    /// span -> &'static Location constant (materialized into the frozen region), shared
+    /// by Assert expansion, track_caller argument synthesis and the caller_location intrinsic.
+    pub(crate) fn caller_location_imm(
+        &mut self,
+        span: rustc_span::Span,
+    ) -> Result<ir::Operand, Error> {
+        let cv = self.tcx.span_as_caller_location(span);
+        let mir::ConstValue::Scalar(mir::interpret::Scalar::Ptr(ptr, _)) = cv else {
+            return Err(Error::internal(
+                "caller_location constant has an unexpected shape",
+            ));
+        };
+        let (prov, off) = ptr.prov_and_relative_offset();
+        let base = self.ensure_alloc(prov.alloc_id())?;
+        Ok(ir::Operand::AddrImm(ir::LinkAddr(
+            base.wrapping_add(off.bytes()),
+        )))
+    }
+
     /// Materializes raw bytes in the frozen region: the general path for small constants
     /// such as 128-bit literals. Plain bytes carry no pointers and no locality, so the
     /// current context decides the region.

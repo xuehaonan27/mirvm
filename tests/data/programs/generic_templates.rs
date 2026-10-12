@@ -74,6 +74,68 @@ fn slice_data<T>(values: &[T]) -> *const T {
 }
 
 #[inline(never)]
+fn index_ref<T>(values: &[T], index: usize) -> &T {
+    &values[index]
+}
+
+#[inline(never)]
+fn index_mut<T>(values: &mut [T], index: usize) -> &mut T {
+    &mut values[index]
+}
+
+#[inline(never)]
+fn array_ref<T, const N: usize>(values: &[T; N], index: usize) -> &T {
+    &values[index]
+}
+
+#[inline(never)]
+fn nested_ref<'a, T>(values: &[&'a [T]], outer: usize, inner: usize) -> &'a T {
+    &values[outer][inner]
+}
+
+fn check_index<T: Copy + PartialEq + std::fmt::Debug + std::panic::RefUnwindSafe>(
+    initial: T,
+    replacement: T,
+) {
+    let mut values = [initial; 3];
+    assert!(std::ptr::eq(index_ref(&values, 0), &values[0]));
+    assert!(std::ptr::eq(array_ref(&values, 2), &values[2]));
+    assert!(std::ptr::eq(nested_ref(&[&[], &values], 1, 2), &values[2]));
+    *index_mut(&mut values, 2) = replacement;
+    assert_eq!(values, [initial, initial, replacement]);
+    for (slice, index) in [
+        (&values[..], 3),
+        (&values[..], usize::MAX),
+        (&values[..0], 0),
+    ] {
+        let drops = DROPS.load(Ordering::SeqCst);
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = Tracked(0);
+            index_ref(slice, index);
+        })
+        .unwrap_err();
+        assert_eq!(
+            panic.downcast_ref::<String>().unwrap(),
+            &format!(
+                "index out of bounds: the len is {} but the index is {index}",
+                slice.len()
+            )
+        );
+        assert_eq!(DROPS.load(Ordering::SeqCst), drops + 1);
+    }
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            index_mut(&mut values, 3);
+        }))
+        .is_err()
+    );
+    assert!(std::panic::catch_unwind(|| array_ref(&values, 3)).is_err());
+    assert!(std::panic::catch_unwind(|| nested_ref(&[&values], 1, 0)).is_err());
+    assert!(std::panic::catch_unwind(|| nested_ref(&[&values], 0, 3)).is_err());
+    println!("indexed {} {}", size_of::<T>(), align_of::<T>());
+}
+
+#[inline(never)]
 fn copy_slice<T: Copy>(values: &[T], target: *mut T) -> usize {
     unsafe {
         std::ptr::copy_nonoverlapping(values.as_ptr(), target, values.len());
@@ -206,5 +268,15 @@ fn main() {
     }
     assert_eq!(DROPS.load(Ordering::SeqCst), 14);
     println!("caller location {}", caller_location(&First(0)));
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().unwrap();
+        let message = info.payload().downcast_ref::<String>().unwrap();
+        println!("bounds {}:{} {message}", location.line(), location.column());
+    }));
+    check_index(1u8, 9);
+    check_index(13u64, 31);
+    check_index([7u64; 8], [17; 8]);
+    check_index(AlignedZst, AlignedZst);
+    assert!(std::panic::catch_unwind(|| array_ref::<u8, 0>(&[], 0)).is_err());
     println!("scalars, offsets and guest cleanup agree");
 }

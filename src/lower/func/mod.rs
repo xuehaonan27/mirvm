@@ -649,22 +649,6 @@ impl<'tcx> LowerCx<'tcx, '_> {
             .unwrap_or_else(|_| "?".into())
     }
 
-    /// span -> &'static Location constant (materialized into the frozen region), shared
-    /// by Assert expansion, track_caller argument synthesis and the caller_location intrinsic.
-    fn caller_location_imm(&mut self, span: rustc_span::Span) -> Result<Operand, Error> {
-        let cv = self.tcx.span_as_caller_location(span);
-        let mir::ConstValue::Scalar(mir::interpret::Scalar::Ptr(ptr, _)) = cv else {
-            return Err(Error::internal(
-                "caller_location constant has an unexpected shape",
-            ));
-        };
-        let (prov, off) = ptr.prov_and_relative_offset();
-        let base = self.linker.ensure_alloc(prov.alloc_id())?;
-        Ok(Operand::AddrImm(ir::LinkAddr(
-            base.wrapping_add(off.bytes()),
-        )))
-    }
-
     /// Hidden trailing argument when the callee requires_caller_location: forward from this frame or synthesize at the call site.
     fn caller_loc_arg(
         &mut self,
@@ -679,7 +663,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 off,
                 width: Width::W64,
             }), // forward
-            None => self.caller_location_imm(span)?,
+            None => self.linker.caller_location_imm(span)?,
         }))
     }
 

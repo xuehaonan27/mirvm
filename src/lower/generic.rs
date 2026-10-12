@@ -83,11 +83,11 @@ impl<'tcx> Templates<'tcx> {
         let callees = exported
             .calls
             .iter()
-            .map(|&fn_ty| {
+            .map(|call| {
                 let fn_ty = instance.instantiate_mir_and_normalize_erasing_regions(
                     tcx,
                     env,
-                    EarlyBinder::bind(tcx, fn_ty),
+                    EarlyBinder::bind(tcx, call.ty),
                 );
                 let ty::FnDef(def, args) = *fn_ty.kind() else {
                     return None;
@@ -100,7 +100,7 @@ impl<'tcx> Templates<'tcx> {
                     callee = Instance::new_raw(def, callee.args);
                 }
                 if tcx.is_foreign_item(callee.def_id())
-                    || callee.def.requires_caller_location(tcx)
+                    || (callee.def.requires_caller_location(tcx) != call.location.is_some())
                     || !matches!(
                         callee.def,
                         InstanceKind::Item(_)
@@ -111,7 +111,7 @@ impl<'tcx> Templates<'tcx> {
                 {
                     return None;
                 }
-                Some(callee)
+                Some((callee, call.location))
             })
             .collect::<Option<Vec<_>>>()?;
         if crate::diag::prints(crate::diag::Severity::Debug) {
@@ -131,23 +131,38 @@ impl<'tcx> Templates<'tcx> {
 /// Compiler-owned call recipes are separate from the owned instruction template.
 struct Export<'tcx> {
     template: Template,
-    calls: Vec<Ty<'tcx>>,
+    calls: Vec<Call<'tcx>>,
+}
+
+struct Call<'tcx> {
+    ty: Ty<'tcx>,
+    location: Option<rustc_span::Span>,
 }
 
 pub(super) struct Bound<'tcx> {
     body: FuncBody,
-    callees: Vec<Instance<'tcx>>,
+    callees: Vec<(Instance<'tcx>, Option<rustc_span::Span>)>,
 }
 
 impl<'tcx> Bound<'tcx> {
-    pub(super) fn link(mut self, linker: &mut Linker<'tcx>, caller: Instance<'tcx>) -> FuncBody {
+    pub(super) fn link(
+        mut self,
+        linker: &mut Linker<'tcx>,
+        caller: Instance<'tcx>,
+    ) -> Result<FuncBody, super::Error> {
         let ids: Vec<_> = self
             .callees
             .iter()
-            .map(|&inst| linker.func_id(inst))
+            .map(|&(inst, _)| linker.func_id(inst))
             .collect();
         for block in &mut self.body.blocks {
-            if let Terminator::Call { callee, role, .. } = &mut block.term {
+            if let Terminator::Call {
+                callee, args, role, ..
+            } = &mut block.term
+            {
+                if let Some(span) = self.callees[*callee as usize].1 {
+                    args.push(linker.caller_location_imm(span)?);
+                }
                 *callee = ids[*callee as usize];
                 if linker.main_catch_site.is_some_and(|site| {
                     site.boundary_caller == caller && site.boundary_callee == *callee
@@ -157,7 +172,7 @@ impl<'tcx> Bound<'tcx> {
             }
         }
         self.body.name = linker.image_symbol(caller).into();
-        self.body
+        Ok(self.body)
     }
 }
 
@@ -225,7 +240,10 @@ impl Template {
             }
         }
         body.params.pop();
-        body.frame_size = self.dictionary;
+        // Address temporaries may follow the dictionary; reclaim its slot only at the frame tail.
+        if body.frame_size == self.dictionary + 8 {
+            body.frame_size = self.dictionary;
+        }
         body
     }
 }
@@ -238,7 +256,11 @@ struct Exporter<'tcx> {
     temporary: Slot,
     dictionary: u32,
     bindings: Vec<Binding>,
-    calls: Vec<Ty<'tcx>>,
+    calls: Vec<Call<'tcx>>,
+    pending: Vec<Stmt>,
+    next_scratch: u32,
+    frame_size: u32,
+    extra_blocks: Vec<Block>,
 }
 
 impl<'tcx> Exporter<'tcx> {
@@ -338,16 +360,21 @@ impl<'tcx> Exporter<'tcx> {
             dictionary,
             bindings: Vec::new(),
             calls: Vec::new(),
+            pending: Vec::new(),
+            next_scratch: frame_size,
+            frame_size,
+            extra_blocks: Vec::new(),
         };
-        let blocks = mir
+        let mut blocks: Vec<_> = mir
             .basic_blocks
             .iter()
             .map(|block| cx.block(block))
             .collect::<Option<_>>()?;
+        blocks.append(&mut cx.extra_blocks);
         Some(Export {
             template: Template {
                 body: FuncBody {
-                    frame_size,
+                    frame_size: cx.frame_size,
                     frame_align: cx.frame.align.max(8),
                     ret,
                     params,
@@ -362,7 +389,7 @@ impl<'tcx> Exporter<'tcx> {
         })
     }
 
-    fn place(&self, place: mir::Place<'tcx>) -> Option<(PlaceExpr, Ty<'tcx>)> {
+    fn place(&mut self, place: mir::Place<'tcx>) -> Option<(PlaceExpr, Ty<'tcx>)> {
         let local = &self.frame.locals[place.local.as_usize()];
         let mut expr = PlaceExpr {
             base: PlaceBase::Local(local.off),
@@ -392,18 +419,52 @@ impl<'tcx> Exporter<'tcx> {
                     expr = offset(expr, layout.fields.offset(field.as_usize()).bytes())?;
                     ty = field_ty;
                 }
+                mir::ProjectionElem::Index(index) => {
+                    let (ty::Slice(elem) | ty::Array(elem, _)) = *ty.kind() else {
+                        return None;
+                    };
+                    let info = &self.frame.locals[index.as_usize()];
+                    let idx = Slot {
+                        off: info.off,
+                        width: info.kind.scalar()?,
+                    };
+                    let stride = self.size(elem)?;
+                    let step = match stride {
+                        Operand::Imm { bits, .. } => PlaceStep::IndexScaled { idx, stride: bits },
+                        stride => {
+                            let bytes = self.scratch64()?;
+                            self.pending.push(Stmt::Assign {
+                                dst: ScalarPlace::Slot(bytes),
+                                rv: Rvalue::IntBin {
+                                    op: IntBinOp::Mul,
+                                    signed: false,
+                                    a: Operand::Slot(idx),
+                                    b: stride,
+                                },
+                            });
+                            PlaceStep::IndexScaled {
+                                idx: bytes,
+                                stride: 1,
+                            }
+                        }
+                    };
+                    let mut steps = expr.steps.into_vec();
+                    steps.push(step);
+                    expr.steps = steps.into();
+                    ty = elem;
+                }
                 _ => return None,
             }
         }
         Some((expr, ty))
     }
 
-    fn scalar_place(&self, place: mir::Place<'tcx>) -> Option<ScalarPlace> {
+    fn scalar_place(&mut self, place: mir::Place<'tcx>) -> Option<ScalarPlace> {
         let (expr, ty) = self.place(place)?;
         Some(scalar_place(expr, self.width(ty)?))
     }
 
-    fn pair(&self, place: mir::Place<'tcx>) -> Option<(ScalarPlace, ScalarPlace)> {
+    fn pair(&mut self, place: mir::Place<'tcx>) -> Option<(ScalarPlace, ScalarPlace)> {
         let (expr, ty) = self.place(place)?;
         let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
         let ValKind::Pair((a, aw), (b, bw)) = frame::classify(self.tcx, &layout) else {
@@ -415,7 +476,7 @@ impl<'tcx> Exporter<'tcx> {
         ))
     }
 
-    fn pair_operand(&self, operand: &mir::Operand<'tcx>) -> Option<(Operand, Operand)> {
+    fn pair_operand(&mut self, operand: &mir::Operand<'tcx>) -> Option<(Operand, Operand)> {
         let (mir::Operand::Copy(place) | mir::Operand::Move(place)) = operand else {
             return None;
         };
@@ -425,6 +486,16 @@ impl<'tcx> Exporter<'tcx> {
 
     fn width(&self, ty: Ty<'tcx>) -> Option<Width> {
         frame::scalar_width(&frame::layout_of(self.tcx, self.env, ty).ok()?)
+    }
+
+    fn scratch64(&mut self) -> Option<Slot> {
+        let slot = Slot {
+            off: self.next_scratch,
+            width: Width::W64,
+        };
+        self.next_scratch = self.next_scratch.checked_add(8)?;
+        self.frame_size = self.frame_size.max(self.next_scratch);
+        Some(slot)
     }
 
     fn binding(&mut self, binding: Binding, width: Width) -> Option<Operand> {
@@ -559,7 +630,7 @@ impl<'tcx> Exporter<'tcx> {
     }
 
     fn assign(&mut self, place: mir::Place<'tcx>, rv: &mir::Rvalue<'tcx>) -> Option<Vec<Stmt>> {
-        let (_, ty) = self.place(place)?;
+        let ty = place.ty(&self.mir.local_decls, self.tcx).ty;
         let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
         let value = |dst, a| Stmt::Assign {
             dst,
@@ -595,9 +666,12 @@ impl<'tcx> Exporter<'tcx> {
     fn block(&mut self, block: &mir::BasicBlockData<'tcx>) -> Option<Block> {
         let mut stmts = Vec::new();
         for stmt in &block.statements {
+            // Projection temporaries live through one MIR statement, including all its operands.
+            self.next_scratch = self.dictionary + 8;
+            let mut lowered = Vec::new();
             match &stmt.kind {
                 mir::StatementKind::Assign(box (place, rv)) => {
-                    stmts.extend(self.assign(*place, rv)?)
+                    lowered.extend(self.assign(*place, rv)?)
                 }
                 mir::StatementKind::Intrinsic(
                     box mir::NonDivergingIntrinsic::CopyNonOverlapping(copy),
@@ -607,8 +681,8 @@ impl<'tcx> Exporter<'tcx> {
                     else {
                         return None;
                     };
-                    stmts.push(self.scale(&copy.count, pointee)?);
-                    stmts.push(Stmt::MemCopy {
+                    lowered.push(self.scale(&copy.count, pointee)?);
+                    lowered.push(Stmt::MemCopy {
                         dst: self.operand(&copy.dst)?,
                         src: self.operand(&copy.src)?,
                         count: Operand::Slot(self.temporary),
@@ -621,7 +695,11 @@ impl<'tcx> Exporter<'tcx> {
                 | mir::StatementKind::Nop => {}
                 _ => return None,
             }
+            stmts.append(&mut self.pending);
+            stmts.append(&mut lowered);
         }
+        self.next_scratch = self.dictionary + 8;
+        let mut lowered = Vec::new();
         let term = match &block.terminator().kind {
             mir::TerminatorKind::Goto { target } => Terminator::Goto(target.as_u32()),
             mir::TerminatorKind::Return => Terminator::Return,
@@ -634,6 +712,51 @@ impl<'tcx> Exporter<'tcx> {
                     .collect(),
                 otherwise: targets.otherwise().as_u32(),
             },
+            mir::TerminatorKind::Assert {
+                cond,
+                expected,
+                msg,
+                target,
+                unwind,
+            } => {
+                let mir::AssertKind::BoundsCheck { len, index } = &**msg else {
+                    return None;
+                };
+                let span = block.terminator().source_info.span;
+                let def = self
+                    .tcx
+                    .require_lang_item(rustc_hir::LangItem::PanicBoundsCheck, span);
+                let callee = u32::try_from(self.calls.len()).ok()?;
+                let args = vec![self.operand(index)?, self.operand(len)?];
+                let unwind = unwind_action(*unwind)?;
+                self.calls.push(Call {
+                    ty: Ty::new_fn_def(self.tcx, def, ty::GenericArgs::empty()),
+                    location: Some(span),
+                });
+                let unreach =
+                    u32::try_from(self.mir.basic_blocks.len() + self.extra_blocks.len()).ok()?;
+                let panic = unreach.checked_add(1)?;
+                self.extra_blocks.push(Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Unreachable,
+                });
+                self.extra_blocks.push(Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Call {
+                        callee,
+                        args,
+                        ret: RetDest::Ignore,
+                        target: unreach,
+                        unwind,
+                        role: CallRole::Normal,
+                    },
+                });
+                Terminator::SwitchInt {
+                    discr: SwitchDiscr::Scalar(self.operand(cond)?),
+                    targets: vec![(*expected as u128, target.as_u32())],
+                    otherwise: panic,
+                }
+            }
             mir::TerminatorKind::Call {
                 func,
                 args,
@@ -669,7 +792,7 @@ impl<'tcx> Exporter<'tcx> {
                             _ => return None,
                         }
                     }
-                    let (_, ty) = self.place(*destination)?;
+                    let ty = destination.ty(&self.mir.local_decls, self.tcx).ty;
                     let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
                     let ret = match frame::classify(self.tcx, &layout) {
                         ValKind::Zst => RetDest::Ignore,
@@ -680,15 +803,13 @@ impl<'tcx> Exporter<'tcx> {
                         }
                         _ => return None,
                     };
-                    let unwind = match unwind {
-                        mir::UnwindAction::Continue | mir::UnwindAction::Unreachable => {
-                            UnwindAction::Continue
-                        }
-                        mir::UnwindAction::Terminate(_) => UnwindAction::Terminate,
-                        mir::UnwindAction::Cleanup(_) => return None,
-                    };
+                    let unwind = unwind_action(*unwind)?;
                     let callee = u32::try_from(self.calls.len()).ok()?;
-                    self.calls.push(fn_ty);
+                    self.calls.push(Call {
+                        ty: fn_ty,
+                        location: None,
+                    });
+                    stmts.append(&mut self.pending);
                     return Some(Block {
                         stmts,
                         term: Terminator::Call {
@@ -709,8 +830,8 @@ impl<'tcx> Exporter<'tcx> {
                 else {
                     return None;
                 };
-                stmts.push(self.scale(&args[1].node, pointee)?);
-                stmts.push(Stmt::Assign {
+                lowered.push(self.scale(&args[1].node, pointee)?);
+                lowered.push(Stmt::Assign {
                     dst: self.scalar_place(*destination)?,
                     rv: Rvalue::IntBin {
                         op: IntBinOp::Add,
@@ -723,8 +844,18 @@ impl<'tcx> Exporter<'tcx> {
             }
             _ => return None,
         };
+        stmts.append(&mut self.pending);
+        stmts.append(&mut lowered);
         Some(Block { stmts, term })
     }
+}
+
+fn unwind_action(unwind: mir::UnwindAction) -> Option<UnwindAction> {
+    Some(match unwind {
+        mir::UnwindAction::Continue | mir::UnwindAction::Unreachable => UnwindAction::Continue,
+        mir::UnwindAction::Terminate(_) => UnwindAction::Terminate,
+        mir::UnwindAction::Cleanup(_) => return None,
+    })
 }
 
 fn offset(mut expr: PlaceExpr, offset: u64) -> Option<PlaceExpr> {

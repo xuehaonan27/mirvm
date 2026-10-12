@@ -155,7 +155,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         off,
                         width: Width::W64,
                     }),
-                    None => self.caller_location_imm(term.source_info.span)?,
+                    None => self.linker.caller_location_imm(term.source_info.span)?,
                 });
                 let def_id = self.tcx.require_lang_item(lang_item, term.source_info.span);
                 let callee = self.linker.func_id(Instance::mono(self.tcx, def_id));
