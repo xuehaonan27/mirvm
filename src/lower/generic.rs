@@ -62,8 +62,13 @@ impl<'tcx> Templates<'tcx> {
             .iter()
             .map(|binding| match *binding {
                 Binding::Size(index) => {
-                    let ty = instance.args.get(index as usize)?.as_type()?;
-                    Some(frame::layout_of(tcx, env, ty).ok()?.size.bytes())
+                    let ty = instance.instantiate_mir_and_normalize_erasing_regions(
+                        tcx,
+                        env,
+                        EarlyBinder::bind(tcx, exported.layouts[index as usize]),
+                    );
+                    let layout = frame::layout_of(tcx, env, ty).ok()?;
+                    (!layout.is_unsized()).then(|| layout.size.bytes())
                 }
                 Binding::Const(index, width) => {
                     let value = instance
@@ -128,10 +133,11 @@ impl<'tcx> Templates<'tcx> {
     }
 }
 
-/// Compiler-owned call recipes are separate from the owned instruction template.
+/// Compiler-owned layout and call recipes are separate from the owned instruction template.
 struct Export<'tcx> {
     template: Template,
     calls: Vec<Call<'tcx>>,
+    layouts: Vec<Ty<'tcx>>,
 }
 
 struct Call<'tcx> {
@@ -248,6 +254,12 @@ impl Template {
     }
 }
 
+struct ProjectedPlace<'tcx> {
+    expr: PlaceExpr,
+    ty: Ty<'tcx>,
+    meta: Option<Operand>,
+}
+
 struct Exporter<'tcx> {
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
@@ -257,6 +269,7 @@ struct Exporter<'tcx> {
     dictionary: u32,
     bindings: Vec<Binding>,
     calls: Vec<Call<'tcx>>,
+    layouts: Vec<Ty<'tcx>>,
     pending: Vec<Stmt>,
     next_scratch: u32,
     frame_size: u32,
@@ -360,6 +373,7 @@ impl<'tcx> Exporter<'tcx> {
             dictionary,
             bindings: Vec::new(),
             calls: Vec::new(),
+            layouts: Vec::new(),
             pending: Vec::new(),
             next_scratch: frame_size,
             frame_size,
@@ -386,20 +400,36 @@ impl<'tcx> Exporter<'tcx> {
                 bindings: cx.bindings,
             },
             calls: cx.calls,
+            layouts: cx.layouts,
         })
     }
 
-    fn place(&mut self, place: mir::Place<'tcx>) -> Option<(PlaceExpr, Ty<'tcx>)> {
+    fn place(&mut self, place: mir::Place<'tcx>) -> Option<ProjectedPlace<'tcx>> {
         let local = &self.frame.locals[place.local.as_usize()];
         let mut expr = PlaceExpr {
             base: PlaceBase::Local(local.off),
             steps: Box::new([]),
         };
         let mut ty = local.ty;
+        let mut meta = None;
         for projection in place.projection {
             match projection {
                 mir::ProjectionElem::Deref => {
-                    ty = ty.builtin_deref(true)?;
+                    let pointee = ty.builtin_deref(true)?;
+                    meta = if matches!(pointee.kind(), ty::Slice(_) | ty::Str) {
+                        let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
+                        let ValKind::Pair(_, (off, width)) = frame::classify(self.tcx, &layout)
+                        else {
+                            return None;
+                        };
+                        Some(read(scalar_place(
+                            offset(expr.clone(), u64::from(off))?,
+                            width,
+                        )))
+                    } else {
+                        None
+                    };
+                    ty = pointee;
                     expr.steps = expr
                         .steps
                         .into_vec()
@@ -418,6 +448,7 @@ impl<'tcx> Exporter<'tcx> {
                     }
                     expr = offset(expr, layout.fields.offset(field.as_usize()).bytes())?;
                     ty = field_ty;
+                    meta = None;
                 }
                 mir::ProjectionElem::Index(index) => {
                     let (ty::Slice(elem) | ty::Array(elem, _)) = *ty.kind() else {
@@ -428,44 +459,63 @@ impl<'tcx> Exporter<'tcx> {
                         off: info.off,
                         width: info.kind.scalar()?,
                     };
-                    let stride = self.size(elem)?;
-                    let step = match stride {
-                        Operand::Imm { bits, .. } => PlaceStep::IndexScaled { idx, stride: bits },
-                        stride => {
-                            let bytes = self.scratch64()?;
-                            self.pending.push(Stmt::Assign {
-                                dst: ScalarPlace::Slot(bytes),
-                                rv: Rvalue::IntBin {
-                                    op: IntBinOp::Mul,
-                                    signed: false,
-                                    a: Operand::Slot(idx),
-                                    b: stride,
-                                },
-                            });
-                            PlaceStep::IndexScaled {
-                                idx: bytes,
-                                stride: 1,
-                            }
+                    expr = self.index(expr, Operand::Slot(idx), elem)?;
+                    ty = elem;
+                    meta = None;
+                }
+                mir::ProjectionElem::ConstantIndex {
+                    offset, from_end, ..
+                } => {
+                    let (ty::Slice(elem) | ty::Array(elem, _)) = *ty.kind() else {
+                        return None;
+                    };
+                    let index = if from_end {
+                        let len = match *ty.kind() {
+                            ty::Array(_, len) => self.array_len(len)?,
+                            _ => meta.take()?,
+                        };
+                        self.subtract(len, offset)?
+                    } else {
+                        Operand::Imm {
+                            bits: offset,
+                            width: Width::W64,
                         }
                     };
-                    let mut steps = expr.steps.into_vec();
-                    steps.push(step);
-                    expr.steps = steps.into();
+                    expr = self.index(expr, index, elem)?;
                     ty = elem;
+                    meta = None;
+                }
+                mir::ProjectionElem::Subslice {
+                    from,
+                    to,
+                    from_end: true,
+                } => {
+                    let ty::Slice(elem) = *ty.kind() else {
+                        return None;
+                    };
+                    expr = self.index(
+                        expr,
+                        Operand::Imm {
+                            bits: from,
+                            width: Width::W64,
+                        },
+                        elem,
+                    )?;
+                    meta = Some(self.subtract(meta.take()?, from.checked_add(to)?)?);
                 }
                 _ => return None,
             }
         }
-        Some((expr, ty))
+        Some(ProjectedPlace { expr, ty, meta })
     }
 
     fn scalar_place(&mut self, place: mir::Place<'tcx>) -> Option<ScalarPlace> {
-        let (expr, ty) = self.place(place)?;
+        let ProjectedPlace { expr, ty, .. } = self.place(place)?;
         Some(scalar_place(expr, self.width(ty)?))
     }
 
     fn pair(&mut self, place: mir::Place<'tcx>) -> Option<(ScalarPlace, ScalarPlace)> {
-        let (expr, ty) = self.place(place)?;
+        let ProjectedPlace { expr, ty, .. } = self.place(place)?;
         let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
         let ValKind::Pair((a, aw), (b, bw)) = frame::classify(self.tcx, &layout) else {
             return None;
@@ -498,6 +548,81 @@ impl<'tcx> Exporter<'tcx> {
         Some(slot)
     }
 
+    fn index(&mut self, expr: PlaceExpr, index: Operand, elem: Ty<'tcx>) -> Option<PlaceExpr> {
+        if matches!(index, Operand::Imm { bits: 0, .. }) {
+            return Some(expr);
+        }
+        let stride = self.size(elem)?;
+        let step = match (index, stride) {
+            (Operand::Imm { bits: index, .. }, Operand::Imm { bits: stride, .. }) => {
+                return offset(expr, index.checked_mul(stride)?);
+            }
+            (Operand::Slot(idx), Operand::Imm { bits: stride, .. }) => {
+                PlaceStep::IndexScaled { idx, stride }
+            }
+            (index, stride) => {
+                let bytes = self.scratch64()?;
+                self.pending.push(Stmt::Assign {
+                    dst: ScalarPlace::Slot(bytes),
+                    rv: Rvalue::IntBin {
+                        op: IntBinOp::Mul,
+                        signed: false,
+                        a: index,
+                        b: stride,
+                    },
+                });
+                PlaceStep::IndexScaled {
+                    idx: bytes,
+                    stride: 1,
+                }
+            }
+        };
+        let mut steps = expr.steps.into_vec();
+        steps.push(step);
+        Some(PlaceExpr {
+            steps: steps.into(),
+            ..expr
+        })
+    }
+
+    fn subtract(&mut self, value: Operand, amount: u64) -> Option<Operand> {
+        if amount == 0 {
+            return Some(value);
+        }
+        if let Operand::Imm { bits, .. } = value {
+            return Some(Operand::Imm {
+                bits: bits.checked_sub(amount)?,
+                width: Width::W64,
+            });
+        }
+        let result = self.scratch64()?;
+        self.pending.push(Stmt::Assign {
+            dst: ScalarPlace::Slot(result),
+            rv: Rvalue::IntBin {
+                op: IntBinOp::Sub,
+                signed: false,
+                a: value,
+                b: Operand::Imm {
+                    bits: amount,
+                    width: Width::W64,
+                },
+            },
+        });
+        Some(Operand::Slot(result))
+    }
+
+    fn array_len(&mut self, len: ty::Const<'tcx>) -> Option<Operand> {
+        match len.kind() {
+            ty::ConstKind::Param(param) => {
+                self.binding(Binding::Const(param.index, Width::W64), Width::W64)
+            }
+            _ => Some(Operand::Imm {
+                bits: len.try_to_target_usize(self.tcx)?,
+                width: Width::W64,
+            }),
+        }
+    }
+
     fn binding(&mut self, binding: Binding, width: Width) -> Option<Operand> {
         let index = match self.bindings.iter().position(|b| *b == binding) {
             Some(index) => index,
@@ -520,14 +645,20 @@ impl<'tcx> Exporter<'tcx> {
     }
 
     fn size(&mut self, ty: Ty<'tcx>) -> Option<Operand> {
-        if let ty::Param(param) = ty.kind() {
-            self.binding(Binding::Size(param.index), Width::W64)
-        } else {
-            Some(Operand::Imm {
-                bits: frame::layout_of(self.tcx, self.env, ty).ok()?.size.bytes(),
+        if let Ok(layout) = frame::layout_of(self.tcx, self.env, ty) {
+            return (!layout.is_unsized()).then(|| Operand::Imm {
+                bits: layout.size.bytes(),
                 width: Width::W64,
-            })
+            });
         }
+        let index = match self.layouts.iter().position(|&layout_ty| layout_ty == ty) {
+            Some(index) => index,
+            None => {
+                self.layouts.push(ty);
+                self.layouts.len() - 1
+            }
+        };
+        self.binding(Binding::Size(u32::try_from(index).ok()?), Width::W64)
     }
 
     fn operand(&mut self, operand: &mir::Operand<'tcx>) -> Option<Operand> {
@@ -558,7 +689,7 @@ impl<'tcx> Exporter<'tcx> {
             mir::Rvalue::UnaryOp(mir::UnOp::PtrMetadata, a) => Rvalue::Use(self.pair_operand(a)?.1),
             mir::Rvalue::Ref(_, _, place) | mir::Rvalue::RawPtr(_, place) => {
                 // A fat reference also needs metadata; the scalar destination check excludes it.
-                Rvalue::Ref(self.place(*place)?.0)
+                Rvalue::Ref(self.place(*place)?.expr)
             }
             mir::Rvalue::Cast(kind, a, to) => {
                 let from = a.ty(&self.mir.local_decls, self.tcx);
@@ -649,6 +780,10 @@ impl<'tcx> Exporter<'tcx> {
                 let (a, b) = self.pair(place)?;
                 let (lo, hi) = match rv {
                     mir::Rvalue::Use(op, _) => self.pair_operand(op)?,
+                    mir::Rvalue::Ref(_, _, place) | mir::Rvalue::RawPtr(_, place) => {
+                        let place = self.place(*place)?;
+                        (Operand::AddrOf(place.expr), place.meta?)
+                    }
                     mir::Rvalue::Aggregate(box mir::AggregateKind::RawPtr(..), ops)
                         if ops.len() == 2 =>
                     {
@@ -692,6 +827,7 @@ impl<'tcx> Exporter<'tcx> {
                 }
                 mir::StatementKind::StorageLive(_)
                 | mir::StatementKind::StorageDead(_)
+                | mir::StatementKind::Intrinsic(box mir::NonDivergingIntrinsic::Assume(_))
                 | mir::StatementKind::Nop => {}
                 _ => return None,
             }

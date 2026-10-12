@@ -343,19 +343,20 @@ test tier is established by the census.
 ### Production generic template export
 
 Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for scalar/pair frames,
-slice metadata, fixed field projections, checked slice/array indexing, pointer/const operations and
-resolved direct guest calls.
-Each admitted definition is exported once; concrete bindings produce ordinary
+slice metadata and patterns, fixed field projections, checked slice/array indexing, pointer/const
+operations and resolved direct guest calls. Each admitted definition is exported once; concrete bindings produce ordinary
 bytecode without a full MIR-body substitution per instance. Unsupported functions retain the original
 lowerer. The default remains eager, and runtime sharing, generic archives and promotion are not yet
 implemented. This is an integration boundary, not a demonstrated whole-program speedup.
 
 The `generic-templates` contract checks five actual Rust type/const instances against one template,
 including an aligned ZST, distinct element widths and const lengths. It also covers signed consts,
-negative pointer offsets, slice parameters/returns, indexed references, field references, distinct same-layout trait
-witnesses, reference cloning, drop glue and guest panic propagation. Bounds checks cover empty slices,
-zero-length arrays, maximum indices, nested slices, ZSTs and different element widths; panic messages,
-source line/column and caller cleanup agree with native. Indirect calls, by-value generic
+negative pointer offsets, slice parameters/returns, indexed references, field references, distinct
+same-layout trait witnesses, reference cloning, drop glue and guest panic propagation. Bounds checks cover empty slices,
+zero-length arrays, maximum indices, nested slices/arrays, ZSTs and different element widths; panic
+messages, source line/column and caller cleanup agree with native. Compound pointee sizes bind both
+type and const parameters. First/last/middle patterns and mutable subslices preserve pointer identity,
+length and writes across empty and nonempty inputs. Indirect calls, by-value generic
 cleanup and caller-location bindings retain eager fallback; an invalid unentered instantiation is
 rejected before entry. Eager interpretation, template-bound interpretation and synchronous JIT agree with
 native output; each reloads its concrete bound image without re-entering the frontend. Debug lowering
@@ -372,9 +373,23 @@ Signal delivery and the generic fixture's captured trace agree with native execu
 addressable arguments agrees with native under synchronous JIT and bound-image reload, including
 aggregate parameters, pair returns and indirect returns through native callbacks.
 
-Whole-program coverage and rejected-definition probe cost remain part of the default-enablement gate.
-The matrix's immediate repeat can still enter the frontend before publishing its bound image; that
-repeat is not a runtime-only cache hit.
+Three alternating pairs on one release executable, with prepared std/dependency MIR and all derived
+products except the std base removed before each miss, give these medians. Every sample agrees with
+its native oracle; debug coverage runs are separate from timings and the OS page cache is retained.
+
+| Workload | Exported definitions / bound instances | Rejected definitions | Eager whole process / lower | Templates whole process / lower |
+|---|---:|---:|---:|---:|
+| serde JSON | 41 / 64 | 516 | 403.7 / 197.0 ms | 403.7 / 195.4 ms |
+| flate2, 2 KiB input | 25 / 28 | 428 | 458.6 / 173.1 ms | 459.2 / 163.8 ms |
+| generic matrix, one selected type | 28 / 31 | 509 | 360.0 / 157.9 ms | 374.3 / 169.6 ms |
+
+These samples do not establish a whole-program speedup. Most generic definitions still take eager
+fallback. The matrix includes a 2,476.4 ms eager sample whose timing ledger reports only 444.7 ms;
+the sample is retained, and the unaccounted process time prevents attributing that difference to
+lowering. Serde and flate2 bound-image hits have medians of 92.5/97.9 ms and 137.1/136.9 ms respectively
+(eager/templates); the serde template range includes a 178.5 ms outlier. The matrix's immediate repeat
+still enters the frontend before publishing its bound image; that repeat is not a runtime-only cache
+hit. Broader coverage and rejected-definition probe cost remain part of the default-enablement gate.
 
 ### Runtime generics prototype
 

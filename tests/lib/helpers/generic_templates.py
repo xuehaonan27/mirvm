@@ -56,7 +56,9 @@ for mode, settings in [
                                   ("copy_slice", 3), ("fixed_field", 3), ("fixed_ref", 3),
                                   ("witness", 3), ("clone_reference", 1), ("destroy", 2),
                                   ("index_ref", 4), ("index_mut", 4), ("array_ref", 5),
-                                  ("nested_ref", 4)]:
+                                  ("nested_ref", 4), ("matrix_ref", 6), ("first_or", 4),
+                                  ("last_or", 4), ("fixed_array_last", 4),
+                                  ("middle_slice", 4), ("tail_mut", 4)]:
             assert log.count("generic template exported: " + definition + "\n") == 1, definition
             bound = [line for line in log.splitlines()
                      if "generic template bound:" in line and definition in line]

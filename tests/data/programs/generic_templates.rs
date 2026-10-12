@@ -93,6 +93,49 @@ fn nested_ref<'a, T>(values: &[&'a [T]], outer: usize, inner: usize) -> &'a T {
     &values[outer][inner]
 }
 
+#[inline(never)]
+fn matrix_ref<T, const N: usize>(values: &[[T; N]], outer: usize, inner: usize) -> &T {
+    &values[outer][inner]
+}
+
+#[inline(never)]
+fn first_or<T>(values: &[T], fallback: &T) -> *const T {
+    match values {
+        [first, ..] => first,
+        [] => fallback,
+    }
+}
+
+#[inline(never)]
+fn last_or<T>(values: &[T], fallback: &T) -> *const T {
+    match values {
+        [.., last] => last,
+        [] => fallback,
+    }
+}
+
+#[inline(never)]
+fn fixed_array_last<T>(values: &[T; 3]) -> &T {
+    let [_, _, last] = values;
+    last
+}
+
+#[inline(never)]
+fn middle_slice<T>(values: &[T]) -> &[T] {
+    match values {
+        [_, middle @ .., _] => middle,
+        _ => values,
+    }
+}
+
+#[inline(never)]
+fn tail_mut<T>(values: &mut [T]) -> &mut [T] {
+    match values {
+        [_, tail @ ..] => tail,
+        _ => values,
+    }
+}
+
 fn check_index<T: Copy + PartialEq + std::fmt::Debug + std::panic::RefUnwindSafe>(
     initial: T,
     replacement: T,
@@ -132,6 +175,30 @@ fn check_index<T: Copy + PartialEq + std::fmt::Debug + std::panic::RefUnwindSafe
     assert!(std::panic::catch_unwind(|| array_ref(&values, 3)).is_err());
     assert!(std::panic::catch_unwind(|| nested_ref(&[&values], 1, 0)).is_err());
     assert!(std::panic::catch_unwind(|| nested_ref(&[&values], 0, 3)).is_err());
+    let matrix = [[initial; 3], [replacement; 3]];
+    assert!(std::ptr::eq(matrix_ref(&matrix, 1, 2), &matrix[1][2]));
+    assert!(std::panic::catch_unwind(|| matrix_ref(&matrix, 2, 0)).is_err());
+    assert!(std::panic::catch_unwind(|| matrix_ref(&matrix, 1, 3)).is_err());
+    assert!(std::ptr::eq(fixed_array_last(&values), &values[2]));
+    for len in 0..=values.len() {
+        let slice = &values[..len];
+        let first = slice.first().unwrap_or(&initial);
+        let last = slice.last().unwrap_or(&initial);
+        assert!(std::ptr::eq(first_or(slice, &initial), first));
+        assert!(std::ptr::eq(last_or(slice, &initial), last));
+        let middle = middle_slice(slice);
+        let expected = if len < 2 { slice } else { &slice[1..len - 1] };
+        assert_eq!(middle, expected);
+        assert!(std::ptr::eq(middle.as_ptr(), expected.as_ptr()));
+        let data = unsafe { values.as_ptr().add(usize::from(len != 0)) };
+        let tail = tail_mut(&mut values[..len]);
+        assert_eq!(tail.len(), len.saturating_sub(1));
+        assert_eq!(tail.as_ptr(), data);
+        if !tail.is_empty() {
+            tail[0] = replacement;
+            assert_eq!(values[1], replacement);
+        }
+    }
     println!("indexed {} {}", size_of::<T>(), align_of::<T>());
 }
 
@@ -278,5 +345,7 @@ fn main() {
     check_index([7u64; 8], [17; 8]);
     check_index(AlignedZst, AlignedZst);
     assert!(std::panic::catch_unwind(|| array_ref::<u8, 0>(&[], 0)).is_err());
+    assert_eq!(*matrix_ref(&[[3u64, 5], [7, 11]], 1, 1), 11);
+    assert!(std::panic::catch_unwind(|| matrix_ref::<u8, 0>(&[[]], 0, 0)).is_err());
     println!("scalars, offsets and guest cleanup agree");
 }
