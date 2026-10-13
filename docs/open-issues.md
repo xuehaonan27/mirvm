@@ -248,9 +248,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a
     generic semantic IR, dedicated frontend or source interpreter. Evaluate
     [runtime generics](designs/runtime-generics-design.md#5-integration-roadmap-and-gates) through
-    the selected engineering roadmap: validate the experimental work budget against latency and
-    evaluate a compiled shared-template entry ABI. Reduced compiler spending has not established
-    whole-program payback. Extend remaining aggregate/projection and range/array-subslice coverage
+    the selected engineering roadmap: validate the experimental work budget against latency;
+    evaluate lazy admission of compiled template groups, cheaper frame/call adapters and subsequent
+    concrete specialization for hot instances. Reduced compiler spending has not established
+    general whole-program payback. Extend remaining aggregate/projection and range/array-subslice coverage
     from corpus evidence; attribute repeated template verification/serialization and metadata work
     in CPU profiles. Require real workload cold/warm measurements,
     unchanged bound-image reuse and specialization payback before default enablement. Preserve

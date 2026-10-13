@@ -480,60 +480,69 @@ was run for this change; OSR remains deferred.
 
 ### Runtime generics prototype
 
-`experiments/runtime-generics` contains a reproducible, isolated prototype using the existing
-bytecode interpreter, verifier and Cranelift pipeline. Shared instance adapters pass immutable
-dictionaries; promotion creates and verifies concrete IR before requesting machine code for the
-same FuncId. A compiled shared-template control distinguishes specialization from merely compiling
-the common loop. The production source and cache formats are unchanged by this experiment.
+`experiments/compiled-shared` evaluates a compiled intermediate tier using actual production
+`SharedBody` objects. A disposable source patch converts each structurally distinct template into
+ordinary verified IR accepting a concrete frame pointer and continuation block. It compiles through
+the existing service; the original interpreter prologue owns layout/ABI adaptation, and calls,
+cleanup and return writeback retain their existing boundary. The current transformation keeps guest
+locals in memory and exits compiled code before calls. It is plain-only, disables persisted JIT code,
+selects its entry once per activation and performs no OSR or later concrete promotion.
 
-A bounded frontend exports an actual generic MIR copy loop once, without a concrete-body clone per
-instance. Five rustc-derived layout/const descriptors cover `(size, alignment, length)` values
-`(1, 1, 0)`, `(1, 1, 17)`, `(8, 8, 31)`, `(64, 8, 7)` and `(0, 64, 9)`. Each execution mode loads the
-owned artifact in a fresh process after compiler teardown. Three export runs give median template
-export / descriptor construction / preceding mono validation-collection of 7.8 / 19.6 / 2,227.0 µs.
-Export can reuse queries warmed by collection; these are not independent cold frontend costs.
-An invalid instantiation in an unentered branch still fails before artifact publication. Unsupported
-MIR is rejected by the experiment; product integration requires eager fallback.
+The synchronous generic contract agrees with native, including mixed layouts, field construction,
+trait/drop/unwind behavior, recursive and concurrent entries, native callbacks and a separate fork
+invocation. It enters 787 concrete instances through 168 compiled templates and performs no concrete
+instruction generation in the normal invocation. Both invocations hit their bound image. This is a
+bounded execution check, not the full lifecycle/signal/trace gate required for product integration.
 
-The execution measurements use hand-authored templates, three alternating release samples per
-mode, and no persistent JIT cache or automatic call/backedge compilation. Times below include
-execution plus concrete emission, verification and synchronous JIT publication where applicable;
-they exclude initial body/Engine construction. They are medians of each sample's summed costs.
+The timing comparison uses one release executable, prepared bound images, no persistent JIT cache
+and five alternating rounds across interpretation, direct specialization and shared regions. All
+105 default-policy samples match native output. Diagnostic captures are separate. The two JIT
+policies' whole-process / engine medians are:
 
-| Workload | Shared interpretation | Concrete interpretation | Shared then specialized JIT |
-|---|---:|---:|---:|
-| 256 calls × 256 copied elements | 4.387 ms | 4.047 ms | 1.427 ms |
-| 2,048 one-element calls | 4.451 ms | 4.458 ms | 5.093 ms |
-| 64 calls × 32 native Clone/Drop witnesses | 0.827 ms | 0.817 ms | 1.803 ms |
-| 64 instances × two 32-element calls | 0.553 ms | 0.529 ms | 0.559 ms, no promotion |
+| Workload | Direct instance specialization | Compiled shared frame entry |
+|---|---:|---:|
+| 64 sparse instances | 43.4 / 9.7 ms | 48.1 / 14.5 ms |
+| 64 instances, 512 rounds, 32 iterations per call | 153.4 / 116.9 ms | 89.4 / 55.8 ms |
+| Two instances, 5,000 rounds, 64 iterations per call | 76.6 / 39.5 ms | 83.0 / 43.7 ms |
+| 64 instances, 512 rounds, zero iterations | 49.8 / 16.0 ms | 55.1 / 19.3 ms |
+| Native-call-heavy wrappers | 83.5 / 51.1 ms | 91.8 / 55.2 ms |
+| serde JSON | 114.1 / 21.2 ms | 108.6 / 29.9 ms |
+| flate2, 2 KiB input | 186.4 / 112.3 ms | 205.0 / 132.7 ms |
 
-Concrete emission takes roughly 2–3 µs per promoted loop; machine-code publication takes hundreds
-of microseconds to over a millisecond in these samples. The uniform work policy repays its cost on
-the repeated copy loop and loses on short/native-call-heavy work. Compiling just the shared template
-also has a startup cost: for the 64 briefly used instances it costs about 0.977 ms plus 0.317 ms of
-execution, while compiling all 64 concrete entries costs about 13.7 ms. These controls support
-cost-aware policy selection, not unconditional compilation of either form.
+The many-instance result includes a nomination-policy difference: each concrete kernel stays below
+its 1,000-entry trigger, while shared entries combine their calls and compile one region used by all
+64 instances. It is not evidence that compiling a common body alone saves 64 ms. Three additional
+alternating pairs force compilation from the first call under both policies. Whole-process medians
+are 376.5 / 329.8 ms for many instances, 319.3 / 326.6 ms for two hot instances, and 342.1 / 310.6 ms
+for tiny bodies (direct / shared). All 18 forced samples match native. In the many-instance diagnostic
+capture, total compiled functions fall from 886 to 746 and compiler time from 282.8 to 252.5 ms.
+That establishes reuse of compilation work; these forced startup costs are not a proposed policy.
 
-For 4,096 synthetic nominal entries with equal descriptors, preparing adapters takes 0.919 ms versus
-4.454 ms for concrete bodies. First result excluding audit serialization is 2.361 versus 6.025 ms;
-peak process RSS is 33 versus 45 MiB. This isolates IR construction and is not a measurement of
-4,096 real type/layout queries. Existing canonical fragments deduplicate the concrete controls,
-and the experiment's transient adapter pointer literals are not a production storage design;
-serialized-body reduction is not a disk-saving claim.
+Shared-entry setup decodes shared descriptors and groups/translates all templates before entry,
+taking roughly 3.4–4.3 ms in the diagnostic runs even when no shared code executes. In flate, 128
+instances enter 20 compiled regions, with 302,682 compiled activations and 615,455 region exits.
+Compiler time falls only from 55.9 to 52.7 ms while engine time rises. Serde's process medians have
+large startup variation and do not establish a speedup; its engine median increases by 8.7 ms.
+First completed-batch output for the many-instance workload also moves later, from 41.2 to 52.8 ms,
+despite its lower final elapsed time. Sparse and native-wrapper runs compile no shared regions.
 
-The final binary passes 30 synthetic differentials, 90 timing-sample result checks, six execution
-checks of the real exported MIR, native descriptor agreement, and two rejection checks. Coverage
-includes mixed layouts, aligned ZSTs, const lengths distinct from the runtime argument, native Rust
-Clone/Drop C-unwind cleanup and reentry, and a single long invocation that never promotes despite
-crossing its work threshold. Native witnesses do not prove guest panic ownership or a general
-trait resolver. No full repository test tier is claimed.
+Separate flate CPU profiles contain 348 / 363 samples (direct / shared), with zero lost samples.
+Interpreter dispatch, statement evaluation and frame setup remain prominent; under the shared
+policy, their individual self-time shares include 13.6% in the block loop, 12.7% in statement
+execution, 10.6% in dispatch and 4.5% in frame entry. These short captures do not isolate every
+source of the regression, and their overhead is excluded from the latency table. The ledger and
+profiles support reducing the repeated frame/call boundary before extending this tier broadly.
 
-The prototype's serial, process-global body override is confined to a disposable source copy.
-The production interpreter uses its entry-selected body throughout normal execution and cleanup;
-per-Engine generic entries must retain both body and descriptor before concurrent promotion.
-Production integration and its measured limits are described above. The remaining integration
-roadmap and acceptance gates are owned by
-[runtime-generics-design.md](designs/runtime-generics-design.md); OSR is T13.
+The experiment supports a shared frame-entry ABI and compilation reuse across real instance
+layouts. It does not justify an unconditional middle tier. Remaining work is lazy admission of
+profitable template groups, fewer interpreter/compiled transitions, and concrete specialization for
+hot instances without trapping them permanently in shared code. Code/RSS, trace and full lifecycle
+gates remain open. The production source and default options are unchanged; the isolated patch
+passes all-target/all-feature Clippy. No full runtime test tier was run.
+
+`experiments/runtime-generics` also provides the bounded MIR-export and synthetic execution controls.
+The selected product contract and remaining gates belong to
+[runtime-generics-design.md](designs/runtime-generics-design.md); OSR remains deferred under T13.
 
 ## 4. Gaps and honest limits
 
