@@ -60,6 +60,27 @@ mode_run() {
         fi
     }
 
+    expect_output() {
+        local desc="$1" want="$2" tag="$3"
+        if [ "$(cat "$TMP/$tag.out")" = "$want" ]; then
+            echo "PASS $desc"; pass=$((pass + 1))
+        else
+            echo "FAIL $desc: stdout differs"
+            head -20 "$TMP/$tag.out"; fail=$((fail + 1))
+        fi
+    }
+
+    expect_bound_hit() {
+        local desc="$1" tag="$2"
+        expect_stderr "$desc reports a cache load" "cache-load=" "$tag"
+        if grep -qE 'frontend=|lower=|layer-load=|base-load=' "$TMP/$tag.err"; then
+            echo "FAIL $desc entered the preparation pipeline"
+            head -20 "$TMP/$tag.err"; fail=$((fail + 1))
+        else
+            echo "PASS $desc loaded the bound image directly"; pass=$((pass + 1))
+        fi
+    }
+
     # ① prepare does the whole build, reports the phases, and does not run the guest.
     run_mirvm "prepare builds and stops" 0 prep "$MIRVM" prepare "$clean"
     expect_stderr "prepare reports the compiler frontend" "frontend=" prep
@@ -71,13 +92,7 @@ mode_run() {
 
     # ② what prepare built is what the next run loads: no frontend phase, just the cache.
     run_mirvm "run after prepare" 0 warm env MIRVM_TIMING=1 "$MIRVM" run "$clean"
-    expect_stderr "run after prepare is a cache hit" "cache-load=" warm
-    if grep -q "frontend=" "$TMP/warm.err"; then
-        echo "FAIL run after prepare rebuilt the guest"
-        head -5 "$TMP/warm.err"; fail=$((fail + 1))
-    else
-        echo "PASS run after prepare compiled nothing"; pass=$((pass + 1))
-    fi
+    expect_bound_hit "run after prepare" warm
 
     # ③ the guest's own compiler warning is preparation detail: held back by default.
     run_mirvm "plain run of a warning guest" 0 quiet "$MIRVM" run "$warning"
@@ -122,7 +137,12 @@ EOF
         "$MIRVM" prepare --vm-call main "$clean"
     expect_stderr "prepare names the flag it rejects" "--vm-call" reject
     run_mirvm "prepare without an input" 2 no-input "$MIRVM" prepare
-    expect_stderr "the missing input is prepare's, not run's" "`prepare` needs an input" no-input
+    expect_stderr "the missing input is prepare's, not run's" '`prepare` needs an input' no-input
+    run_mirvm "install without an input" 2 install-no-input "$MIRVM" install
+    expect_stderr "the missing input names install" '`install` needs an input' install-no-input
+    run_mirvm "install rejects guest arguments" 2 install-args \
+        "$MIRVM" install "$clean" -- guest-arg
+    expect_stderr "install names the execution boundary" '`install` stops short of' install-args
 
     # ⑧ the dependency track does not change what prepare means for a single file: a plain .rs never
     # takes the Cargo track, so this must behave exactly like the default-track prepare above. The
@@ -130,6 +150,98 @@ EOF
     run_mirvm "prepare under MIRVM_DEPS=cargo" 0 prep-cargo \
         env MIRVM_DEPS=cargo "$MIRVM" prepare "$clean"
     expect_stderr "prepare under MIRVM_DEPS=cargo reports its phases" "mirvm-timing:" prep-cargo
+
+    # Both dependency tracks must prepare the selected root, including its generic dependency,
+    # before reporting success. Cargo must also invoke its runner when the launcher is already fresh.
+    local track project tag
+    for track in self cargo; do
+        project="$TMP/project-$track"
+        mkdir -p "$project/src/bin" "$project/dep/src"
+        cat >"$project/Cargo.toml" <<'EOF'
+[package]
+name = "prepared-app"
+version = "0.1.0"
+edition = "2024"
+default-run = "selected"
+
+[dependencies]
+prepared-dep = { path = "dep" }
+EOF
+        cat >"$project/dep/Cargo.toml" <<'EOF'
+[package]
+name = "prepared-dep"
+version = "0.1.0"
+edition = "2024"
+EOF
+        cat >"$project/dep/src/lib.rs" <<'EOF'
+pub fn identity<T>(value: T) -> T { value }
+EOF
+        cat >"$project/src/main.rs" <<'EOF'
+fn main() { println!("unselected guest ran"); }
+EOF
+        cat >"$project/src/bin/selected.rs" <<'EOF'
+fn main() {
+    let number = prepared_dep::identity(42u64);
+    let label = prepared_dep::identity(include_str!("message.txt").trim());
+    println!("{label}:{number}");
+}
+EOF
+        printf 'installed\n' >"$project/src/bin/message.txt"
+        tag="install-$track"
+        run_mirvm "install on $track" 0 "$tag" \
+            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 "$MIRVM" install "$project"
+        expect_output "install on $track invoked no guest" "" "$tag"
+        expect_stderr "install on $track lowered the root" "frontend=" "$tag"
+        run_mirvm "first installed run on $track" 0 "$tag-run" \
+            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 MIRVM_TIMING=1 \
+            "$MIRVM" run "$project"
+        expect_output "installed default target on $track" "installed:42" "$tag-run"
+        expect_bound_hit "first installed run on $track" "$tag-run"
+
+        run_mirvm "clear installed images on $track" 0 "$tag-purge" "$MIRVM" cache purge --ir
+        run_mirvm "prepare fresh dependency artifacts on $track" 0 "$tag-prepare" \
+            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 "$MIRVM" prepare "$project"
+        expect_stderr "prepare on $track still lowered its fresh launcher" "frontend=" "$tag-prepare"
+        expect_output "prepare on $track invoked no guest" "" "$tag-prepare"
+        run_mirvm "first prepared run on $track" 0 "$tag-prepared-run" \
+            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 MIRVM_TIMING=1 \
+            "$MIRVM" run "$project"
+        expect_bound_hit "first prepared run on $track" "$tag-prepared-run"
+
+        printf 'edited\n' >"$project/src/bin/message.txt"
+        run_mirvm "changed source input on $track" 0 "$tag-edited" \
+            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 MIRVM_TIMING=1 \
+            "$MIRVM" run "$project"
+        expect_stderr "changed input invalidates $track's image" "frontend=" "$tag-edited"
+        expect_output "changed input is observed on $track" "edited:42" "$tag-edited"
+    done
+
+    # A failed optional delta cannot damage the live module or prevent complete image publication.
+    mv "$home/cache/ir" "$TMP/saved-ir"
+    touch "$home/cache/ir"
+    cp "$clean" "$TMP/optional-delta.rs"
+    run_mirvm "install survives an optional delta publication failure" 0 optional-delta \
+        "$MIRVM" install "$TMP/optional-delta.rs"
+    expect_output "optional publication failure ran no guest" "" optional-delta
+    run_mirvm "run with an unavailable delta store" 0 optional-run \
+        env MIRVM_TIMING=1 "$MIRVM" run "$TMP/optional-delta.rs"
+    expect_output "optional publication preserved the program" "prepare-clean-ran" optional-run
+    expect_bound_hit "run after optional delta failure" optional-run
+    rm "$home/cache/ir"
+    mv "$TMP/saved-ir" "$home/cache/ir"
+
+    # A required bound-image publication failure must fail installation without invoking the guest.
+    mv "$home/cache/execution" "$TMP/saved-execution"
+    touch "$home/cache/execution"
+    run_mirvm "install reports required publication failure" 1 failed-install \
+        "$MIRVM" install "$clean"
+    expect_stderr "install identifies required publication failure" \
+        "cannot publish the prepared execution image" failed-install
+    expect_output "failed install invoked no guest" "" failed-install
+    run_mirvm "ordinary run survives publication failure" 0 failed-run "$MIRVM" run "$clean"
+    expect_output "ordinary run preserves the guest result" "prepare-clean-ran" failed-run
+    rm "$home/cache/execution"
+    mv "$TMP/saved-execution" "$home/cache/execution"
 
     echo "prepare: $pass passed, $fail failed"
     [ "$fail" -eq 0 ]

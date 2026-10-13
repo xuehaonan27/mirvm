@@ -332,13 +332,17 @@ pub fn store_and_wrap(
                 static_syms: &static_syms,
                 frozen: taken.as_ref().map(manifest::Frozen::reference),
             };
-            manifest::encode(&file).map(|bytes| (bytes, tables))
+            let encoded = manifest::encode(&file);
+            tables
+                .restore(&mut bi.module, &unit, &symbols)
+                .expect("captured tables resolve against the unchanged stack");
+            encoded
         });
         if let Some(taken) = taken {
             taken.put_back(&mut bi.module);
         }
         let manifest_bytes = match manifest {
-            Some(Ok((bytes, tables))) => Some((bytes, tables)),
+            Some(Ok(bytes)) => Some(bytes),
             _ => None,
         };
         // The publish locks are held across the record packs and the closure manifest that names
@@ -358,15 +362,12 @@ pub fn store_and_wrap(
                     }
                 })
                 .is_ok();
-        if let (true, Some((bytes, tables))) = (held, manifest_bytes) {
+        if let (true, Some(bytes)) = (held, manifest_bytes) {
             let path = file_path(&key);
             let dir_exists = path
                 .parent()
                 .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok());
             if dir_exists && crate::store::publish_bytes(&path, &bytes).is_ok() {
-                // The manifest is written: put the layer's own ids back, so this session keeps
-                // running the layer it just wrote (and the stack it hands to absorb carries them).
-                let _ = tables.restore(&mut bi.module, &unit, &symbols);
                 bi.key = key;
                 return bi;
             }

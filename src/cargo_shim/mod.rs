@@ -129,7 +129,7 @@ fn cargo_target_dir() -> PathBuf {
     target_dir
 }
 
-fn cargo_runner_config(self_exe: &Path, capture_directory: Option<&Path>) -> String {
+fn cargo_runner_config(self_exe: &Path, capture_directory: Option<&Path>, prepare: bool) -> String {
     let quote = |value: &Path| {
         value
             .to_str()
@@ -137,8 +137,13 @@ fn cargo_runner_config(self_exe: &Path, capture_directory: Option<&Path>) -> Str
             .replace('\\', "\\\\")
             .replace('\'', "\\'")
     };
+    let command = if prepare {
+        "__prepare-runner"
+    } else {
+        "runner"
+    };
     let mut config = format!(
-        "target.'cfg(all())'.runner=['{}', 'runner'",
+        "target.'cfg(all())'.runner=['{}', '{command}'",
         quote(self_exe)
     );
     if let Some(directory) = capture_directory {
@@ -190,14 +195,13 @@ fn cargo_project_command(
     // Force the host target: it makes host and target crates distinguishable and activates
     // target.runner
     cmd.arg("--target").arg(crate::options::build::HOST);
-    // Every action that ends in running a binary is redirected to us; `build` is the one action
-    // that stops before that, so it gets Cargo's own progress and no runner.
-    if !matches!(action, CargoAction::Build { .. }) {
-        cmd.arg("--config").arg(cargo_runner_config(
-            self_exe,
-            crate::cli::capture_directory(),
-        ));
-    }
+    // Preparation also enters the runner: the recorded root still needs lowering and a complete
+    // bound image. Its separate entry point stops after publication without invoking guest code.
+    cmd.arg("--config").arg(cargo_runner_config(
+        self_exe,
+        crate::cli::capture_directory(),
+        matches!(action, CargoAction::Prepare { .. }),
+    ));
     // Shared dependency store: every script/project mirvm build uses the same target dir.
     // The cargo fingerprint is a content-addressed compile key (version x features x
     // dependency closure x flags x toolchain), so one crate compilation unit exists once per
@@ -215,9 +219,9 @@ fn cargo_project_command(
     if matches!(action, CargoAction::Run { .. }) {
         cmd.arg("--quiet");
     }
-    // `build` takes no trailing arguments; the Run and Test actions pass the guest's, and the test
+    // Preparation has no guest arguments; the Run and Test actions pass the guest's, and the test
     // harness's own, after `--`.
-    if !matches!(action, CargoAction::Build { .. }) && !program_args.is_empty() {
+    if !matches!(action, CargoAction::Prepare { .. }) && !program_args.is_empty() {
         cmd.arg("--");
         cmd.args(program_args);
     }
@@ -249,7 +253,7 @@ fn cargo_project_command(
 
 /// A user action on the Cargo-compatible track. Every action shares one wrapper/runner
 /// protocol; they differ in what Cargo is asked to do with the binaries it compiles: run one,
-/// run and launch several test harnesses, or build them and stop.
+/// run and launch several test harnesses, or prepare one selected target and stop.
 #[derive(Clone, Copy)]
 enum CargoAction<'a> {
     Run {
@@ -259,8 +263,8 @@ enum CargoAction<'a> {
     Test {
         cargo_args: &'a [String],
     },
-    /// `mirvm prepare`: Cargo's own cache is the preparation, and the guest is never launched.
-    Build {
+    /// Select and build like `cargo run`, then prepare the recorded root without executing it.
+    Prepare {
         bin_sel: Option<&'a str>,
         ignore_rust_version: bool,
     },
@@ -269,9 +273,8 @@ enum CargoAction<'a> {
 impl CargoAction<'_> {
     fn subcommand(self) -> &'static str {
         match self {
-            Self::Run { .. } => "run",
+            Self::Run { .. } | Self::Prepare { .. } => "run",
             Self::Test { .. } => "test",
-            Self::Build { .. } => "build",
         }
     }
 
@@ -281,7 +284,7 @@ impl CargoAction<'_> {
                 bin_sel: Some(bin),
                 ignore_rust_version,
             }
-            | Self::Build {
+            | Self::Prepare {
                 bin_sel: Some(bin),
                 ignore_rust_version,
             } => {
@@ -294,7 +297,7 @@ impl CargoAction<'_> {
                 bin_sel: None,
                 ignore_rust_version,
             }
-            | Self::Build {
+            | Self::Prepare {
                 bin_sel: None,
                 ignore_rust_version,
             } => {
@@ -310,7 +313,7 @@ impl CargoAction<'_> {
 }
 
 /// Phase 1: drive cargo in `project_dir`. program_args go to the program that is finally
-/// interpreted; a `prepare` process is asked for a build instead, and never launches one.
+/// interpreted; preparation enters the same runner but stops before guest entry.
 pub fn phase_cargo(
     project_dir: &std::path::Path,
     program_args: &[String],
@@ -338,11 +341,8 @@ pub fn phase_cargo(
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
     let locked = crate::options::cargo_locked();
-    // On this track Cargo is the preparer: `cargo build` produces the dependency artifacts and the
-    // crate's own metadata, and Cargo's fingerprints make the following run a no-op for everything
-    // but the runner's own lowering session.
     let action = if crate::cli::prepare_only() {
-        CargoAction::Build {
+        CargoAction::Prepare {
             bin_sel,
             ignore_rust_version,
         }
@@ -581,6 +581,7 @@ mod tests {
         let config = cargo_runner_config(
             Path::new("/tmp/mirvm"),
             Some(Path::new("/tmp/capture output")),
+            false,
         );
         assert_eq!(
             config,
@@ -664,14 +665,12 @@ mod tests {
         );
     }
 
-    /// `prepare` on this track is `cargo build`: one binary selected the same way, Cargo's own
-    /// progress (no `--quiet`), and no runner — nothing is launched, so nothing is redirected.
     #[test]
-    fn cargo_build_action_selects_a_binary_and_redirects_nothing() {
+    fn cargo_prepare_action_lowers_the_selected_binary_without_running_it() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
             Path::new("/tmp/caller"),
-            CargoAction::Build {
+            CargoAction::Prepare {
                 bin_sel: Some("app"),
                 ignore_rust_version: true,
             },
@@ -681,7 +680,7 @@ mod tests {
             false,
         );
         let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args[0], OsStr::new("build"));
+        assert_eq!(args[0], OsStr::new("run"));
         assert!(
             args.windows(2)
                 .any(|pair| pair == [OsStr::new("--bin"), OsStr::new("app")])
@@ -691,8 +690,12 @@ mod tests {
                 .any(|arg| *arg == OsStr::new("--ignore-rust-version"))
         );
         assert!(
-            args.iter().all(|arg| *arg != OsStr::new("--config")),
-            "a build has no runner: {args:?}"
+            args.windows(2).any(|pair| pair
+                == [
+                    OsStr::new("--config"),
+                    OsStr::new("target.'cfg(all())'.runner=['/tmp/mirvm', '__prepare-runner']"),
+                ]),
+            "preparation must enter the root lowering runner: {args:?}"
         );
         assert!(
             args.iter().all(|arg| *arg != OsStr::new("--quiet")),

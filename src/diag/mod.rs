@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum Component {
     Run,
     Prepare,
+    Install,
     Pack,
     Test,
     Capture,
@@ -63,6 +64,7 @@ impl Component {
         match self {
             Component::Run => "run",
             Component::Prepare => "prepare",
+            Component::Install => "install",
             Component::Pack => "pack",
             Component::Test => "test",
             Component::Capture => "capture",

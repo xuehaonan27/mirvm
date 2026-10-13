@@ -63,17 +63,24 @@ fn load_bytes(bytes: Vec<u8>, args: &[String]) -> Option<VerifiedArtifact> {
     Some(artifact)
 }
 
-pub(crate) fn store(args: &[String], inputs: InputManifest, module: &Module, instance: &Instance) {
+pub(crate) fn store(
+    args: &[String],
+    inputs: InputManifest,
+    module: &Module,
+    instance: &Instance,
+) -> Result<(), crate::error::Error> {
     if disabled() {
-        return;
+        return Err(crate::fail!(Image, "execution-image caching is disabled"));
     }
-    let Some(bytes) = encode(args, inputs, module, instance) else {
-        return;
-    };
-    if std::fs::create_dir_all(crate::store::EXECUTION.dir()).is_err() {
-        return;
-    }
-    let _ = crate::store::publish_bytes(&path(args), &bytes);
+    let bytes = encode(args, inputs, module, instance)?;
+    std::fs::create_dir_all(crate::store::EXECUTION.dir()).map_err(|error| {
+        crate::fail!(
+            Image,
+            format!("cannot create execution-image directory: {error}")
+        )
+    })?;
+    crate::store::publish_bytes(&path(args), &bytes)
+        .map_err(|error| crate::fail!(Image, format!("cannot publish execution image: {error}")))
 }
 
 fn encode(
@@ -81,21 +88,33 @@ fn encode(
     inputs: InputManifest,
     module: &Module,
     instance: &Instance,
-) -> Option<Vec<u8>> {
+) -> Result<Vec<u8>, crate::error::Error> {
     if !crate::store::entry::snapshot_is_publishable(module, instance, None)
         || instance
             .image_frozens
             .iter()
             .any(|arena| !arena.at_fixed_base())
-        || crate::vm::verify::module(module, instance).is_err()
     {
-        return None;
+        return Err(crate::fail!(
+            Image,
+            "execution image does not occupy its fixed address domains"
+        ));
     }
+    crate::vm::verify::module(module, instance).map_err(|error| {
+        crate::fail!(
+            Image,
+            format!("execution image failed verification: {error}")
+        )
+    })?;
     let native_files = module
         .required_native_libs
         .iter()
-        .map(|path| FileStamp::of(std::path::Path::new(path.as_ref())).ok())
-        .collect::<Option<Vec<_>>>()?;
+        .map(|path| {
+            FileStamp::of(std::path::Path::new(path.as_ref())).map_err(|error| {
+                crate::fail!(Image, format!("cannot stamp native input {path}: {error}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let header = Header {
         build_id: crate::options::build::BUILD_ID.into(),
         target: crate::options::build::HOST.into(),
@@ -103,22 +122,32 @@ fn encode(
         inputs,
         native_files,
     };
-    let Ok(mut bytes) = postcard::to_stdvec(&header) else {
-        return None;
-    };
-    let Ok(metadata) = postcard::to_stdvec(&meta::ModuleMetaRef::from((module, instance))) else {
-        return None;
-    };
-    let Ok(functions) = functions::encode(&module.funcs) else {
-        return None;
-    };
+    let mut bytes = postcard::to_stdvec(&header).map_err(|error| {
+        crate::fail!(
+            Image,
+            format!("cannot encode execution-image header: {error}")
+        )
+    })?;
+    let metadata =
+        postcard::to_stdvec(&meta::ModuleMetaRef::from((module, instance))).map_err(|error| {
+            crate::fail!(
+                Image,
+                format!("cannot encode execution-image metadata: {error}")
+            )
+        })?;
+    let functions = functions::encode(&module.funcs).map_err(|error| {
+        crate::fail!(
+            Image,
+            format!("cannot encode execution-image functions: {error}")
+        )
+    })?;
     bytes.reserve(metadata.len() + rkyv::AlignedVec::ALIGNMENT - 1 + functions.len() + 32);
     bytes.extend(metadata);
     bytes.resize(bytes.len().next_multiple_of(rkyv::AlignedVec::ALIGNMENT), 0);
     bytes.extend_from_slice(&functions);
     let hash = blake3::hash(&bytes);
     bytes.extend_from_slice(hash.as_bytes());
-    Some(bytes)
+    Ok(bytes)
 }
 
 #[cfg(test)]

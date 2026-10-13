@@ -587,6 +587,9 @@ pub(crate) fn store(
     if let Some(taken) = taken {
         taken.put_back(&mut bi.module);
     }
+    tables
+        .restore(&mut bi.module, &unit_view, &symbols)
+        .expect("captured tables resolve against the unchanged stack");
     let Ok(bytes) = encoded else {
         return super::deps::degraded(bi);
     };
@@ -614,9 +617,6 @@ pub(crate) fn store(
     {
         let _ = std::fs::remove_file(path);
     }
-    // The manifest is written: put the layer's own ids back, so this session keeps running the layer
-    // it just wrote (and the stack it hands to absorb carries them).
-    let _ = tables.restore(&mut bi.module, &unit_view, &symbols);
     bi.key = format!("{unit_key}-{digest}");
     bi
 }

@@ -238,12 +238,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   target dir is still not delivered. Schedule on real need.
 - **D7** `OPEN`: change frontend/base preparation at the boundaries identified in
   [frontend-boundary.md](designs/frontend-boundary.md):
-  - Implement project `install` through a shared preparation pipeline with `prepare`: lower the
-    selected target's concrete dependency instances, publish shared products and a complete bound
-    image, and stop before program entry. Fix the default cold preparation path's early return and
-    drive root lowering on the Cargo track, which currently stops at `cargo build`. Verify the first
-    unchanged run needs no frontend/lowering and publication failures cannot report installation
-    success; the product contract is in distribution §2.7 above.
   - Explain the prepared-base setup regression with separate measurements of canonical-symbol
     lookup and first-program native materialization; a cold-build gain does not establish a gain
     when the base is already present.
@@ -264,9 +258,9 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     guest trait/drop/unwind, concurrency, callbacks, fork, signal and trace contracts as admission
     grows. Retain Rust diagnostics, build-script/proc-macro, layout/ABI, std and input invalidation;
     coordinate single-invocation optimization with T13.
-  - Diagnose the generic-matrix cache-publication transition: with only std base retained, the first
-    run reports no program-cache store and the second re-enters analysis/lowering with shared units;
-    a later run reaches a bound-image hit. Preserve this distinction in installation acceptance.
+  - Symbolic program deltas cannot represent every anonymous address in a lower dependency layer.
+    Bound-image publication is independent, but edited-program sharing still needs a stable
+    representation for those references without inventing symbol identities or weakening validation.
 - **D8** `UNSCHEDULED`: the real-project correctness probes still have no timing gate. Only `load`,
   `rayon-gate` and `fib32` carry a ceiling in `tests/manifest`, plus the `resources` metering case; no
   real-project probe has one. Add ceilings on real-workload demand.

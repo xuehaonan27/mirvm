@@ -556,29 +556,29 @@ impl Tables {
         tls_by_sym: &std::collections::HashMap<Box<str>, crate::vm::ir::TlsId>,
     ) -> Result<Tables, crate::error::Error> {
         let mut tables = Tables::default();
-        for (name, id) in module.exports.drain() {
-            tables
-                .exports
-                .push((name, project_owned(Space::Func, id, unit, symbols)?));
+        for (name, id) in &module.exports {
+            tables.exports.push((
+                name.clone(),
+                project_owned(Space::Func, *id, unit, symbols)?,
+            ));
         }
         // The map's own order is its hasher's, and a manifest is content-addressed: two sessions of
         // one unit must encode the same bytes, so a symbol-keyed table is written in symbol order.
         tables.exports.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        for (addr, id) in std::mem::take(&mut module.fn_entry_links) {
+        for (addr, id) in &module.fn_entry_links {
             tables
                 .fn_entry_links
-                .push((addr, project_owned(Space::Func, id, unit, symbols)?));
+                .push((*addr, project_owned(Space::Func, *id, unit, symbols)?));
         }
         // The link table is a map keyed by address, and lowering builds it one function at a time:
         // its order is the pass's, so it is sorted here for the same reason the symbol tables are.
         tables
             .fn_entry_links
             .sort_unstable_by_key(|(addr, _)| addr.0);
-        for site in &mut module.entry_stub_sites {
+        for site in &module.entry_stub_sites {
             tables
                 .entry_stub_funcs
                 .push(project_owned(Space::Func, site.func, unit, symbols)?);
-            site.func = 0;
         }
         for (name, id) in tls_by_sym {
             tables
@@ -586,6 +586,13 @@ impl Tables {
                 .push((name.clone(), project_owned(Space::Tls, *id, unit, symbols)?));
         }
         tables.tls_syms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        // Projection can fail for a symbol absent from the lower layers. Leave the runnable
+        // module intact until every table has a canonical representation.
+        module.exports.clear();
+        module.fn_entry_links.clear();
+        for site in &mut module.entry_stub_sites {
+            site.func = 0;
+        }
         Ok(tables)
     }
 
@@ -1126,6 +1133,29 @@ mod tests {
             thunk_args: Vec::new(),
             unwind: true,
         }
+    }
+
+    #[test]
+    fn failed_table_projection_preserves_the_runnable_module() {
+        let unit = unit();
+        let symbols = symbols_with_func();
+        let mut module = crate::vm::ir::Module::default();
+        module.exports.insert("mine".into(), 11);
+        module.fn_entry_links.push((LinkAddr(unit.code.0), 12));
+        module.entry_stub_sites.push(crate::vm::ir::EntryStubSite {
+            link_addr: LinkAddr(unit.code.0 + 0x20),
+            func: 13,
+            sig: sig(),
+        });
+        let exports = module.exports.clone();
+        let links = module.fn_entry_links.clone();
+        // TLS is processed last, after all executable tables have been projected.
+        let invalid_tls = HashMap::from([(Box::<str>::from("missing"), 99)]);
+        assert!(Tables::capture(&mut module, &unit, &symbols, &invalid_tls).is_err());
+        assert_eq!(module.exports, exports);
+        assert_eq!(module.fn_entry_links, links);
+        assert_eq!(module.entry_stub_sites[0].func, 13);
+        assert!(Tables::capture(&mut module, &unit, &symbols, &HashMap::new()).is_ok());
     }
 
     #[test]

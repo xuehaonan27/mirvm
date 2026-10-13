@@ -16,7 +16,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
 use crate::depinfo::InputManifest;
@@ -170,23 +169,23 @@ fn lowering_fp(stack: &crate::image::ImageStack) -> (bool, bool, bool) {
         .unwrap_or((false, false, false))
 }
 
-/// Cold-path store (clean state right after lower finishes and before guest runs). Returns whether
-/// the input identity used by the published entry.
+/// Publish the program delta before guest execution. Its input manifest also identifies the
+/// self-contained execution image, independently of whether this optional symbolic delta is stored.
 pub fn store(
-    tcx: TyCtxt<'_>,
     rustc_args: &[String],
+    inputs: &InputManifest,
     module: &mut ir::Module,
     instance: &Instance,
     stack: &crate::image::ImageStack,
-) -> Option<InputManifest> {
+) -> Result<(), crate::error::Error> {
     if disabled() {
-        return None;
+        return Err(crate::fail!(Image, "program-image caching is disabled"));
     }
     let base_key = stack.key();
     let below = stack.below();
-    if crate::vm::verify::module_below(module, instance, below).is_err() {
-        return None;
-    }
+    crate::vm::verify::module_below(module, instance, below).map_err(|error| {
+        crate::fail!(Image, format!("program delta failed verification: {error}"))
+    })?;
     // The frozen area must be at a fixed base (a concurrent preempt or an ASLR conflict leaves
     // embedded addresses cross-process invalid); a delta may sit at any fixed base, since the file
     // records its own domain.
@@ -194,15 +193,16 @@ pub fn store(
     // through GOT slots since P2 (decision-history §7.5c): the GOT table travels with the snapshot
     // and is refilled with this process's real values at startup, so it is not a cache blocker.
     if !crate::store::entry::snapshot_is_publishable(module, instance, None) {
-        return None;
+        return Err(crate::fail!(
+            Image,
+            "program delta does not occupy its fixed address domains"
+        ));
     }
-    let Some(inputs) = InputManifest::collect(tcx) else {
-        return None; // some input could not be stamped (missing/unusual) — prefer not to cache
-    };
     let frozen = module
         .frozen
         .as_ref()
-        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))?;
+        .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))
+        .ok_or_else(|| crate::fail!(Image, "program delta has no frozen snapshot"))?;
 
     // The bodies move into the fragment store — which is what makes this entry incremental across an
     // edit, and what lets two programs share a body they both have — and the manifest keeps the rest.
@@ -216,9 +216,8 @@ pub fn store(
             let tables = manifest::Tables::capture(module, &unit, &symbols, &HashMap::new())?;
             Ok((records, tables))
         });
-    let Ok((records, tables)) = projected else {
-        return None;
-    };
+    let (records, tables) = projected
+        .map_err(|error| crate::fail!(Image, format!("cannot project program delta: {error}")))?;
     let fp = lowering_fp(stack);
     // A program's frozen region is the part of it that most edits leave alone and every edit
     // rewrites, so it goes to the chunk store rather than into the entry. The region comes back
@@ -249,18 +248,26 @@ pub fn store(
     if let Some(taken) = taken {
         taken.put_back(module);
     }
-    let Ok(manifest_bytes) = encoded else {
-        return None;
-    };
-    let header = Header {
-        build_id: crate::options::build::BUILD_ID.to_string(),
-        args: rustc_args.to_vec(),
+    tables
+        .restore(module, &unit, &symbols)
+        .expect("captured tables resolve against the unchanged stack");
+    let manifest_bytes = encoded
+        .map_err(|error| crate::fail!(Image, format!("cannot encode program manifest: {error}")))?;
+    #[derive(Serialize)]
+    struct HeaderRef<'a> {
+        build_id: &'a str,
+        args: &'a [String],
+        inputs: &'a InputManifest,
+        base_key: Option<&'a str>,
+    }
+    let header = HeaderRef {
+        build_id: crate::options::build::BUILD_ID,
+        args: rustc_args,
         inputs,
-        base_key: base_key.map(str::to_owned),
+        base_key,
     };
-    let Ok(mut buf) = postcard::to_stdvec(&header) else {
-        return None;
-    };
+    let mut buf = postcard::to_stdvec(&header)
+        .map_err(|error| crate::fail!(Image, format!("cannot encode program header: {error}")))?;
     buf.extend(manifest_bytes);
 
     // Chunks and fragments first, the entry last: an entry that names what the store does not hold is
@@ -269,12 +276,12 @@ pub fn store(
     let _publishing = crate::store::frags::publish_lock();
     let chunks_store = crate::store::frozen::System::open();
     let _chunk_publishing = chunks_store.publish_lock();
-    let Ok(chunk_published) = chunks_store.publish(chunks) else {
-        return None;
-    };
-    if session.publish().is_err() {
-        return None;
-    }
+    let chunk_published = chunks_store
+        .publish(chunks)
+        .map_err(|error| crate::fail!(Image, format!("cannot publish frozen chunks: {error}")))?;
+    session.publish().map_err(|error| {
+        crate::fail!(Image, format!("cannot publish program fragments: {error}"))
+    })?;
     if crate::options::a2_debug() {
         // What the entry stores beside its fragments: the frozen region, as the chunks it is cut into,
         // and how much of that the store already held — which is what an edit's frozen bytes cost.
@@ -289,17 +296,16 @@ pub fn store(
     }
     // Atomic publish: a reader sees either the previous entry or this one, never a half-written file.
     let path = entry_path(rustc_args);
-    let dir = path.parent()?;
-    if std::fs::create_dir_all(dir).is_err() {
-        return None;
-    }
-    if crate::store::publish_bytes(&path, &buf).is_err() {
-        return None;
-    }
-    // The entry is written: put this module's own ids back, so the session keeps running the module it
-    // just wrote.
-    let _ = tables.restore(module, &unit, &symbols);
-    Some(header.inputs)
+    let dir = path.parent().expect("program entry has a store directory");
+    std::fs::create_dir_all(dir).map_err(|error| {
+        crate::fail!(
+            Image,
+            format!("cannot create program-image directory: {error}")
+        )
+    })?;
+    crate::store::publish_bytes(&path, &buf)
+        .map_err(|error| crate::fail!(Image, format!("cannot publish program image: {error}")))?;
+    Ok(())
 }
 
 #[cfg(test)]

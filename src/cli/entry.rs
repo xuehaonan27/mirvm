@@ -383,7 +383,7 @@ pub(super) fn deps_main(
     }
 }
 
-/// `mirvm prepare`: everything `run` does up to the guest's first instruction, then stop.
+/// `mirvm prepare` and `mirvm install`: build execution products, then stop before guest entry.
 ///
 /// The uv-shaped split: the half that can fail for a reason the user has to fix has its own
 /// command, so a run can stay quiet about it. `prepare` shows what it does — progress lines, the
@@ -391,6 +391,7 @@ pub(super) fn deps_main(
 ///
 /// An explicit `MIRVM_LOG` still outranks this default, and `-v` outranks both.
 pub(super) fn prepare_main(
+    command: &str,
     args: impl Iterator<Item = String>,
 ) -> Result<ExitCode, crate::error::Error> {
     let args: Vec<String> = args.collect();
@@ -399,7 +400,7 @@ pub(super) fn prepare_main(
     if let Some(name) = execution_only_argument(&args) {
         return Err(crate::error::Error::usage(
             crate::diag::Component::Prepare,
-            format!("`{name}` only affects guest execution, which `prepare` stops short of"),
+            format!("`{name}` only affects guest execution, which `{command}` stops short of"),
         ));
     }
     // The shared parser's own "needs an input" names `run`, so the missing argument is caught here,
@@ -407,7 +408,7 @@ pub(super) fn prepare_main(
     if !args.iter().any(|arg| !arg.starts_with('-')) {
         return Err(crate::error::Error::usage_with(
             crate::diag::Component::Prepare,
-            "`prepare` needs an input",
+            format!("`{command}` needs an input"),
             crate::cli::usage(),
         ));
     }
@@ -596,6 +597,9 @@ pub(super) fn run_main(
         let addresses = crate::lower::asm::try_materialize(&artifact.module().asm_sites)
             .map_err(crate::pack::Error::from)?;
         artifact.set_asm_addrs(addresses)?;
+        if crate::cli::prepare_only() {
+            return Ok(ExitCode::SUCCESS);
+        }
         let mut program_argv = vec![input];
         program_argv.extend(program_args);
         let code = run_verified_engine(

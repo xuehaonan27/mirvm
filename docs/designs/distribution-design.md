@@ -160,10 +160,10 @@ Moving work into installation improves first-run latency without reducing total 
 
 ### 2.7 Installed execution products
 
-This is the product contract; release delivery and the `install` command are not implemented.
-The current CLI exposes `prepare`. Its default dependency track lowers the selected program, but
-the cold path returns before bound-image publication; its Cargo track stops at `cargo build`.
-Neither path yet fulfills the complete installation contract below.
+Release delivery remains unimplemented. Project `install` and `prepare` share a preparation
+pipeline on both dependency tracks: they lower the selected root, bind and validate its complete
+execution image, publish it and stop before guest entry. The Cargo track uses its runner even when
+Cargo's artifacts are already fresh, because the root's MIRVM products may still need preparation.
 
 **Runtime distribution** provides the pinned compiler inputs and pre-lowered std together. Building
 the MIR-rich sysroot produces compiler metadata; building the std base translates a canonical
@@ -199,6 +199,12 @@ image without frontend or lowering work. Changes to source, lockfile, features, 
 build-script inputs or compiler inputs invalidate the affected products under the existing identity
 rules. Failure to publish required installation products is an installation failure, even though
 ordinary `run` may still execute after a best-effort cache publication failure.
+
+The complete execution image is the required installed product. Symbolic program deltas and
+dependency manifests are reusable accelerators: a projection or publication failure there does not
+prevent the self-contained image from being published. Cache writers preserve the runnable module
+on failure. Compiler warnings deliberately prevent caching so subsequent runs retain diagnostic
+behavior; preparation still validates such a program and succeeds without invoking its entry.
 
 Installing a library without a consumer can prepare its non-generic roots and concrete instances
 reachable from them. It cannot enumerate future `Vec<UserType>` or `deserialize::<UserType>`

@@ -32,12 +32,13 @@ contracts are its siblings in `docs/designs/`.
   pthread-exit TSD teardown, and a fork guard that admits `fork` only while the guest is
   single-threaded. `exec` passes through.
 - **Cargo** — the compat track occupies Cargo's `RUSTC` slot, so ordinary and workspace wrappers keep
-  Cargo's own composition and ordering. `MIRVM_DEPS` defaults to `self`: `mirvm run`, `mirvm prepare`
-  and `mirvm test` resolve, schedule and build with no cargo in the process, using the in-tree
+  Cargo's own composition and ordering. `MIRVM_DEPS` defaults to `self`: `mirvm run`, `mirvm prepare`,
+  `mirvm install` and `mirvm test` resolve, schedule and build with no cargo in the process, using the in-tree
   `src/cargoless/` stack.
   `MIRVM_DEPS=cargo` remains the user fallback and behaviour referee, and both tracks are compared
-  continuously; on that track `prepare` is `cargo build`, since Cargo's own cache is what a following
-  run would reuse. `mirvm test` covers lib/bin/test/bench/example with libtest or a custom harness, and a
+  continuously. Both preparation commands enter the selected root's runner on the Cargo track,
+  including when its launcher is fresh, and stop after bound-image publication. `mirvm test` covers
+  lib/bin/test/bench/example with libtest or a custom harness, and a
   rustdoc front end adds doctests without pretending they are ordinary tests.
 - **Images and caches** — a byte-deterministic std base image plus a deps manifest make warm runs load
   instead of re-lower. The manifest stores each dependency function as a fragment in the shared
@@ -53,9 +54,10 @@ contracts are its siblings in `docs/designs/`.
   immutable function archive. Mirvm-owned sysroots publish content-identified generations with local
   integrity receipts and process leases; ordinary external inputs retain full content hashing.
   [startup-cache-design.md](designs/startup-cache-design.md) owns these contracts. `MIRVM_TIMING`
-  prints a phase ledger. Std products are currently built locally; release delivery and project
-  `install` remain unimplemented. On the default track, a cold `prepare` writes program/shared
-  products but returns before final bound-image publication. The intended installation boundary is
+  prints a phase ledger. Std products are currently built locally; release delivery remains
+  unimplemented. Project `install` and `prepare` publish a complete bound image before succeeding,
+  independently of optional symbolic delta publication. Required image failures fail preparation;
+  ordinary runs retain best-effort caching. The installation boundary is
   specified in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the
   source into a process-owned immutable snapshot and each `unsafe instantiate` builds an independent
@@ -402,8 +404,11 @@ These samples do not establish a whole-program improvement. Serde's cold ranges 
 (eager 419.2–554.7 ms, shared 438.8–581.6 ms), and three pairs cannot attribute the median difference
 to shared execution. Lowering remains slightly higher in serde/flate and 17.6 ms higher in the
 matrix. Bound-image-hit medians are 99.8/96.7 ms for serde and 151.6/153.9 ms for flate
-(eager/shared). The matrix's immediate repeat still enters the frontend and publishes its bound
-image; it is not a runtime-only hit. Its shared repeat range is 271.9–522.8 ms.
+(eager/shared). The matrix repeat samples in this measurement do not describe a runtime-only hit:
+they include preparation after an unrepresentable anonymous dependency address blocked symbolic
+delta publication. The bound-image writer no longer depends on that optional delta. A focused
+installation check with only std base retained reaches the complete image on the first subsequent
+run, matches native output, and reports no frontend, lowering or layer-loading phases.
 
 Separate diagnostic runs request concrete forms for 0/266 serde, 9/149 flate and 0/249 matrix shared
 instances. This demonstrates deferred bytecode emission, not that all other preparation work has

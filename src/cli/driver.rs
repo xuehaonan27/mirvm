@@ -439,17 +439,29 @@ impl Callbacks for MirvmCallbacks {
             // diagnostics (see SESSION_WARNINGS). Delta entries carry the key chain, which is
             // verified again on load to prevent a mismatched image stack.
             let t_store = std::time::Instant::now();
-            if session_diagnostics_clean() && tcx.sess.dcx().has_errors().is_none() {
-                self.run_inputs = crate::image::program::store(
-                    tcx,
-                    &self.rustc_args,
-                    self.module.as_mut().expect("just set"),
-                    self.instance.as_ref().expect("just set"),
-                    &self.stack,
-                );
-                if self.run_inputs.is_some() {
-                    self.timing.cache_store = Some(t_store.elapsed());
+            if session_diagnostics_clean()
+                && tcx.sess.dcx().has_errors().is_none()
+                && (!crate::options::no_ir_cache() || crate::cli::prepare_only())
+            {
+                self.run_inputs = crate::depinfo::InputManifest::collect(tcx);
+                if let Some(inputs) = &self.run_inputs {
+                    if let Err(reason) = crate::image::program::store(
+                        &self.rustc_args,
+                        inputs,
+                        self.module.as_mut().expect("just set"),
+                        self.instance.as_ref().expect("just set"),
+                        &self.stack,
+                    ) {
+                        crate::diag_debug!(Store, "program delta was not published: {reason}");
+                    }
+                } else if crate::cli::prepare_only() {
+                    crate::diag_error!(
+                        Prepare,
+                        "cannot record the program's complete input identity"
+                    );
+                    self.exit_code = Some(crate::diag::exit::FAILURE.into());
                 }
+                self.timing.cache_store = Some(t_store.elapsed());
             }
             if self.suppress_runner_warning_summary {
                 install_runner_finalization_filter();
@@ -852,6 +864,29 @@ fn load_dependency_layers(stack: &mut crate::image::ImageStack, rustc_args: &[St
     deps_image_loaded
 }
 
+/// A complete image is required by preparation; an ordinary run can continue after a cache error.
+fn publish_execution(
+    args: &[String],
+    inputs: crate::depinfo::InputManifest,
+    module: &crate::vm::ir::Module,
+    instance: &crate::vm::instance::Instance,
+) -> bool {
+    match crate::image::execution::store(args, inputs, module, instance) {
+        Ok(()) => true,
+        Err(reason) if crate::cli::prepare_only() => {
+            crate::diag_error!(
+                Prepare,
+                "cannot publish the prepared execution image: {reason}"
+            );
+            false
+        }
+        Err(reason) => {
+            crate::diag_debug!(Store, "execution image was not published: {reason}");
+            true
+        }
+    }
+}
+
 pub(crate) fn run_driver(
     rustc_args: Vec<String>,
     program_argv: Vec<String>,
@@ -938,7 +973,7 @@ pub(crate) fn run_driver(
         // A cache hit has no compiler session; seal that empty phase before
         // MIRVM control and guest execution begin.
         diagnostic_router.seal_compiler();
-        let timing = PhaseTiming {
+        let mut timing = PhaseTiming {
             cache_load: Some(t_start.elapsed()),
             base: base_timing,
             layer_load,
@@ -951,7 +986,16 @@ pub(crate) fn run_driver(
         } else {
             stack.absorb_into(&mut module, &mut instance); // asm merged and re-materialized
         }
-        crate::image::execution::store(&rustc_args, inputs, &module, &instance);
+        let started = std::time::Instant::now();
+        let published = publish_execution(&rustc_args, inputs, &module, &instance);
+        timing.cache_store = Some(started.elapsed());
+        if !published {
+            if let Err(error) = diagnostic_router.finish() {
+                crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                return ExitCode::from(crate::diag::exit::SOFTWARE);
+            }
+            return ExitCode::from(crate::diag::exit::FAILURE);
+        }
         if crate::cli::prepare_only() {
             // The cache hit is the preparation: this run found everything already built. Report
             // what was loaded and stop short of the guest.
@@ -1050,23 +1094,6 @@ pub(crate) fn run_driver(
         }
         exit(code);
     }
-    if crate::cli::prepare_only() {
-        // The session produced everything a run needs from the compiler — frontend, lowering, the
-        // package and the cache store all happened inside it. Only the engine is left, and
-        // `prepare` stops in front of it. The ledger is `Info`-level detail, so a run that asked
-        // for less than that does not get it.
-        print_phase_timing(
-            &callbacks.timing,
-            None,
-            t_start.elapsed(),
-            crate::diag::verbose(),
-        );
-        if let Err(error) = diagnostic_router.finish() {
-            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
-            return ExitCode::from(crate::diag::exit::SOFTWARE);
-        }
-        return ExitCode::SUCCESS;
-    }
     if let Some(module) = callbacks.module.take() {
         let mut module = module;
         let mut instance = callbacks
@@ -1083,8 +1110,39 @@ pub(crate) fn run_driver(
         }
         if let Some(inputs) = callbacks.run_inputs.take() {
             let started = std::time::Instant::now();
-            crate::image::execution::store(&callbacks.rustc_args, inputs, &module, &instance);
+            let published = publish_execution(&callbacks.rustc_args, inputs, &module, &instance);
             *callbacks.timing.cache_store.get_or_insert_default() += started.elapsed();
+            if !published {
+                if let Err(error) = diagnostic_router.finish() {
+                    crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                    return ExitCode::from(crate::diag::exit::SOFTWARE);
+                }
+                return ExitCode::from(crate::diag::exit::FAILURE);
+            }
+        } else if crate::cli::prepare_only()
+            && let Err(error) = crate::vm::verify::module(&module, &instance)
+        {
+            // Warning-bearing programs are deliberately not cached, but preparation still verifies
+            // the same complete module that execution would consume.
+            crate::diag_error!(Prepare, "bytecode verification failed: {error}");
+            if let Err(error) = diagnostic_router.finish() {
+                crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                return ExitCode::from(crate::diag::exit::SOFTWARE);
+            }
+            return ExitCode::from(crate::diag::exit::SOFTWARE);
+        }
+        if crate::cli::prepare_only() {
+            print_phase_timing(
+                &callbacks.timing,
+                None,
+                t_start.elapsed(),
+                crate::diag::verbose(),
+            );
+            if let Err(error) = diagnostic_router.finish() {
+                crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+                return ExitCode::from(crate::diag::exit::SOFTWARE);
+            }
+            return ExitCode::SUCCESS;
         }
         if let Some(guest) = &guest_process
             && let Err(error) = guest.enter()

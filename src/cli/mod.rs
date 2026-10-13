@@ -107,6 +107,7 @@ USAGE:
     mirvm pack <target>  [-o out.mirvm]                  # cargo project / script / single file -> .mirvm package
     mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo project (deps auto-built as MIR rlibs)
     mirvm prepare <same inputs as run> [OPTIONS]         # do everything run does, then stop before the guest starts
+    mirvm install <same inputs as prepare> [OPTIONS]     # prepare a project's execution products without running it
     mirvm test [dir | Cargo.toml] [OPTIONS] [TESTNAME] [-- <libtest args>]
     mirvm capture [-o DIR] -- run <input> [OPTIONS]      # record one real guest execution
     mirvm options [--json]                               # every external input mirvm defines, with value and source
@@ -130,7 +131,7 @@ USAGE:
 /// panic into a SIGABRT, while this shape leaves the fast-tier canaries green.
 static PREPARE_ONLY: OnceLock<()> = OnceLock::new();
 
-/// Whether this process is a `mirvm prepare` that must stop before the guest starts.
+/// Whether this process prepares execution products and must stop before the guest starts.
 pub(crate) fn prepare_only() -> bool {
     PREPARE_ONLY.get().is_some()
 }
@@ -199,7 +200,10 @@ pub fn main() -> ExitCode {
     crate::diag::enter(component_of(&first));
 
     // Two callback forms in a cargo session
-    if first == "runner" {
+    if first == "runner" || first == "__prepare-runner" {
+        if first == "__prepare-runner" {
+            set_prepare_only();
+        }
         return cargo::runner_main(argv);
     }
     // Base-image build subprocess (must precede MIRVM_CARGO_SESSION dispatch: builds triggered
@@ -226,7 +230,7 @@ pub fn main() -> ExitCode {
 
     let command = match first.as_str() {
         "run" => entry::run_main(argv),
-        "prepare" => entry::prepare_main(argv),
+        "prepare" | "install" => entry::prepare_main(&first, argv),
         "capture" => capture_main(argv),
         "test" => test_main(argv),
         "pack" => entry::pack_main(argv),
@@ -275,6 +279,7 @@ fn component_of(command: &str) -> crate::diag::Component {
     match command {
         "run" => Component::Run,
         "prepare" => Component::Prepare,
+        "install" => Component::Install,
         "capture" => Component::Capture,
         "test" => Component::Test,
         "pack" => Component::Pack,
@@ -283,6 +288,7 @@ fn component_of(command: &str) -> crate::diag::Component {
         "deps" => Component::Deps,
         "options" => Component::Options,
         "runner" => Component::Runner,
+        "__prepare-runner" => Component::Prepare,
         "__build-base-image" => Component::BaseImage,
         "__cless-dep" | "__cless-run-root" => Component::Build,
         _ => Component::Run,

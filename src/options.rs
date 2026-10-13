@@ -45,6 +45,7 @@ impl Identity {
 pub enum Scope {
     Run,
     Prepare,
+    Install,
     Test,
     Pack,
     Capture,
@@ -61,6 +62,7 @@ impl Scope {
         match self {
             Scope::Run => "run",
             Scope::Prepare => "prepare",
+            Scope::Install => "install",
             Scope::Test => "test",
             Scope::Pack => "pack",
             Scope::Capture => "capture",
@@ -78,6 +80,7 @@ impl Scope {
         match name {
             "Run" => Scope::Run,
             "Prepare" => Scope::Prepare,
+            "Install" => Scope::Install,
             "Test" => Scope::Test,
             "Pack" => Scope::Pack,
             "Capture" => Scope::Capture,
@@ -248,13 +251,13 @@ pub const BUILD_LOG: &str = "MIRVM_BUILD_LOG";
 
 entries! {
     /// Machine output: reports as one JSON document, diagnostics as one JSON object per line.
-    user output_format env("MIRVM_OUTPUT")     default("text")       cli("--json", "Run Prepare Pack Capture Cache Deps Options") flag
+    user output_format env("MIRVM_OUTPUT")     default("text")       cli("--json", "Run Prepare Install Pack Capture Cache Deps Options") flag
         => live(Result<OutputFormat, Error>, |_| read_output_format());
     /// The quietest diagnostic that still prints: error | warning | note | info | debug.
-    user log_level     env("MIRVM_LOG")        default("warning")    cli("--verbose", "-v", "Run Prepare") flag
+    user log_level     env("MIRVM_LOG")        default("warning")    cli("--verbose", "-v", "Run Prepare Install") flag
         => live(Result<crate::diag::Severity, Error>, |_| read_log_level());
     /// MIR-rich sysroot; equivalent to --sysroot. Default: build and cache one.
-    user sysroot       env("MIRVM_SYSROOT")    default("auto-built") cli("--sysroot", "Run")
+    user sysroot       env("MIRVM_SYSROOT")    default("auto-built") cli("--sysroot", "Run Prepare Install")
         => live(Option<PathBuf>, |_| read_sysroot());
     /// Guest main execution stack reservation; accepts a k/m/g suffix, range 1m..=1t.
     user stack_size    env("MIRVM_STACK_SIZE") default("1g")         cli("--stack-size", "Run")
@@ -351,17 +354,17 @@ entries! {
     /// Print the entry function's MIR and exit.
     user dump_mir            cli("--dump-mir", "Run")              default("off") flag;
     /// Edition for the single-file form.
-    user edition             cli("--edition", "Run")               default("2024");
+    user edition             cli("--edition", "Run Prepare Install") default("2024");
     /// Compatibility spelling; `vm` is the only engine and is accepted silently.
-    user run_engine          cli("--engine", "Run")                default("vm");
+    user run_engine          cli("--engine", "Run Prepare Install") default("vm");
     /// Call an exported function directly, e.g. 'fib(25)', instead of the main startup chain.
     user vm_call             cli("--vm-call", "Run")               default("unset");
     /// Print Trap-debt statistics and exit.
     user vm_stats            cli("--vm-stats", "Run")              default("off") flag;
     /// Cargo `--bin` semantics; project form only.
-    user bin                 cli("--bin", "Run")                   default("unset");
+    user bin                 cli("--bin", "Run Prepare Install")   default("unset");
     /// Ignore package.rust-version, with Cargo's semantics.
-    user ignore_rust_version cli("--ignore-rust-version", "Run")   default("off") flag;
+    user ignore_rust_version cli("--ignore-rust-version", "Run Prepare Install") default("off") flag;
     /// Output path: the .mirvm package (`pack`) or the capture directory (`capture`).
     user output              cli("--output", "-o", "Pack Capture") default("unset");
     /// Report what `cache purge` would remove without removing it.
