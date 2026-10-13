@@ -52,6 +52,18 @@ pub fn module_below(
     Verifier::new(module, instance, below.prefix, below.entries)?.run()
 }
 
+/// Unbound shared instructions have call ordinals but no external addresses or linked module.
+pub(crate) fn generic_template(body: &FuncBody, calls: usize) -> Result<(), crate::error::Error> {
+    Verifier::new_with_count(
+        &Module::default(),
+        &Instance::default(),
+        Prefix::default(),
+        &[],
+        calls,
+    )?
+    .body(body)
+}
+
 /// Verify module-level references before function archive validation or context rebinding.
 pub(crate) fn module_header_with_count(
     module: &Module,

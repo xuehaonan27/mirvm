@@ -4,7 +4,7 @@ use super::{offset, read, scalar_place};
 use crate::lower::frame::ValKind;
 use crate::vm::ir::*;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Binding {
     Size(u32),
     Const(u32, Width),
@@ -75,6 +75,7 @@ impl Layout {
 }
 
 /// An opaque local has a fixed pointer slot; its storage follows the template's fixed frame.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct LocalBinding {
     pub local: usize,
     pub pointer: Slot,
@@ -82,7 +83,7 @@ pub(super) struct LocalBinding {
 }
 
 /// Unflattened opaque arguments and return destinations use address placeholders until binding.
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(super) struct CallAbi {
     pub args: Vec<(usize, u32)>,
     pub ret: Option<u32>,
@@ -105,6 +106,79 @@ pub(super) fn reserve(size: &mut u32, bytes: u32, align: u32) -> Option<u32> {
 }
 
 impl Template {
+    pub fn archive_body(&self) -> Option<FuncBody> {
+        let mut body = self.body.clone();
+        let mut calls = vec![Terminator::Unreachable; self.calls.len()];
+        for block in &self.instructions.blocks {
+            if let Terminator::Call { callee, .. } = &block.term {
+                *calls.get_mut(*callee as usize)? = block.term.clone();
+            }
+        }
+        body.shared = Some(Box::new(SharedBody {
+            template: self.instructions.clone(),
+            values: vec![0; self.bindings.len()],
+            locals: Vec::new(),
+            calls,
+        }));
+        Some(body)
+    }
+
+    /// Check all indexes used by binding before accepting an unbound persisted product.
+    pub fn validate(&self, layouts: usize, generic_args: usize, locals: usize) -> Option<()> {
+        if self.body.shared.is_some()
+            || !self.body.blocks.is_empty()
+            || self.body.caller_loc_off.is_some()
+            || self.bindings.len() != self.instructions.binding_count as usize
+            || !matches!(self.body.params.last(), Some(ParamAbi::Scalar(slot))
+                if slot.off == self.instructions.dictionary && slot.width == Width::W64)
+        {
+            return None;
+        }
+        for binding in &self.bindings {
+            match binding {
+                Binding::Size(index) if *index as usize >= layouts => return None,
+                Binding::Const(index, _) if *index as usize >= generic_args => return None,
+                _ => {}
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for local in &self.locals {
+            if local.local >= locals
+                || !seen.insert(local.local)
+                || local.layout as usize >= layouts
+                || local.pointer.width != Width::W64
+                || local.pointer.off == self.instructions.dictionary
+                || local.pointer.off.checked_add(8)? > self.body.frame_size
+            {
+                return None;
+            }
+        }
+        for block in &self.instructions.blocks {
+            if let Terminator::Call {
+                callee, args, ret, ..
+            } = &block.term
+            {
+                let abi = self.calls.get(*callee as usize)?;
+                let mut previous = None;
+                for &(position, layout) in &abi.args {
+                    if layout as usize >= layouts
+                        || previous.is_some_and(|last| position <= last)
+                        || !matches!(args.get(position), Some(Operand::AddrOf(_)))
+                    {
+                        return None;
+                    }
+                    previous = Some(position);
+                }
+                if let Some(layout) = abi.ret
+                    && (layout as usize >= layouts || !matches!(ret, RetDest::Indirect(_)))
+                {
+                    return None;
+                }
+            }
+        }
+        crate::vm::verify::generic_template(&self.archive_body()?, self.calls.len()).ok()
+    }
+
     pub fn bind(&self, values: Vec<u64>, layouts: &[Layout]) -> Option<FuncBody> {
         assert_eq!(values.len(), self.bindings.len());
         let mut body = self.body.clone();

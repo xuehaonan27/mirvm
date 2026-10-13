@@ -175,6 +175,7 @@ edition = "2024"
 EOF
         cat >"$project/dep/src/lib.rs" <<'EOF'
 pub fn identity<T>(value: T) -> T { value }
+pub fn latent<T>(value: T) -> T { value }
 EOF
         cat >"$project/src/main.rs" <<'EOF'
 fn main() { println!("unselected guest ran"); }
@@ -189,9 +190,13 @@ EOF
         printf 'installed\n' >"$project/src/bin/message.txt"
         tag="install-$track"
         run_mirvm "install on $track" 0 "$tag" \
-            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 "$MIRVM" install "$project"
+            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 "$MIRVM" install -v "$project"
         expect_output "install on $track invoked no guest" "" "$tag"
         expect_stderr "install on $track lowered the root" "frontend=" "$tag"
+        expect_stderr "install on $track exports an unused dependency generic" \
+            "generic template exported: latent" "$tag"
+        expect_stderr "install on $track reuses the dependency's prepared template" \
+            "generic template reused: prepared_dep::identity" "$tag"
         run_mirvm "first installed run on $track" 0 "$tag-run" \
             env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 MIRVM_TIMING=1 \
             "$MIRVM" run "$project"
@@ -214,6 +219,21 @@ EOF
             "$MIRVM" run "$project"
         expect_stderr "changed input invalidates $track's image" "frontend=" "$tag-edited"
         expect_output "changed input is observed on $track" "edited:42" "$tag-edited"
+
+        # Changing only the consumer to use a previously uninstantiated definition must reuse
+        # the template exported by dependency preparation, with current concrete type bindings.
+        cat >"$project/src/bin/selected.rs" <<'EOF'
+fn main() {
+    let value = prepared_dep::latent([7u64; 9]);
+    println!("latent:{}", value.iter().sum::<u64>());
+}
+EOF
+        run_mirvm "edited consumer reuses an unused dependency template on $track" 0 "$tag-latent" \
+            env MIRVM_DEPS="$track" MIRVM_GENERIC_TEMPLATES=1 MIRVM_LOG=debug \
+            "$MIRVM" run "$project"
+        expect_output "new concrete binding is correct on $track" "latent:63" "$tag-latent"
+        expect_stderr "unused dependency template is reused on $track" \
+            "generic template reused: prepared_dep::latent" "$tag-latent"
     done
 
     # A failed optional delta cannot damage the live module or prevent complete image publication.

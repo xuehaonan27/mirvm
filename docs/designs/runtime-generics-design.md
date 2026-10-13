@@ -20,7 +20,7 @@ parameters, integer operations and opaque-pointee offset/copy loops under
 `MIRVM_GENERIC_TEMPLATES=1` (unset disables it). Direct calls bind concrete guest functions,
 including resolved trait methods and Clone/Drop shims, through the existing linker worklist. One
 compiler session caches both eligible templates and rejected definitions. Only ordinary Item
-instances are eligible; the session's definition identity and semantic profile fix the cache key.
+instances are eligible; reusable dependency products also retain these results across consumers.
 Binding resolves layouts, const values and callee identities without instantiating a whole concrete
 MIR body. Layout recipes include compound types such as `[T; N]`. Compiler-owned layout/call recipes
 remain separate from the owned template and resolve completely before the linker allocates any
@@ -49,8 +49,8 @@ setting without entering the exporter.
 
 The execution prototype supports this architecture, not a whole-program speedup claim. Its real
 MIR exporter handles an opaque-pointee copy loop, and its witness/unwind experiments use native
-Rust callbacks. General caller-location ABIs and consumer-independent template export remain
-integration gates. Production rollout must be measured on the existing serde, flate and generic-matrix workloads
+Rust callbacks. General caller-location ABIs remain outside the admitted subset.
+Production rollout must be measured on the existing serde, flate and generic-matrix workloads
 with prepared dependencies and std.
 
 ## 2. Owned records
@@ -76,6 +76,23 @@ compiler/build, semantic profile, schema, template and dependency identities in 
 an incompatible template or descriptor cannot fall through to an old specialized body. Installed
 std and project preparation use the ownership and invalidation rules of the existing distribution
 and cache designs.
+
+Dependency compilation exports admitted local definitions with identity generic arguments after
+required instance validation. It does not need a consuming concrete type. The compiler-side store
+holds one checksummed generation file per defining crate and exact target/profile. Its identity
+includes the MIRVM build, stable crate identity, rustc crate hash (including upstream inputs), target
+layout, CPU/features and semantic checks. Definitions use stable path hashes. Both accepted
+templates and rejected export probes are reusable; concrete binding failures are instance-specific
+and are not persisted as rejected definitions.
+
+The file contains owned instruction archives and recipes locating types and call terminators in
+the defining crate's MIR. Loading checks archive structure, frame/binding indexes and the admitted
+instruction vocabulary, reconstructs compiler types and source spans from those recipes, and binds
+the current instance before linking. No compiler allocation, session-local DefId or concrete
+consumer identity is serialized. Binary-only analysis sessions without HIR hashes retain their
+local definitions in memory; their dependencies still use the store. Publication merges concurrent
+definition sets under a lock and removes replaced bodies. The registered cache family participates
+in `cache purge --units`; removal or corruption falls back to export.
 
 ## 3. Execution and publication
 
@@ -157,15 +174,11 @@ Remaining integration work is grouped by a complete execution or preparation bou
    direct specialization and a compiled shared template. Acceptance: cold complete time and first
    useful result improve on representative inputs without hiding late work; short/native-call
    workloads retain their cheaper path, and warm throughput and memory/code size remain acceptable.
-2. **Prepared generic products.** Export admitted dependency templates independently of a consumer,
-   integrate the `install`/`prepare` pipeline under D7, and verify edited-source misses, unchanged
-   hits and cache purging. Known semantic validation and exact instance bindings still precede
-   entry. Loading and publication must retain shared products without eager specialization.
-3. **Corpus-driven coverage.** Extend type-dependent field projections, aggregate construction and
+2. **Corpus-driven coverage.** Extend type-dependent field projections, aggregate construction and
    range/array-subslice paths when their measured missed coverage warrants the change. Keep eager
    fallback and diagnostic parity for unsupported shapes. Associated types, niches/enums, closures,
    indirect calls and recursive drop/cleanup need explicit contracts, not layout-size equivalence.
-4. **OSR.** Implement T13's activation-transfer contract independently of generic coverage, then
+3. **OSR.** Implement T13's activation-transfer contract independently of generic coverage, then
    attach specialization to the same mechanism. Acceptance includes one long hot invocation, live
    values and cleanup state across transfer, and plain/trace domain identity.
 

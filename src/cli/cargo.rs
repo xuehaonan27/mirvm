@@ -167,6 +167,7 @@ struct DepCallbacks {
     out_dir: String,
     /// rlib stem = `lib<crate_name><extra-filename>` (extra-filename includes its leading `-`)
     rlib_stem: String,
+    publication_failed: bool,
 }
 
 impl Callbacks for DepCallbacks {
@@ -191,6 +192,14 @@ impl Callbacks for DepCallbacks {
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let _ = tcx.collect_and_partition_mono_items(());
+        if let Err(reason) = crate::lower::prepare_generic_templates(tcx) {
+            crate::diag_error!(
+                Build,
+                "cannot prepare dependency generic templates: {reason}"
+            );
+            self.publication_failed = true;
+            return Compilation::Stop;
+        }
         match crate::lower::global_asm::materialize_dep_text(tcx) {
             Ok(crate::lower::global_asm::DepAsmText::Text(text)) => {
                 let path = format!("{}/{}.mirasm.s", self.out_dir, self.rlib_stem);
@@ -232,6 +241,7 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
     let mut callbacks = DepCallbacks {
         out_dir,
         rlib_stem: format!("lib{crate_name}{extra}"),
+        publication_failed: false,
     };
     let _compiler_session = compiler_session_guard();
     // Arguments the scheduler already consumed for its unit fingerprint; the flag below only shapes
@@ -243,8 +253,9 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
     });
     // This unit's verdict is known: release the diagnostics held back during its session when it
     // failed, drop them when it succeeded (unless the run asked for detail).
-    super::build_log::finish(code != ExitCode::SUCCESS);
-    exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
+    let failed = code != ExitCode::SUCCESS || callbacks.publication_failed;
+    super::build_log::finish(failed);
+    exit(if failed { 1 } else { 0 })
 }
 
 /// Cargoless dep compilation subprocess entry: restore argv0, then feed the rest to

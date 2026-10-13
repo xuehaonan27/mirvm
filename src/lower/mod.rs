@@ -89,6 +89,7 @@ pub mod collect;
 pub mod frame;
 pub mod func;
 mod generic;
+pub(crate) use generic::prepare as prepare_generic_templates;
 pub mod global_asm;
 
 use std::collections::VecDeque;

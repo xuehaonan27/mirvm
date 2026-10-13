@@ -211,8 +211,9 @@ reachable from them. It cannot enumerate future `Vec<UserType>` or `deserialize:
 instances. Retain generic MIR metadata and prepare those instances when a consuming project is
 installed. The default path prepares concrete bytecode; the opt-in
 [shared-generics path](runtime-generics-design.md) prepares owned templates and validated instance
-descriptors, with concrete instructions generated when the JIT requests them. Exporting library
-templates without a concrete consumer remains preparation work.
+descriptors, with concrete instructions generated when the JIT requests them. Dependency compiler
+sessions export admitted templates with identity generic arguments, including definitions the
+current consumer does not instantiate; subsequent consumers reuse those products with exact bindings.
 Installation must still settle known semantic errors and runtime bindings before guest entry;
 deferred specialization must not require a new rustc session. JIT compilation and per-process
 native binding remain governed by their runtime contracts.

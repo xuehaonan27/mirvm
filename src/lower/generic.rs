@@ -1,6 +1,7 @@
 //! Structural generic MIR export with opaque local storage and concrete ABI binding. Unsupported
 //! shapes return to the ordinary lowerer before any linker state has changed.
 
+mod products;
 mod template;
 
 use template::{Binding, CallAbi, Layout, LocalBinding, Template, reserve};
@@ -9,16 +10,73 @@ use super::frame::{self, ValKind};
 use super::linker::Linker;
 use crate::vm::ir::*;
 use rustc_data_structures::fx::FxHashMap;
-use rustc_hir::def_id::DefId;
+use rustc_hir::def_id::{CrateNum, DefId};
 use rustc_middle::{
     mir,
     ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv},
 };
 
-/// This cache belongs to one compiler session and semantic profile. Shims are excluded, so the
-/// definition is the complete template key. Negative entries avoid repeatedly probing a body.
+/// Concrete compiler recipes are session-local; persisted instructions and recipe locators are
+/// keyed by the defining crate and semantic profile. Negative entries avoid repeated export probes.
 #[derive(Default)]
-pub(super) struct Templates<'tcx>(FxHashMap<DefId, Option<Export<'tcx>>>);
+pub(super) struct Templates<'tcx> {
+    exports: FxHashMap<DefId, Option<Export<'tcx>>>,
+    products: FxHashMap<CrateNum, products::Products>,
+    timing: Timing,
+}
+
+#[derive(Default)]
+struct Timing {
+    exported: usize,
+    rejected: usize,
+    hits: usize,
+    negative_hits: usize,
+    bound: usize,
+    refused: usize,
+    export: std::time::Duration,
+    reject: std::time::Duration,
+    load: std::time::Duration,
+    restore: std::time::Duration,
+    bind: std::time::Duration,
+    store: std::time::Duration,
+}
+
+fn eligible(tcx: TyCtxt<'_>, instance: Instance<'_>) -> bool {
+    crate::options::generic_templates()
+        && matches!(instance.def, InstanceKind::Item(_))
+        && instance.args.iter().any(|arg| {
+            matches!(
+                arg.kind(),
+                ty::GenericArgKind::Type(_) | ty::GenericArgKind::Const(_)
+            )
+        })
+        && !tcx.is_foreign_item(instance.def_id())
+        && !instance.def.requires_caller_location(tcx)
+}
+
+/// Prepare definitions with identity arguments; neither discovery nor export needs a consumer.
+pub(crate) fn prepare(tcx: TyCtxt<'_>) -> Result<(), super::Error> {
+    if !crate::options::generic_templates() {
+        return Ok(());
+    }
+    let mut templates = Templates::default();
+    for &def in tcx.mir_keys(()) {
+        if !matches!(
+            tcx.def_kind(def),
+            rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn
+        ) {
+            continue;
+        }
+        let instance = Instance::new_raw(
+            def.to_def_id(),
+            ty::GenericArgs::identity_for_item(tcx, def),
+        );
+        if eligible(tcx, instance) {
+            templates.export(tcx, instance);
+        }
+    }
+    templates.publish()
+}
 
 impl<'tcx> Templates<'tcx> {
     pub(super) fn lower(
@@ -27,24 +85,87 @@ impl<'tcx> Templates<'tcx> {
         env: TypingEnv<'tcx>,
         instance: Instance<'tcx>,
     ) -> Option<Bound<'tcx>> {
-        if !crate::options::generic_templates()
-            || !matches!(instance.def, InstanceKind::Item(_))
-            || !instance.args.iter().any(|arg| {
-                matches!(
-                    arg.kind(),
-                    ty::GenericArgKind::Type(_) | ty::GenericArgKind::Const(_)
-                )
-            })
-            || tcx.is_foreign_item(instance.def_id())
-            || instance.def.requires_caller_location(tcx)
-        {
+        if !eligible(tcx, instance) {
             return None;
         }
-        let exported = self
-            .0
-            .entry(instance.def_id())
-            .or_insert_with(|| {
+        self.export(tcx, instance);
+        let exported = self.exports.get(&instance.def_id())?.as_ref()?;
+        let started = crate::options::timing().then(std::time::Instant::now);
+        let bound = exported.bind(tcx, env, instance);
+        if bound.is_some() {
+            self.timing.bound += 1;
+        } else {
+            self.timing.refused += 1;
+        }
+        if let Some(started) = started {
+            self.timing.bind += started.elapsed();
+        }
+        bound
+    }
+
+    fn export(&mut self, tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
+        let def = instance.def_id();
+        if self.exports.contains_key(&def) {
+            return;
+        }
+        let started = crate::options::timing().then(std::time::Instant::now);
+        // A binary-only analysis session may omit HIR hashes; querying its local crate hash
+        // would panic. Its templates remain session-local, while dependency metadata has a hash.
+        let mut products = (!def.is_local() || tcx.needs_hir_hash()).then(|| {
+            self.products
+                .entry(def.krate)
+                .or_insert_with(|| products::Products::open(tcx, def.krate))
+        });
+        if let Some(started) = started {
+            self.timing.load += started.elapsed();
+        }
+        let started = crate::options::timing().then(std::time::Instant::now);
+        let cached = products
+            .as_ref()
+            .and_then(|products| products.get(tcx, instance));
+        if let Some(started) = started {
+            self.timing.restore += started.elapsed();
+        }
+        let exported = match cached {
+            Some(template) => {
+                if template.is_some() {
+                    self.timing.hits += 1;
+                } else {
+                    self.timing.negative_hits += 1;
+                }
+                if crate::diag::prints(crate::diag::Severity::Debug) {
+                    crate::diag_debug!(
+                        Lower,
+                        "generic template {}: {}",
+                        if template.is_some() {
+                            "reused"
+                        } else {
+                            "reused fallback"
+                        },
+                        tcx.def_path_str(def)
+                    );
+                }
+                template
+            }
+            None => {
+                let started = crate::options::timing().then(std::time::Instant::now);
                 let template = Exporter::export(tcx, instance);
+                let elapsed =
+                    started.map_or(std::time::Duration::ZERO, |started| started.elapsed());
+                if template.is_some() {
+                    self.timing.exported += 1;
+                    self.timing.export += elapsed;
+                } else {
+                    self.timing.rejected += 1;
+                    self.timing.reject += elapsed;
+                }
+                let started = crate::options::timing().then(std::time::Instant::now);
+                if let Some(products) = &mut products {
+                    products.insert(tcx, instance, template.as_ref());
+                }
+                if let Some(started) = started {
+                    self.timing.store += started.elapsed();
+                }
                 if crate::diag::prints(crate::diag::Severity::Debug) {
                     crate::diag_debug!(
                         Lower,
@@ -54,12 +175,63 @@ impl<'tcx> Templates<'tcx> {
                         } else {
                             "fallback"
                         },
-                        tcx.def_path_str(instance.def_id())
+                        tcx.def_path_str(def)
                     );
                 }
                 template
-            })
-            .as_ref()?;
+            }
+        };
+        self.exports.insert(def, exported);
+    }
+
+    fn publish(&mut self) -> Result<(), super::Error> {
+        let started = crate::options::timing().then(std::time::Instant::now);
+        let result = self
+            .products
+            .values_mut()
+            .try_for_each(products::Products::publish);
+        if let Some(started) = started {
+            self.timing.store += started.elapsed();
+        }
+        result
+    }
+}
+
+impl Drop for Templates<'_> {
+    fn drop(&mut self) {
+        if let Err(reason) = self.publish() {
+            crate::diag_debug!(Lower, "cannot retain generic template products: {reason}");
+        }
+        if crate::options::timing() && !self.exports.is_empty() {
+            let t = &self.timing;
+            let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1000.0;
+            crate::diag::instrument(format_args!(
+                "mirvm-generic-timing: exported={} rejected={} reused={} reused-fallback={} bound={} binding-fallback={} export={:.3}ms reject={:.3}ms load={:.3}ms restore-verify={:.3}ms bind={:.3}ms store={:.3}ms",
+                t.exported,
+                t.rejected,
+                t.hits,
+                t.negative_hits,
+                t.bound,
+                t.refused,
+                ms(t.export),
+                ms(t.reject),
+                ms(t.load),
+                ms(t.restore),
+                ms(t.bind),
+                ms(t.store),
+            ));
+        }
+    }
+}
+
+impl<'tcx> Export<'tcx> {
+    fn bind(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        env: TypingEnv<'tcx>,
+        instance: Instance<'tcx>,
+    ) -> Option<Bound<'tcx>> {
+        let exported = self;
         let template = &exported.template;
         let layouts = exported
             .layouts
@@ -149,6 +321,7 @@ struct Export<'tcx> {
 struct Call<'tcx> {
     ty: Ty<'tcx>,
     location: Option<rustc_span::Span>,
+    block: u32,
 }
 
 pub(super) struct Bound<'tcx> {
@@ -217,6 +390,7 @@ struct Exporter<'tcx> {
     next_scratch: u32,
     frame_size: u32,
     extra_blocks: Vec<Block>,
+    rejection: &'static str,
 }
 
 impl<'tcx> Exporter<'tcx> {
@@ -295,11 +469,25 @@ impl<'tcx> Exporter<'tcx> {
             next_scratch: size,
             frame_size: size,
             extra_blocks: Vec::new(),
+            rejection: "frame",
         };
         let mut blocks: Vec<_> = mir
             .basic_blocks
-            .iter()
-            .map(|block| cx.block(block))
+            .iter_enumerated()
+            .map(|(index, block)| {
+                cx.block(index.as_u32(), block).or_else(|| {
+                    if crate::diag::prints(crate::diag::Severity::Debug) {
+                        crate::diag_debug!(
+                            Lower,
+                            "generic template rejected ({}): {} bb{}",
+                            cx.rejection,
+                            tcx.def_path_str(instance.def_id()),
+                            index.as_u32()
+                        );
+                    }
+                    None
+                })
+            })
             .collect::<Option<_>>()?;
         blocks.append(&mut cx.extra_blocks);
         Some(Export {
@@ -341,6 +529,15 @@ impl<'tcx> Exporter<'tcx> {
         let mut ty = local.ty;
         let mut meta = None;
         for projection in place.projection {
+            self.rejection = match projection {
+                mir::ProjectionElem::Deref => "projection-deref",
+                mir::ProjectionElem::Field(..) => "projection-field",
+                mir::ProjectionElem::Index(..) | mir::ProjectionElem::ConstantIndex { .. } => {
+                    "projection-index"
+                }
+                mir::ProjectionElem::Subslice { .. } => "projection-subslice",
+                _ => "projection-other",
+            };
             match projection {
                 mir::ProjectionElem::Deref => {
                     let pointee = ty.builtin_deref(true)?;
@@ -749,14 +946,23 @@ impl<'tcx> Exporter<'tcx> {
         }
     }
 
-    fn block(&mut self, block: &mir::BasicBlockData<'tcx>) -> Option<Block> {
+    fn block(&mut self, block_index: u32, block: &mir::BasicBlockData<'tcx>) -> Option<Block> {
         let mut stmts = Vec::new();
         for stmt in &block.statements {
             // Projection temporaries live through one MIR statement, including all its operands.
             self.next_scratch = self.dictionary + 8;
             let mut lowered = Vec::new();
+            self.rejection = "statement";
             match &stmt.kind {
                 mir::StatementKind::Assign(box (place, rv)) => {
+                    self.rejection = match rv {
+                        mir::Rvalue::Aggregate(..) => "aggregate",
+                        mir::Rvalue::BinaryOp(..) => "binary-op",
+                        mir::Rvalue::UnaryOp(..) => "unary-op",
+                        mir::Rvalue::Cast(..) => "cast",
+                        mir::Rvalue::Use(..) => "move",
+                        _ => "rvalue",
+                    };
                     lowered.extend(self.assign(*place, rv)?)
                 }
                 mir::StatementKind::Intrinsic(
@@ -787,6 +993,13 @@ impl<'tcx> Exporter<'tcx> {
         }
         self.next_scratch = self.dictionary + 8;
         let mut lowered = Vec::new();
+        self.rejection = match &block.terminator().kind {
+            mir::TerminatorKind::Call { .. } => "call",
+            mir::TerminatorKind::Drop { .. } => "drop",
+            mir::TerminatorKind::Assert { .. } => "assert",
+            mir::TerminatorKind::SwitchInt { .. } => "switch",
+            _ => "terminator",
+        };
         let term = match &block.terminator().kind {
             mir::TerminatorKind::Goto { target } => Terminator::Goto(target.as_u32()),
             mir::TerminatorKind::Return => Terminator::Return,
@@ -811,6 +1024,7 @@ impl<'tcx> Exporter<'tcx> {
                     Call {
                         ty: Ty::new_fn_def(self.tcx, def, [place.ty]),
                         location: None,
+                        block: block_index,
                     },
                     CallAbi::default(),
                 )?;
@@ -851,6 +1065,7 @@ impl<'tcx> Exporter<'tcx> {
                     Call {
                         ty: Ty::new_fn_def(self.tcx, def, ty::GenericArgs::empty()),
                         location: Some(span),
+                        block: block_index,
                     },
                     CallAbi::default(),
                 )?;
@@ -944,6 +1159,7 @@ impl<'tcx> Exporter<'tcx> {
                         Call {
                             ty: fn_ty,
                             location: None,
+                            block: block_index,
                         },
                         abi,
                     )?;

@@ -241,6 +241,9 @@ families! {
     // pinned. Generational like the closure manifest its format matches: a manifest another build
     // wrote is prunable.
     Cache UNITS           "units"           generation(UNIT_EXT)      flag(Units);
+    // owners: lower::generic::products — unbound generic templates and negative export probes;
+    // keyed by defining crate metadata, target, semantic profile and build, independent of consumers.
+    Cache GENERIC_TEMPLATES "generic-templates" generation("bin") flag(Units);
     // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // owners: lower::global_asm, pack — materialized `global_asm!`/naked-fn objects; keyed by the

@@ -353,6 +353,20 @@ JIT service requests concrete instructions through a per-Engine publication slot
 instance. Unsupported functions retain the original lowerer, and default enablement remains gated
 on whole-program measurements.
 
+Dependency compiler sessions also export unbound templates before a concrete consumer exists.
+Checksummed per-crate products retain owned instructions, MIR recipe locations and negative export
+probes under exact compiler/crate/target/profile identity. Loading validates the schema and IR before
+restoring compiler recipes and binding current types/callees. A binary-only analysis session without
+HIR hashes keeps local templates in memory. Concurrent writers merge definition sets without
+retaining replaced bodies. `cache purge --units` removes these disposable products.
+
+The preparation contract exports an unused dependency generic on both dependency tracks, then
+changes only the consumer and verifies reuse with a new by-value array binding. It also checks
+bound-image hits, tracked-input invalidation and failed required publication. Template unit checks
+cover exact identity, damaged/truncated archives, recipe bounds, instruction/schema validation,
+stale publishers and failed publication. `MIRVM_TIMING` separates accepted export, rejected probes,
+product loading, restore/verification, concrete binding and publication.
+
 The `generic-templates` contract checks five actual Rust type/const instances against one template,
 including an aligned ZST, distinct element widths and const lengths. It also covers signed consts,
 negative pointer offsets, slice parameters/returns, indexed references, field references, distinct

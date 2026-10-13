@@ -250,7 +250,7 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     [runtime generics](designs/runtime-generics-design.md#5-integration-roadmap-and-gates) through
     the selected engineering roadmap: measure shared interpretation and on-demand specialization
     costs, add a work/payback policy through the existing compile service, and evaluate compiled
-    shared templates. Extend dependency preparation to consumer-independent template products.
+    shared templates.
     Expand layout-dependent fields, aggregates and range/array-subslice coverage from corpus
     evidence; separate rejected-definition probe, successful binding and repeated template
     verification/serialization costs in CPU profiles. Require real workload cold/warm measurements,
