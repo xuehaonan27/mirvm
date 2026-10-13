@@ -1,8 +1,9 @@
 //! Experimental shared machine code over a concrete activation's operand frame.
 //!
-//! Compiled regions stop before calls and other non-branch terminators. The original interpreter
-//! handles those boundaries, including instance-specific call ABIs, cleanup and returns.
+//! Internal entries have a private ABI. Guest slots keep their concrete calling convention, so a
+//! specialized body can replace the shared path at the next call without changing a live frame.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -14,21 +15,24 @@ use crate::vm::jit::{CodeDomain, FAIL_SENTINEL};
 #[derive(Default)]
 pub(crate) struct Regions {
     targets: Vec<Option<u32>>,
+    representatives: Vec<u32>,
     compiled_instances: Vec<AtomicBool>,
-    template_ids: Vec<u32>,
+    adapter: Option<u32>,
+    calls: bool,
+    specialize: bool,
     prepare_ns: u128,
+    translated: AtomicU64,
+    translate_ns: AtomicU64,
     entries: AtomicU64,
     exits: AtomicU64,
+    bridges: AtomicU64,
     ledger: bool,
 }
 
 impl Regions {
-    pub(crate) fn prepare(
-        module: &mut Module,
-        domain: CodeDomain,
-    ) -> Result<Self, crate::error::Error> {
+    pub(crate) fn prepare(module: &mut Module, domain: CodeDomain) -> Self {
         if !crate::options::shared_regions() || !crate::options::jit() {
-            return Ok(Self::default());
+            return Self::default();
         }
         assert_eq!(
             domain,
@@ -52,67 +56,118 @@ impl Regions {
         let mut state = Self {
             targets: vec![None; count],
             compiled_instances: (0..count).map(|_| AtomicBool::new(false)).collect(),
+            calls: crate::options::shared_region_calls(),
+            specialize: crate::options::shared_region_specialize(),
             ledger: crate::options::jit_ledger(),
             ..Self::default()
         };
-        // Inspect archived tags before decoding. Ordinary std functions stay archived.
-        let mut ids = Vec::new();
-        let mut index = 0usize;
+        // Archive owners keep these addresses stable for the Engine's lifetime. No descriptor is
+        // decoded and no bytecode is hashed here. Different archive copies remain separate groups.
+        let mut groups: HashMap<usize, Vec<u32>> = HashMap::new();
+        let mut index = 0u32;
         for part in module.funcs.parts() {
             match part {
                 FuncPart::Owned(bodies) => {
                     for body in bodies {
-                        if body.shared.is_some() {
-                            ids.push(index);
+                        if let Some(shared) = &body.shared {
+                            let key = std::ptr::from_ref(shared.template.as_ref()) as usize;
+                            groups.entry(key).or_default().push(index);
                         }
                         index += 1;
                     }
                 }
                 FuncPart::Archived(archive) => {
                     for body in archive.bodies() {
-                        if body.shared.is_some() {
-                            ids.push(index);
+                        if let Some(shared) = body.shared.as_ref() {
+                            let key = std::ptr::from_ref(shared.template.as_ref()) as usize;
+                            groups.entry(key).or_default().push(index);
                         }
                         index += 1;
                     }
                 }
             }
         }
-        let mut groups = HashMap::new();
-        let mut bodies = Vec::new();
-        for id in ids {
-            let shared = module.funcs.execution(id).unwrap().shared.as_ref().unwrap();
-            let key = *blake3::hash(&postcard::to_stdvec(&shared.template).unwrap()).as_bytes();
-            let target = if let Some(target) = groups.get(&key) {
-                *target
-            } else {
-                let target = u32::try_from(count + bodies.len()).unwrap();
-                let body = translate(&shared.template, target);
-                // The result is ordinary IR with no guest references; the existing verifier and
-                // JIT consume it without a second code generator or a weakened artifact check.
-                crate::vm::verify::generic_template(&body, 0)?;
-                bodies.push(body);
-                groups.insert(key, target);
-                state.template_ids.push(target);
-                target
-            };
-            state.targets[id] = Some(target);
+        let mut groups: Vec<_> = groups.into_values().filter(|ids| ids.len() > 1).collect();
+        groups.sort_unstable_by_key(|ids| ids[0]);
+        let mut headers = Vec::with_capacity(groups.len() + 1);
+        for ids in groups {
+            let target = u32::try_from(count + headers.len()).unwrap();
+            state.representatives.push(ids[0]);
+            for id in ids {
+                state.targets[id as usize] = Some(target);
+            }
+            // Only the private ABI is reserved. The worker builds its actual frame and guarded
+            // entry from translated IR; no guest caller can address this placeholder body.
+            headers.push(header(target));
         }
-        module.funcs.append(bodies.into());
+        state.adapter = Some(u32::try_from(count + headers.len()).unwrap());
+        let mut adapter = header(state.adapter.unwrap());
+        adapter.params.truncate(2);
+        headers.push(adapter);
+        module.funcs.append(headers.into());
         state.prepare_ns = started.elapsed().as_nanos();
-        Ok(state)
+        state
     }
 
     pub(crate) fn contains(&self, func: u32) -> bool {
         self.targets.get(func as usize).is_some_and(Option::is_some)
     }
 
-    pub(crate) fn target(&self, func: u32) -> u32 {
-        self.targets
-            .get(func as usize)
-            .copied()
-            .flatten()
-            .unwrap_or(func)
+    pub(crate) fn is_adapter(&self, func: u32) -> bool {
+        self.adapter == Some(func)
+    }
+
+    pub(crate) fn body(&self, shared: &Shared, func: u32) -> Option<FuncBody> {
+        let group = (func as usize).checked_sub(self.targets.len())?;
+        let representative = *self.representatives.get(group)?;
+        let started = Instant::now();
+        let original = shared
+            .module
+            .funcs
+            .execution(representative as usize)
+            .unwrap();
+        let template = &original.shared.as_ref().unwrap().template;
+        let body = translate(template, func, self.calls.then_some(self.adapter.unwrap()));
+        crate::vm::verify::generic_template(&body, shared.module.funcs.len()).unwrap();
+        self.translated.fetch_add(1, Ordering::Relaxed);
+        self.translate_ns
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        Some(body)
+    }
+
+    /// Published concrete entries win at dispatch. Requests keep their original identity; only
+    /// shared nominations address an internal slot, so the two tiers never overwrite each other.
+    #[inline]
+    pub(crate) fn interpret(&self, ctx: *mut Ctx, func: u32) -> bool {
+        if !self.contains(func) {
+            return false;
+        }
+        if !self.specialize {
+            return true;
+        }
+        let jit = unsafe { &(*ctx).shared.jit };
+        let entry = jit.slots[func as usize].load(Ordering::Acquire);
+        if entry != 0 && entry != FAIL_SENTINEL {
+            return false;
+        }
+        assert_ne!(entry, FAIL_SENTINEL, "concrete entry failed compilation");
+        let count = jit.counters[func as usize].fetch_add(1, Ordering::Relaxed) + 1;
+        if count == jit.threshold {
+            jit.request_compile(func);
+        }
+        true
+    }
+
+    pub(crate) fn iterations(&self, ctx: *mut Ctx, func: u32, count: u32) -> bool {
+        let Some(target) = self.targets.get(func as usize).copied().flatten() else {
+            return false;
+        };
+        let jit = unsafe { &(*ctx).shared.jit };
+        jit.note_iterations(target, count);
+        if self.specialize {
+            jit.note_iterations(func, count);
+        }
+        true
     }
 
     pub(crate) fn select(&self, ctx: *mut Ctx, func: u32) -> u64 {
@@ -151,45 +206,94 @@ impl Regions {
         if !self.ledger || self.targets.is_empty() {
             return;
         }
-        let compiled = self
-            .template_ids
+        let compiled = |id: usize| {
+            let entry = shared.jit.slots[id].load(Ordering::Acquire);
+            entry != 0 && entry != FAIL_SENTINEL
+        };
+        let first = self.targets.len();
+        let end = first + self.representatives.len();
+        let code_bytes: u64 = shared
+            .jit
+            .symbol_ranges()
             .iter()
-            .filter(|&&id| {
-                let entry = shared.jit.slots[id as usize].load(Ordering::Acquire);
-                entry != 0 && entry != FAIL_SENTINEL
-            })
-            .count();
-        let symbols = shared.jit.symbol_ranges();
-        let code_bytes: u64 = symbols
-            .iter()
-            .filter(|symbol| self.template_ids.contains(&symbol.func_id))
+            .filter(|symbol| (first..end).contains(&(symbol.func_id as usize)))
             .map(|symbol| symbol.size)
             .sum();
         crate::diag::instrument(format_args!(
-            "mirvm-shared-regions: instances={} templates={} compiled={} entered_instances={} entries={} exits={} prepare_ns={} code_bytes={}",
+            "mirvm-shared-regions: instances={} templates={} translated={} compiled={} concrete={} entered_instances={} entries={} exits={} bridges={} prepare_ns={} translate_ns={} code_bytes={}",
             self.targets.iter().filter(|v| v.is_some()).count(),
-            self.template_ids.len(),
-            compiled,
+            self.representatives.len(),
+            self.translated.load(Ordering::Relaxed),
+            (first..end).filter(|&id| compiled(id)).count(),
+            self.targets
+                .iter()
+                .enumerate()
+                .filter(|(id, target)| target.is_some() && compiled(*id))
+                .count(),
             self.compiled_instances
                 .iter()
                 .filter(|v| v.load(Ordering::Relaxed))
                 .count(),
             self.entries.load(Ordering::Relaxed),
             self.exits.load(Ordering::Relaxed),
+            self.bridges.load(Ordering::Relaxed),
             self.prepare_ns,
+            self.translate_ns.load(Ordering::Relaxed),
             code_bytes,
         ));
     }
 }
 
-/// The entry is selected once per normal activation. A loop already running in the interpreter
-/// does not transfer into code that finishes compiling later.
-pub(crate) fn enter(ctx: *mut Ctx, entry: u64, base: usize, block: usize) -> usize {
+pub(crate) struct Activation<'a> {
+    ctx: *mut Ctx,
+    base: usize,
+    body: &'a FuncBody,
+    edge: &'a Cell<Option<Bb>>,
+}
+
+/// The descriptor is stack-owned by enter, including across callbacks. The original raw catch
+/// boundary still owns cleanup; this C-unwind helper sets that activation's edge before calling.
+pub(crate) unsafe extern "C-unwind" fn call(activation: *const Activation<'_>, block: u64) -> u64 {
+    let activation = unsafe { &*activation };
+    let state = unsafe { &(*activation.ctx).shared.shared_regions };
+    if state.ledger {
+        state.bridges.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::vm::interp::exec_call(
+        activation.ctx,
+        activation.base,
+        activation.edge,
+        activation
+            .body
+            .term(&activation.body.code()[block as usize]),
+    ) as u64
+}
+
+/// Select code once per activation; neither a shared publication nor a concrete upgrade transfers
+/// an already running interpreter frame into another execution form.
+pub(crate) fn enter(
+    ctx: *mut Ctx,
+    entry: u64,
+    base: usize,
+    block: usize,
+    body: &FuncBody,
+    edge: &Cell<Option<Bb>>,
+) -> usize {
     let state = unsafe { &(*ctx).shared.shared_regions };
     if state.ledger {
         state.exits.fetch_add(1, Ordering::Relaxed);
     }
-    let args = [base as u64, block as u64];
+    let activation = Activation {
+        ctx,
+        base,
+        body,
+        edge,
+    };
+    let args = [
+        base as u64,
+        block as u64,
+        std::ptr::from_ref(&activation) as u64,
+    ];
     let mut result = [0u64; 2];
     if crate::os_arch::PLAIN_CODE_PINS_CTX {
         type Entry = extern "C-unwind" fn(*mut Ctx, *const u64, *mut u64);
@@ -201,6 +305,26 @@ pub(crate) fn enter(ctx: *mut Ctx, entry: u64, base: usize, block: usize) -> usi
         call(args.as_ptr(), result.as_mut_ptr());
     }
     result[0] as usize
+}
+
+fn header(id: u32) -> FuncBody {
+    FuncBody {
+        name: format!("shared_region_{id}").into(),
+        frame_size: 32,
+        frame_align: 8,
+        ret: RetAbi::Scalar(slot(24)),
+        params: vec![
+            ParamAbi::Scalar(slot(0)),
+            ParamAbi::Scalar(slot(8)),
+            ParamAbi::Scalar(slot(16)),
+        ],
+        caller_loc_off: None,
+        shared: None,
+        blocks: vec![Block {
+            stmts: Vec::new(),
+            term: Terminator::Unreachable,
+        }],
+    }
 }
 
 fn slot(off: u32) -> Slot {
@@ -341,10 +465,10 @@ impl Translate {
     }
 }
 
-fn translate(template: &GenericTemplate, id: u32) -> FuncBody {
+fn translate(template: &GenericTemplate, id: u32, adapter: Option<u32>) -> FuncBody {
     let mut tr = Translate {
-        next: 24,
-        size: 24,
+        next: 32,
+        size: 32,
         prefix: Vec::new(),
     };
     let mut blocks = vec![Block {
@@ -357,15 +481,16 @@ fn translate(template: &GenericTemplate, id: u32) -> FuncBody {
             otherwise: template.blocks.len() as u32 + 1,
         },
     }];
+    let mut continuations = Vec::new();
     for (bb, block) in template.blocks.iter().enumerate() {
         let mut stmts = Vec::new();
         for stmt in &block.stmts {
-            tr.next = 24;
+            tr.next = 32;
             let stmt = tr.statement(stmt);
             stmts.append(&mut tr.prefix);
             stmts.push(stmt);
         }
-        tr.next = 24;
+        tr.next = 32;
         let term = match &block.term {
             Terminator::Goto(target) => Terminator::Goto(target + 1),
             Terminator::SwitchInt {
@@ -384,9 +509,34 @@ fn translate(template: &GenericTemplate, id: u32) -> FuncBody {
                     otherwise: otherwise + 1,
                 }
             }
+            Terminator::Call { target, .. } if adapter.is_some() => {
+                let continuation = (template.blocks.len() + 2 + continuations.len()) as u32;
+                continuations.push(Block {
+                    stmts: Vec::new(),
+                    term: Terminator::SwitchInt {
+                        discr: SwitchDiscr::Scalar(Operand::Slot(slot(8))),
+                        targets: vec![(u128::from(*target), target + 1)],
+                        otherwise: 0,
+                    },
+                });
+                Terminator::Call {
+                    callee: adapter.unwrap(),
+                    args: vec![
+                        Operand::Slot(slot(16)),
+                        Operand::Imm {
+                            bits: bb as u64,
+                            width: Width::W64,
+                        },
+                    ],
+                    ret: RetDest::Scalar(ScalarPlace::Slot(slot(8))),
+                    target: continuation,
+                    unwind: UnwindAction::Continue,
+                    role: CallRole::Normal,
+                }
+            }
             _ => {
                 stmts.push(Stmt::Assign {
-                    dst: ScalarPlace::Slot(slot(16)),
+                    dst: ScalarPlace::Slot(slot(24)),
                     rv: Rvalue::Use(Operand::Imm {
                         bits: bb as u64,
                         width: Width::W64,
@@ -401,14 +551,10 @@ fn translate(template: &GenericTemplate, id: u32) -> FuncBody {
         stmts: Vec::new(),
         term: Terminator::Unreachable,
     });
+    blocks.extend(continuations);
     FuncBody {
-        name: format!("shared_region_{id}").into(),
         frame_size: tr.size,
-        frame_align: 8,
-        ret: RetAbi::Scalar(slot(16)),
-        params: vec![ParamAbi::Scalar(slot(0)), ParamAbi::Scalar(slot(8))],
-        caller_loc_off: None,
-        shared: None,
         blocks,
+        ..header(id)
     }
 }

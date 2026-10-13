@@ -249,9 +249,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     generic semantic IR, dedicated frontend or source interpreter. Evaluate
     [runtime generics](designs/runtime-generics-design.md#5-integration-roadmap-and-gates) through
     the selected engineering roadmap: validate the experimental work budget against latency;
-    evaluate lazy admission of compiled template groups, cheaper frame/call adapters and subsequent
-    concrete specialization for hot instances. Reduced compiler spending has not established
-    general whole-program payback. Extend remaining aggregate/projection and range/array-subslice coverage
+    measure executed instance diversity, shared execution work and frame/call costs to admit
+    profitable template groups, including tiny/call-only bodies, and price concrete promotion. Resolve
+    archive-local template identity and memory-backed local costs before product integration. Reduced compiler spending has not established general whole-program
+    payback. Extend remaining aggregate/projection and range/array-subslice coverage
     from corpus evidence; attribute repeated template verification/serialization and metadata work
     in CPU profiles. Require real workload cold/warm measurements,
     unchanged bound-image reuse and specialization payback before default enablement. Preserve

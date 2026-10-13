@@ -36,7 +36,7 @@ expected, _, _ = invoke("contract-native", [native])
 fork_expected, _, _ = invoke("contract-native-fork", [native, "fork"])
 invoke("contract-install", [binary, "install", fixture])
 strict = dict(MIRVM_SHARED_REGIONS="1", MIRVM_JIT_SYNC="1", MIRVM_JIT_THRESHOLD="1",
-              MIRVM_JIT_LEDGER="1", MIRVM_LOG="debug")
+              MIRVM_JIT_LEDGER="1", MIRVM_SHARED_REGION_CALLS="1")
 for name, guest_args, wanted in [("normal", [], expected), ("fork", ["fork"], fork_expected)]:
     _, _, log = invoke("contract-" + name, [binary, "run", fixture, "--", *guest_args], strict, wanted)
     assert "cache-load=" in log and "frontend=" not in log
@@ -45,8 +45,8 @@ for name, guest_args, wanted in [("normal", [], expected), ("fork", ["fork"], fo
         counters = re.search(r"mirvm-shared-regions: (.*)", log).group(1)
         counters = dict((k, int(v)) for k, v in re.findall(r"(\w+)=(\d+)", counters))
         assert counters["entered_instances"] > counters["compiled"], counters
-        assert counters["exits"] > counters["entries"], counters
-        assert "generic instance specialized:" not in log, "shared path instantiated concrete IR"
+        assert counters["exits"] == counters["entries"] and counters["bridges"] > 0, counters
+        assert counters["concrete"] == 0, "shared group instantiated concrete IR"
     print("PASS contract", name, "native output and bound-image hit", flush=True)
 
 source = Path(__file__).with_name("workload.rs").resolve()

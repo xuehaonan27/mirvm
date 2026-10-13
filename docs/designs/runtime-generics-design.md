@@ -186,10 +186,12 @@ Compare it against direct instance specialization rather than assuming three tie
 The production instance header fixes parameter/return ABI, opaque-local storage and call adapters.
 Compiling only the common instruction array cannot share those concrete entry assumptions. The
 [frame-entry experiment](../../experiments/compiled-shared/README.md) retains the concrete activation
-and runs shared code over its frame, returning to the existing boundary for calls and returns.
-This demonstrates an entry ABI, but its eager preparation and repeated boundary transitions are not
-a selected product implementation. A product tier must preserve activation ownership and allow hot
-instances to proceed to concrete code; aggregating template heat alone does not prove payback.
+and runs shared code over its frame. It lazily compiles admitted groups, invokes the existing call
+adapter from compiled code, and can publish concrete entries for subsequent calls while active
+shared frames remain valid. This demonstrates the entry and promotion boundaries, not a selected
+product policy: template identity remains archive-local, locals are memory-backed, and fixed
+instance thresholds do not measure work saved by specialization. Aggregating template heat alone
+does not prove payback.
 Sparse instance use, a hot repeated loop, tiny calls, native-call-heavy work and one long invocation
 are separate policy acceptance cases. Initial thresholds are an experiment, not a product default.
 
@@ -198,9 +200,9 @@ are separate policy acceptance cases. Initial thresholds are an experiment, not 
 Remaining integration work is grouped by a complete execution or preparation boundary:
 
 1. **Measured tier policy.** Price shared interpretation and concrete/JIT compilation with the
-   existing compile service. Validate the experimental work budget and evaluate lazy, selective
-   shared compilation, efficient call adapters and subsequent concrete specialization. Compare
-   against staying interpreted and direct specialization. Acceptance: cold complete time and first
+   existing compile service. Validate the experimental work budget, price call/frame adaptation and
+   concrete promotion against observed shared execution, and select which template groups benefit
+   from an intermediate tier. Compare against staying interpreted and direct specialization. Acceptance: cold complete time and first
    useful result improve on representative inputs without hiding late work; short/native-call
    workloads retain their cheaper path, and warm throughput and memory/code size remain acceptable.
 2. **Corpus-driven coverage.** Extend remaining projection/aggregate shapes and
