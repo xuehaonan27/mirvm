@@ -250,6 +250,16 @@ impl<'tcx> Export<'tcx> {
             .iter()
             .map(|binding| match *binding {
                 Binding::Size(index) => Some(u64::from(layouts[index as usize].size)),
+                Binding::Field(index, field) => {
+                    let ty = instance.instantiate_mir_and_normalize_erasing_regions(
+                        tcx,
+                        env,
+                        EarlyBinder::bind(tcx, exported.layouts[index as usize]),
+                    );
+                    let layout = frame::layout_of(tcx, env, ty).ok()?;
+                    ((field as usize) < layout.fields.count())
+                        .then(|| layout.fields.offset(field as usize).bytes())
+                }
                 Binding::Const(index, width) => {
                     let value = instance
                         .args
@@ -563,15 +573,7 @@ impl<'tcx> Exporter<'tcx> {
                         .collect();
                 }
                 mir::ProjectionElem::Field(field, field_ty) => {
-                    let layout = frame::layout_of(self.tcx, self.env, ty).ok()?;
-                    // Dynamic tails require an alignment binding as well as the field offset.
-                    if frame::layout_of(self.tcx, self.env, field_ty)
-                        .ok()?
-                        .is_unsized()
-                    {
-                        return None;
-                    }
-                    expr = offset(expr, layout.fields.offset(field.as_usize()).bytes())?;
+                    expr = self.field(expr, ty, field.as_u32(), field_ty)?;
                     ty = field_ty;
                     meta = None;
                 }
@@ -637,6 +639,43 @@ impl<'tcx> Exporter<'tcx> {
     fn scalar_place(&mut self, place: mir::Place<'tcx>) -> Option<ScalarPlace> {
         let ProjectedPlace { expr, ty, .. } = self.place(place)?;
         Some(scalar_place(expr, self.width(ty)?))
+    }
+
+    fn field(
+        &mut self,
+        expr: PlaceExpr,
+        ty: Ty<'tcx>,
+        field: u32,
+        field_ty: Ty<'tcx>,
+    ) -> Option<PlaceExpr> {
+        // Unsized tails also depend on runtime alignment and cannot use a sized field offset.
+        if !field_ty.is_sized(self.tcx, self.env) {
+            return None;
+        }
+        if let Ok(layout) = frame::layout_of(self.tcx, self.env, ty) {
+            return offset(expr, layout.fields.offset(field as usize).bytes());
+        }
+        if !matches!(ty.kind(), ty::Tuple(_))
+            && !matches!(ty.kind(), ty::Adt(def, _) if def.is_struct())
+        {
+            return None;
+        }
+        let layout = layout_index(&mut self.layouts, ty)?;
+        let binding = self.binding(Binding::Field(layout, field), Width::W64)?;
+        let slot = self.scratch64()?;
+        self.pending.push(Stmt::Assign {
+            dst: ScalarPlace::Slot(slot),
+            rv: Rvalue::Use(binding),
+        });
+        let mut steps = expr.steps.into_vec();
+        steps.push(PlaceStep::IndexScaled {
+            idx: slot,
+            stride: 1,
+        });
+        Some(PlaceExpr {
+            steps: steps.into(),
+            ..expr
+        })
     }
 
     fn pair(&mut self, place: mir::Place<'tcx>) -> Option<(ScalarPlace, ScalarPlace)> {
@@ -895,6 +934,11 @@ impl<'tcx> Exporter<'tcx> {
 
     fn assign(&mut self, place: mir::Place<'tcx>, rv: &mir::Rvalue<'tcx>) -> Option<Vec<Stmt>> {
         let ty = place.ty(&self.mir.local_decls, self.tcx).ty;
+        if let mir::Rvalue::Aggregate(kind, ops) = rv
+            && !matches!(**kind, mir::AggregateKind::RawPtr(..))
+        {
+            return self.aggregate(place, ty, kind, &ops.raw);
+        }
         let layout = fixed_layout(self.tcx, self.env, ty);
         if layout
             .as_ref()
@@ -944,6 +988,65 @@ impl<'tcx> Exporter<'tcx> {
             }
             _ => None,
         }
+    }
+
+    fn aggregate(
+        &mut self,
+        place: mir::Place<'tcx>,
+        ty: Ty<'tcx>,
+        kind: &mir::AggregateKind<'tcx>,
+        ops: &[mir::Operand<'tcx>],
+    ) -> Option<Vec<Stmt>> {
+        // Stage-free construction is valid only when writing the destination cannot change an
+        // operand still to be read. Aliasing projections retain ordinary MIR lowering.
+        if !place.projection.is_empty()
+            || ops.iter().any(|op| match op {
+                mir::Operand::Copy(src) | mir::Operand::Move(src) => {
+                    src.local == place.local || !src.projection.is_empty()
+                }
+                mir::Operand::Constant(_) => false,
+                _ => true,
+            })
+        {
+            return None;
+        }
+        let fields: Vec<_> = match (kind, ty.kind()) {
+            (mir::AggregateKind::Tuple, ty::Tuple(fields)) => fields.iter().collect(),
+            (mir::AggregateKind::Adt(_, _, _, _, None), ty::Adt(def, args)) if def.is_struct() => {
+                def.non_enum_variant()
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        self.tcx
+                            .normalize_erasing_regions(self.env, field.ty(self.tcx, args))
+                    })
+                    .collect()
+            }
+            _ => return None,
+        };
+        if fields.len() != ops.len() {
+            return None;
+        }
+        let base = self.place(place)?.expr;
+        let mut statements = Vec::new();
+        for (index, (op, field_ty)) in ops.iter().zip(fields).enumerate() {
+            let dst = self.field(base.clone(), ty, u32::try_from(index).ok()?, field_ty)?;
+            match fixed_layout(self.tcx, self.env, field_ty).map(|layout| layout.kind) {
+                Some(ValKind::Zst) => {}
+                Some(ValKind::Scalar(width)) => statements.push(Stmt::Assign {
+                    dst: scalar_place(dst, width),
+                    rv: Rvalue::Use(self.operand(op)?),
+                }),
+                _ => statements.push(Stmt::MemCopy {
+                    dst: Operand::AddrOf(dst),
+                    src: Operand::AddrOf(self.operand_place(op)?.expr),
+                    count: self.size(field_ty)?,
+                    elem_size: 1,
+                    overlap: true,
+                }),
+            }
+        }
+        Some(statements)
     }
 
     fn block(&mut self, block_index: u32, block: &mir::BasicBlockData<'tcx>) -> Option<Block> {

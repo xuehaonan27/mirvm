@@ -95,7 +95,90 @@ fn owned_observe<T: Clone + Action>(value: T) -> u64 {
 #[repr(align(128))]
 struct AlignedValue([u8; 73]);
 
+struct FieldPair<T> {
+    tag: u8,
+    value: T,
+    tail: u16,
+}
+
+#[repr(C)]
+struct CFieldPair<T> {
+    tag: u8,
+    value: T,
+    tail: u16,
+}
+
+#[inline(never)]
+fn construct_fields<T>(value: T) -> FieldPair<T> {
+    FieldPair {
+        tag: 3,
+        value,
+        tail: 517,
+    }
+}
+
+#[inline(never)]
+fn construct_c_fields<T>(value: T) -> CFieldPair<T> {
+    CFieldPair {
+        tag: 5,
+        value,
+        tail: 1031,
+    }
+}
+
+#[inline(never)]
+fn construct_tuple<T>(value: T) -> (u8, T, u16) {
+    (7, value, 2053)
+}
+
+#[inline(never)]
+fn generic_field<T>(value: &FieldPair<T>) -> &T {
+    &value.value
+}
+
+#[inline(never)]
+fn generic_field_mut<T>(value: &mut FieldPair<T>) -> &mut T {
+    &mut value.value
+}
+
+#[inline(never)]
+fn generic_tail<T>(value: &FieldPair<T>) -> u16 {
+    value.tail
+}
+
+#[inline(never)]
+fn generic_c_field<T>(value: &CFieldPair<T>) -> &T {
+    &value.value
+}
+
+#[inline(never)]
+fn nested_field<T>(value: &(u8, FieldPair<T>)) -> &T {
+    &value.1.value
+}
+
+#[inline(never)]
+fn into_field<T>(value: FieldPair<T>) -> T {
+    value.value
+}
+
+fn check_fields<T: Clone + PartialEq + std::fmt::Debug>(value: T) {
+    let mut pair = construct_fields(value.clone());
+    assert_eq!(pair.tag, 3);
+    assert_eq!(generic_tail(&pair), 517);
+    assert!(std::ptr::eq(generic_field(&pair), &pair.value));
+    assert_eq!(generic_field(&pair), &value);
+    *generic_field_mut(&mut pair) = value.clone();
+    let nested = (11u8, pair);
+    assert!(std::ptr::eq(nested_field(&nested), &nested.1.value));
+    assert_eq!(into_field(nested.1), value);
+    let c = construct_c_fields(value.clone());
+    assert_eq!((c.tag, c.tail), (5, 1031));
+    assert!(std::ptr::eq(generic_c_field(&c), &c.value));
+    assert_eq!(construct_tuple(value.clone()), (7, value, 2053));
+}
+
 fn check_owned<T: Clone + PartialEq + std::fmt::Debug>(value: T) {
+    check_fields(value.clone());
     let cloned = owned_clone(value.clone());
     assert_eq!(cloned, value);
     assert_eq!(owned_forward(cloned), value);

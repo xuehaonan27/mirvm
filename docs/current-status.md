@@ -344,9 +344,9 @@ test tier is established by the census.
 
 ### Production shared generic execution
 
-Setting `MIRVM_GENERIC_TEMPLATES=1` enables compiler-session template reuse for scalar/pair and
-opaque by-value locals, slice metadata and patterns, fixed field projections, checked slice/array
-indexing, pointer/const operations and resolved direct guest calls. Each admitted definition is
+Setting `MIRVM_GENERIC_TEMPLATES=1` enables reusable templates for scalar/pair and
+opaque by-value locals, slice metadata and patterns, sized struct/tuple field projections and
+construction, checked slice/array indexing, pointer/const operations and resolved direct guest calls. Each admitted definition is
 exported once; binding fixes ABI, frame storage, dictionary values and guest-call adapters without
 copying its ordinary instructions. The interpreter executes the shared template directly. The existing
 JIT service requests concrete instructions through a per-Engine publication slot when compiling an
@@ -361,7 +361,7 @@ HIR hashes keeps local templates in memory. Concurrent writers merge definition 
 retaining replaced bodies. `cache purge --units` removes these disposable products.
 
 The preparation contract exports an unused dependency generic on both dependency tracks, then
-changes only the consumer and verifies reuse with a new by-value array binding. It also checks
+changes only the consumer and verifies reuse with a new aggregate containing a by-value array. It also checks
 bound-image hits, tracked-input invalidation and failed required publication. Template unit checks
 cover exact identity, damaged/truncated archives, recipe bounds, instruction/schema validation,
 stale publishers and failed publication. `MIRVM_TIMING` separates accepted export, rejected probes,
@@ -376,8 +376,11 @@ messages, source line/column and caller cleanup agree with native. Compound poin
 type and const parameters. First/last/middle patterns and mutable subslices preserve pointer identity,
 length and writes across empty and nonempty inputs. By-value identity, forwarding, selection and Clone
 share templates across ZST, scalar, pair, oversized scalar, array and over-aligned aggregate layouts.
-The contract checks mixed concrete/opaque arguments, both selection branches, Clone failure, a
-subsequent witness failure and a destructor failure before return; value identity, alignment and drop
+Field and constructor checks cover Rust and C representations, nested projections, mutable
+references, tuples and moving a field out across eight concrete layouts. Offsets, alignment, values
+and pointer identity agree with native. The contract checks mixed concrete/opaque arguments, both
+selection branches, Clone failure, a subsequent witness failure and a destructor failure before
+return; value identity, alignment and drop
 order agree with native. Direct JIT calls write scalar/pair results to either slots or memory
 destinations through the same writeback path. Indirect calls, unsupported constant/aggregate
 operations and caller-location bindings retain eager fallback; an invalid unentered instantiation is
@@ -403,44 +406,77 @@ The original
 addressable arguments agrees with native under synchronous JIT and bound-image reload, including
 aggregate parameters, pair returns and indirect returns through native callbacks.
 
-Three alternating pairs on one release executable use prepared std/dependency MIR and remove all
-execution/sharing/JIT products except the std base before each miss. Every one of the 36 timed
-samples agrees with native output; debug coverage runs are separate and OS page caches are retained.
-The medians are:
+Three alternating rounds on one release executable use prepared std/dependency MIR. Each miss
+removes execution/sharing/JIT products except the std base; the prepared-template mode also retains
+the generic-template store. Immediate repeats exercise the bound image. All 54 timed samples agree
+with native, every repeat omits frontend/lowering/layer loading, and diagnostics are captured
+separately. OS page caches are retained. Whole-process / lowering medians are:
 
-| Workload | Exported definitions / shared instances | Rejected definitions | Eager whole process / lower | Shared whole process / lower |
-|---|---:|---:|---:|---:|
-| serde JSON | 164 / 266 | 393 | 539.9 / 218.4 ms | 443.1 / 221.0 ms |
-| flate2, 2 KiB input | 111 / 149 | 342 | 524.4 / 190.5 ms | 555.9 / 191.3 ms |
-| generic matrix, one selected type | 168 / 249 | 369 | 365.5 / 167.2 ms | 372.8 / 184.8 ms |
+| Workload | Eager | Fresh shared templates | Prepared shared templates |
+|---|---:|---:|---:|
+| serde JSON | 362.4 / 187.3 ms | 379.8 / 207.1 ms | 382.5 / 208.6 ms |
+| flate2, 2 KiB input | 444.1 / 168.8 ms | 463.6 / 175.1 ms | 435.9 / 175.8 ms |
+| generic matrix, one selected type | 358.9 / 162.2 ms | 386.0 / 176.5 ms | 385.5 / 167.0 ms |
 
-These samples do not establish a whole-program improvement. Serde's cold ranges overlap substantially
-(eager 419.2–554.7 ms, shared 438.8–581.6 ms), and three pairs cannot attribute the median difference
-to shared execution. Lowering remains slightly higher in serde/flate and 17.6 ms higher in the
-matrix. Bound-image-hit medians are 99.8/96.7 ms for serde and 151.6/153.9 ms for flate
-(eager/shared). The matrix repeat samples in this measurement do not describe a runtime-only hit:
-they include preparation after an unrepresentable anonymous dependency address blocked symbolic
-delta publication. The bound-image writer no longer depends on that optional delta. A focused
-installation check with only std base retained reaches the complete image on the first subsequent
-run, matches native output, and reports no frontend, lowering or layer-loading phases.
+These samples do not establish a whole-program improvement. Three rounds cannot isolate small
+median differences, and process/I/O variation is substantial: flate's fresh-template range includes
+446.3–2,181.2 ms. Bound-image-hit medians for eager / fresh / prepared are 70.5 / 78.3 / 79.2 ms
+(serde), 132.9 / 130.0 / 128.1 ms (flate), and 84.6 / 92.7 / 84.6 ms (matrix). A separate install
+check with only std base retained publishes the complete matrix image before guest entry and reaches
+it on the first run. Optional symbolic-delta failure does not block this image.
 
-Separate diagnostic runs request concrete forms for 0/266 serde, 9/149 flate and 0/249 matrix shared
-instances. This demonstrates deferred bytecode emission, not that all other preparation work has
-been removed. Export probes, concrete layout/call binding, verification and publication remain
-before entry. Default enablement remains off; consumer-independent dependency preparation and a
-measured work/payback policy remain under D7.
+Diagnostic runs admit 245 definitions / 423 instances for serde, 196 / 292 for flate, and 230 / 330
+for matrix. They reject 312 / 257 / 307 definitions respectively; concrete binding additionally falls
+back for 90 / 77 / 17 instances. Remaining field-projection refusals are 10 / 12 / 7; aggregate
+refusals are 55 / 40 / 60. Rvalues, casts and binary operations also retain substantial missed
+coverage. These counts identify admission work, not time saved.
 
-A prepared serde cold-run CPU capture at 997 Hz has 682 samples and zero lost samples. An exclusive
-self-time grouping assigns about 27.1% of sampled cycles to compiler/metadata symbols, 18.0% to
-allocation, 12.0% to hashing/hash tables and 4.7% to bytecode verification. The generic export/bind
-call chain accounts for about 6.5% inclusively; that overlaps other groups and does not isolate
-negative probes from successful binding. CPU cycles exclude waits, and capture overhead is not part
-of the timing table. Metadata, allocation and hashing remain relevant next targets; eliminating
-instruction copies alone does not establish startup payback.
+The prepared runs reuse 244 / 195 / 227 accepted templates and 312 / 257 / 300 negative export probes.
+In a representative serde run, product loading takes 4.805 ms, restoration/verification 2.426 ms,
+concrete binding 2.172 ms and residual export 0.101 ms. The same run's telemetry reports base load
+13.8 ms, layer load 2.1 ms, frontend 36.2 ms, lowering 209.1 ms, cache publication 27.7 ms and engine
+19.7 ms within a 333.8 ms measured driver total. Generic-stage timings are nested within preparation,
+not additional wall time. Driver total and whole-process time have different boundaries; the
+median difference is 46.0 ms in this mode. Reuse removes export work but still pays loading,
+verification, metadata queries and concrete binding.
 
-The expanded generic program also agrees with native under trace capture and after standalone
-package publication/reload. Focused archive/manifest/verifier checks, all-target/all-feature Clippy,
-formatting and repository boundary checks pass. No full runtime test tier was run for this change.
+A separate prepared serde CPU capture at 997 Hz has 535 samples and zero lost samples. An exclusive
+self-time grouping assigns about 24.2% of sampled cycles to compiler/metadata symbols, 20.9% to
+allocation, 14.5% to hashing/hash tables and 6.4% to bytecode verification. Allocation and hashing
+are classified before compiler symbols. The generic export/restore/bind call chain accounts for
+about 4.1% inclusively and overlaps these groups. CPU cycles exclude waits; profile overhead is
+excluded from the timing table. Metadata, allocation, hashing and repeated verification remain
+relevant startup targets.
+
+The JIT ledger records sampled own-body interpreter work, queue delay, concrete specialization,
+worker time and final publication. `MIRVM_GENERIC_PAYBACK=1` enables an experimental compile-work
+budget; it remains off by default. A separate 36-sample comparison uses bound-image hits with the
+persistent JIT cache disabled, three alternating rounds, native output comparison and separate
+ledger captures. Whole-process / engine medians are:
+
+| Workload | Stay interpreted | Direct specialization | Work budget |
+|---|---:|---:|---:|
+| Five briefly used instances | 51.6 / 5.8 ms | 46.4 / 6.4 ms | 52.9 / 6.9 ms |
+| Two repeated hot instances | 106.3 / 66.7 ms | 65.8 / 21.7 ms | 71.7 / 22.5 ms |
+| Native-call-heavy wrappers | 81.4 / 48.1 ms | 82.2 / 47.7 ms | 77.4 / 47.6 ms |
+| flate2, 2 KiB input | 333.5 / 258.7 ms | 176.4 / 108.3 ms | 196.2 / 111.5 ms |
+
+The hot workload calls each instance 5,000 times with 64 loop iterations; native wrappers call a
+50 µs sleep 200 times each. Neither the short nor the native-wrapper case requests a shared-instance
+compilation; the latter stays below the existing entry trigger and does not prove profitable
+admission after that trigger. The hot case compiles three shared entries under either JIT policy.
+Flate's diagnostic capture reduces shared transitions from 30 to 14 and worker time from 8.344 to
+3.529 ms under the budget, but its complete-time median rises by 19.8 ms. First stdout byte rises
+from 75.9 to 90.3 ms there; synthetic cases print a startup marker before their measured work, so
+that marker is not a completed useful result. The budget reduces compilation spending without an
+established latency win. Default generic enablement and the compiled shared tier remain open.
+
+The generic contract agrees with native under eager/shared interpretation, synchronous JIT and
+bound-image reload, including concurrent entries, callbacks, unwind and fork. The budget mode also
+matches native for normal and fork invocations. Focused template, cache-publication and compile-work
+unit checks, all-target/all-feature Clippy, formatting and repository boundary checks pass. The
+preparation contract passes 86 assertions across both dependency tracks. No full runtime test tier
+was run for this change; OSR remains deferred.
 
 ### Runtime generics prototype
 
@@ -495,7 +531,7 @@ trait resolver. No full repository test tier is claimed.
 The prototype's serial, process-global body override is confined to a disposable source copy.
 The production interpreter uses its entry-selected body throughout normal execution and cleanup;
 per-Engine generic entries must retain both body and descriptor before concurrent promotion.
-Reusable generic products and real-workload cold/warm validation remain open. The selected integration
+Production integration and its measured limits are described above. The remaining integration
 roadmap and acceptance gates are owned by
 [runtime-generics-design.md](designs/runtime-generics-design.md); OSR is T13.
 

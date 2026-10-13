@@ -175,7 +175,8 @@ edition = "2024"
 EOF
         cat >"$project/dep/src/lib.rs" <<'EOF'
 pub fn identity<T>(value: T) -> T { value }
-pub fn latent<T>(value: T) -> T { value }
+pub struct Bundle<T> { pub tag: u8, pub value: T }
+pub fn latent<T>(value: T) -> Bundle<T> { Bundle { tag: 13, value } }
 EOF
         cat >"$project/src/main.rs" <<'EOF'
 fn main() { println!("unselected guest ran"); }
@@ -225,7 +226,8 @@ EOF
         cat >"$project/src/bin/selected.rs" <<'EOF'
 fn main() {
     let value = prepared_dep::latent([7u64; 9]);
-    println!("latent:{}", value.iter().sum::<u64>());
+    assert_eq!(value.tag, 13);
+    println!("latent:{}", value.value.iter().sum::<u64>());
 }
 EOF
         run_mirvm "edited consumer reuses an unused dependency template on $track" 0 "$tag-latent" \

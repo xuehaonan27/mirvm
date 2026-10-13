@@ -3,7 +3,7 @@
 > Status: Production shared interpretation, reusable templates and on-demand JIT specialization are opt-in.
 > Owns generic execution products, promotion and integration gates. Frontend selection and semantic
 > validation remain in [frontend-boundary.md](frontend-boundary.md#41-runtime-generics); measurements
-> belong to [current-status.md](../current-status.md#runtime-generics-prototype). D7 and T13 in
+> belong to [current-status.md](../current-status.md#production-shared-generic-execution). D7 and T13 in
 > [open-issues.md](../open-issues.md) own unfinished work. Unsupported functions retain eager lowering.
 
 ## 1. Decision and boundary
@@ -15,8 +15,8 @@ instances share instructions, while profitable hot instances obtain concrete byt
 existing JIT. Unsupported functions retain ordinary eager lowering in the product integration.
 
 The production lowerer admits scalar/pair frames, opaque by-value locals, slice metadata and pair
-moves, fixed-layout field projections, checked slice/array indexing, slice patterns, scalar const
-parameters, integer operations and opaque-pointee offset/copy loops under
+moves, sized struct/tuple field projections and construction, checked slice/array indexing, slice
+patterns, scalar const parameters, integer operations and opaque-pointee offset/copy loops under
 `MIRVM_GENERIC_TEMPLATES=1` (unset disables it). Direct calls bind concrete guest functions,
 including resolved trait methods and Clone/Drop shims, through the existing linker worklist. One
 compiler session caches both eligible templates and rejected definitions. Only ordinary Item
@@ -33,8 +33,14 @@ value's ZST, scalar, pair or indirect ABI; opaque call operands and destinations
 same classification. Opaque storage adds no per-value heap allocation or compiler query at guest
 entry. Cleanup, Resume and terminate edges retain MIR's control flow, including partial initialization when Clone unwinds.
 This concrete frame contract is fixed before any interpreter/JIT caller queries its header.
-Unsupported projections, aggregate construction, indirect or foreign calls and general
+Unsupported projections and aggregates, indirect or foreign calls and general
 caller-location ABIs retain eager lowering.
+
+Sized struct and tuple fields bind exact offsets from the instantiated Rust layout; field order,
+padding and alignment are not inferred from sizes. Nested projections compose these offsets.
+Construction writes fields from unprojected locals distinct from the destination, or supported
+scalar constants, into a local destination. Aliasing projections, enum/union construction and unsized tails retain eager
+lowering. Return and parameter ABIs still come from the complete concrete aggregate layout.
 
 Bounds assertions branch to the guest panic lang item with the original source location and unwind
 action. Index strides read type-size bindings through ordinary IR; address temporaries remain live
@@ -158,10 +164,29 @@ machine-code generation, publication and queue delay. The prototype's measured c
 is much cheaper than machine-code generation; optimizing only the former misses the main payback
 cost. Time spent in native witnesses or outside the body is not time a specialized loop can remove.
 
+`MIRVM_JIT_LEDGER=1` records shared-body work and separates request queue delay, concrete
+specialization, compiler-worker time and final cache publication. The interpreter samples the first
+entry and every 64th entry, stopping at the first block boundary after 4,096 instruction/terminator
+units. Calls and signal draining pause its clock. Weighted elapsed samples are an estimate of
+own-body work, not exact CPU time or a prediction of remaining lifetime.
+
+`MIRVM_GENERIC_PAYBACK=1` opts into a compile-work budget. Existing entry/backedge triggers nominate
+functions; the first shared compilation calibrates observed worker cost per static instruction.
+Later requests need both per-instance work credit and sufficient unspent Engine credit. Actual
+worker time charges the budget, including an underestimated transition's debt. Deferred requests
+retry at sparse counter boundaries with at most one pending request per function. Under this policy,
+shared entries do not prelink from previous-run heat before earning credit; synchronous verification
+bypasses admission. The option is off by default. Reducing compiler work alone does not establish
+better latency; all final publication work remains inside whole-process measurements.
+
 Use shared interpretation as the guaranteed fallback. A compiled shared template is a candidate
 intermediate tier when many instances execute briefly; it can amortize one compilation across
 instances. It is not automatically enabled: a short run can finish before even that cost is repaid.
 Compare it against direct instance specialization rather than assuming three tiers always win.
+The production instance header fixes parameter/return ABI, opaque-local storage and call adapters.
+Compiling only the common instruction array cannot share those concrete entry assumptions. A shared
+machine-code tier needs a descriptor entry ABI and adapters, or measured per-instance wrappers;
+that boundary remains to be designed and evaluated.
 Sparse instance use, a hot repeated loop, tiny calls, native-call-heavy work and one long invocation
 are separate policy acceptance cases. Initial thresholds are an experiment, not a product default.
 
@@ -170,17 +195,17 @@ are separate policy acceptance cases. Initial thresholds are an experiment, not 
 Remaining integration work is grouped by a complete execution or preparation boundary:
 
 1. **Measured tier policy.** Price shared interpretation and concrete/JIT compilation with the
-   existing compile service. Add bounded work/payback accounting and compare staying shared,
+   existing compile service. Validate the experimental work budget and compare staying shared,
    direct specialization and a compiled shared template. Acceptance: cold complete time and first
    useful result improve on representative inputs without hiding late work; short/native-call
    workloads retain their cheaper path, and warm throughput and memory/code size remain acceptable.
-2. **Corpus-driven coverage.** Extend type-dependent field projections, aggregate construction and
+2. **Corpus-driven coverage.** Extend remaining projection/aggregate shapes and
    range/array-subslice paths when their measured missed coverage warrants the change. Keep eager
    fallback and diagnostic parity for unsupported shapes. Associated types, niches/enums, closures,
    indirect calls and recursive drop/cleanup need explicit contracts, not layout-size equivalence.
-3. **OSR.** Implement T13's activation-transfer contract independently of generic coverage, then
-   attach specialization to the same mechanism. Acceptance includes one long hot invocation, live
-   values and cleanup state across transfer, and plain/trace domain identity.
+3. **OSR (deferred).** Implement T13's activation-transfer contract independently of generic coverage,
+   then attach specialization to the same mechanism. Acceptance includes one long hot invocation,
+   live values and cleanup state across transfer, and plain/trace domain identity.
 
 The shared-entry gate covers mixed shared/concrete/JIT execution, concurrent first publication,
 recursion, native callbacks, unwind, signals, close and fork. These lifecycle contracts remain
@@ -190,4 +215,5 @@ production publication path.
 Do not select default enablement from the execution microbenchmarks. The release decision needs
 unmodified reference/candidate whole-process measurements, native output agreement, the relevant
 repository correctness checks, and demonstrated reuse of a bound image after preparation. OSR can
-proceed alongside the export/storage work once the activation ownership contract is fixed.
+resume after the activation ownership contract is fixed; it is not part of the current preparation,
+policy and coverage work.

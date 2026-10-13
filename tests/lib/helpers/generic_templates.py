@@ -67,10 +67,16 @@ for mode, settings in [
                                   ("middle_slice", 4), ("tail_mut", 4),
                                   ("owned_identity", 8), ("owned_forward", 8),
                                   ("owned_clone", 9), ("owned_observe", 2),
-                                  ("owned_pick", 9), ("owned_select", 9), ("recursive", 2)]:
+                                  ("owned_pick", 9), ("owned_select", 9), ("recursive", 2),
+                                  ("construct_fields", 8), ("construct_c_fields", 8),
+                                  ("construct_tuple", 8), ("generic_field", 8),
+                                  ("generic_field_mut", 8), ("generic_tail", 8),
+                                  ("generic_c_field", 8), ("nested_field", 8),
+                                  ("into_field", 8)]:
             assert log.count("generic template exported: " + definition + "\n") == 1, definition
             bound = [line for line in log.splitlines()
-                     if "generic template bound:" in line and definition in line]
+                     if "generic template bound:" in line
+                     and re.search(r"(?<!\d)" + str(len(definition)) + re.escape(definition), line)]
             assert len(bound) == count and len(set(bound)) == count, (definition, bound)
         assert "generic template fallback: indirect\n" in log, log
         assert "generic template exported: caller_location\n" in log, log
