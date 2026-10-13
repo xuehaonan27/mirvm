@@ -198,6 +198,11 @@ pub fn stop(shared: &Shared) {
     if let Some(worker) = shared.jit.worker.lock().unwrap().take() {
         let _ = worker.join();
     }
+    if !shared.jit.enabled
+        && let Some(work) = &shared.jit.work
+    {
+        work.report(0);
+    }
 }
 
 pub(super) fn worker(
@@ -223,6 +228,16 @@ pub(super) fn worker(
     if baseline.jit_cache {
         let mut prelinked = 0u64;
         for func in &heat.order {
+            if shared.jit.work.as_ref().is_some_and(|work| work.enforce)
+                && shared
+                    .module
+                    .funcs
+                    .execution(*func as usize)
+                    .is_some_and(|body| body.shared.is_some())
+            {
+                // A previous run's heat is not credit for work this Engine has performed.
+                continue;
+            }
             let Some(body) = shared.module.funcs.get(*func as usize) else {
                 continue;
             };
@@ -246,6 +261,23 @@ pub(super) fn worker(
         if shared.jit.stopping.load(Ordering::Acquire) {
             break;
         }
+        let started = shared.jit.work.as_ref().map(|_| std::time::Instant::now());
+        let units = shared.jit.work.as_ref().and_then(|_| {
+            let body = shared.module.funcs.execution(func as usize)?;
+            body.shared.as_ref()?;
+            Some(
+                body.code()
+                    .iter()
+                    .map(|block| block.stmts.len() as u64 + 1)
+                    .sum::<u64>()
+                    .max(1),
+            )
+        });
+        if let (Some(work), Some(units)) = (&shared.jit.work, units)
+            && !work.admit(func, units)
+        {
+            continue;
+        }
         if dbg {
             crate::diag_debug!(
                 Jit,
@@ -253,7 +285,35 @@ pub(super) fn worker(
                 shared.module.funcs.header(func as usize).unwrap().name()
             );
         }
+        let specialize_ns = units
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let _ = shared.module.funcs.get(func as usize);
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+            })
+            .unwrap_or(0);
         c.compile(func);
+        if let (Some(work), Some(units), Some(started)) = (&shared.jit.work, units, started) {
+            let queue_ns = request
+                .queued
+                .map(|queued| {
+                    started
+                        .duration_since(queued)
+                        .as_nanos()
+                        .min(u128::from(u64::MAX)) as u64
+                })
+                .unwrap_or(0);
+            let worker_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            let entry = shared.jit.slots_for(domain).slots[func as usize].load(Ordering::Acquire);
+            work.transition(
+                func,
+                units,
+                queue_ns,
+                specialize_ns,
+                worker_ns,
+                entry != 0 && entry != FAIL_SENTINEL,
+            );
+        }
         observed.push(func);
         // The other compiler is not consulted here: a function is compiled once per tier, and the
         // upgrade request a hot function raises is what replaces a baseline entry with an optimized one.
@@ -280,6 +340,7 @@ pub(super) fn worker(
     heat.write(&observed);
     // Whatever a batch still holds is worth a file: the next session can only reuse what is in the
     // store, and a worker that exits with entries staged would lose them.
+    let publishing = shared.jit.work.as_ref().map(|_| std::time::Instant::now());
     for c in [&mut baseline, &mut optimized] {
         if c.jit_cache {
             let session = std::mem::take(&mut c.jit_staging);
@@ -289,6 +350,9 @@ pub(super) fn worker(
                 crate::diag_debug!(Jit, "cannot publish JIT entries: {error}");
             }
         }
+    }
+    if let (Some(work), Some(publishing)) = (&shared.jit.work, publishing) {
+        work.report(publishing.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
     }
     // Published JIT code may still be live on a sleeping stack in the process-wide
     // thread pool. Teardown has to join the compile thread rather than race libc

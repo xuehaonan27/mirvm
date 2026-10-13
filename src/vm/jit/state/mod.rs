@@ -20,6 +20,8 @@ use std::sync::{Mutex, OnceLock, RwLock};
 pub use perfmap::*;
 
 mod perfmap;
+mod work;
+pub(crate) use work::WorkLedger;
 #[cfg(test)]
 mod tests;
 
@@ -67,6 +69,7 @@ impl Tier {
 pub struct Request {
     pub func: u32,
     pub tier: Tier,
+    pub queued: Option<std::time::Instant>,
 }
 
 /// The function heat order a session starts with, and where it leaves its own.
@@ -210,6 +213,8 @@ pub struct JitState {
     /// iteration. The interpreter reports its back edges here in batches, and crossing the request
     /// point asks for the function to be compiled.
     iterations: Vec<AtomicU32>,
+    /// Shared-body cost sampling and the optional experimental compile-work budget.
+    pub(crate) work: Option<WorkLedger>,
     /// `MIRVM_JIT_SYNC=1` verification mode: after queueing, wait for publication or the
     /// failure sentinel. With threshold 1 this turns "first call requests compilation"
     /// into "first call compiles and publishes synchronously", and a compilation failure
@@ -257,6 +262,13 @@ impl JitState {
             threshold,
             hot: std::sync::RwLock::new(std::collections::HashSet::new()),
             iterations: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
+            work: (crate::options::generic_payback() || crate::options::jit_ledger()).then(|| {
+                WorkLedger::new(
+                    fn_count,
+                    crate::options::generic_payback() && !crate::options::jit_sync(),
+                    crate::options::jit_ledger(),
+                )
+            }),
             sync: crate::options::jit_sync(),
             queue: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
@@ -286,9 +298,21 @@ impl JitState {
             return;
         };
         let prev = slot.fetch_add(count, Ordering::Relaxed);
-        if prev < ITERATION_REQUEST && prev.saturating_add(count) >= ITERATION_REQUEST {
+        if (prev < ITERATION_REQUEST || self.work.as_ref().is_some_and(|work| work.enforce))
+            && prev / ITERATION_REQUEST < prev.saturating_add(count) / ITERATION_REQUEST
+        {
             self.request_compile(func);
         }
+    }
+
+    /// Deferred shared instances retry at sparse call-count boundaries. A queued or completed
+    /// request remains deduplicated, including when several guest threads cross a boundary.
+    #[inline]
+    pub(crate) fn call_requests_compile(&self, count: u32) -> bool {
+        count == self.threshold
+            || (self.work.as_ref().is_some_and(|work| work.enforce)
+                && count > self.threshold
+                && count.is_multiple_of(self.threshold.max(64)))
     }
 
     /// Ask the compile service for one function, at the tier the heat ledger names. False when no
@@ -298,11 +322,22 @@ impl JitState {
         let Some(q) = self.queue.lock().unwrap().as_ref().cloned() else {
             return false;
         };
-        q.send(Request {
-            func,
-            tier: self.tier_for(func),
-        })
-        .is_ok()
+        if let Some(work) = &self.work
+            && !work.request(func)
+        {
+            return true;
+        }
+        let sent = q
+            .send(Request {
+                func,
+                tier: self.tier_for(func),
+                queued: self.work.as_ref().map(|_| std::time::Instant::now()),
+            })
+            .is_ok();
+        if !sent && let Some(work) = &self.work {
+            work.release(func);
+        }
+        sent
     }
 
     /// Which tier a function's request should ask for: the optimized one exactly when a previous run

@@ -104,7 +104,7 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         // else starts cheap. A body whose work is a loop is not asked for by its call count at all --
         // the interpreter reports its back edges, and enough of them ask for the function the same
         // way.
-        if prev + 1 == jit.threshold
+        if jit.call_requests_compile(prev + 1)
             && !jit.request_compile(func)
             && jit.queue.lock().unwrap().is_some()
         {

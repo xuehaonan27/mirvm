@@ -22,6 +22,10 @@ pub(super) fn run_blocks(
 ) -> Exit {
     let module: &Module = unsafe { &(*ctx).shared.module };
     let instance: &Instance = unsafe { &(*ctx).shared.instance };
+    let mut work = body
+        .shared
+        .as_ref()
+        .and_then(|_| unsafe { &(*ctx).shared.jit }.work.as_ref()?.sample(func));
 
     let mut blk = entry as usize;
     // Back edges to count before the compile policy hears about them. One atomic per batch keeps the
@@ -34,7 +38,22 @@ pub(super) fn run_blocks(
         for stmt in &block.stmts {
             exec_stmt(ctx, base, stmt);
         }
-        match body.term(block) {
+        let term = body.term(block);
+        if let Some(sample) = &mut work {
+            if sample.statements(block.stmts.len()) {
+                work = None;
+            } else if matches!(
+                term,
+                Terminator::Call { .. }
+                    | Terminator::CallForeign { .. }
+                    | Terminator::CallIndirect { .. }
+                    | Terminator::CallBuiltin { .. }
+                    | Terminator::InlineAsm { .. }
+            ) {
+                sample.pause();
+            }
+        }
+        match term {
             Terminator::Goto(t) => blk = *t as usize,
             Terminator::SwitchInt {
                 discr,
@@ -190,6 +209,9 @@ pub(super) fn run_blocks(
                 if *null_ok && addr == 0 {
                     // Empty slot of a dyn virtual drop: a type without Drop is a no-op.
                     blk = *target as usize;
+                    if let Some(work) = &mut work {
+                        work.resume();
+                    }
                     continue;
                 }
                 if addr == 0 {
@@ -343,6 +365,9 @@ pub(super) fn run_blocks(
                 blk = *target as usize;
             }
             Terminator::Return => {
+                if let Some(work) = &mut work {
+                    work.pause();
+                }
                 crate::vm::ctx::drain_pending_signals(ctx);
                 let r = match body.ret {
                     RetAbi::Zst => (0, 0),
@@ -387,12 +412,30 @@ pub(super) fn run_blocks(
             }
             Terminator::Trap(reason) => engine_abort(&format!("TRAP: {reason} (fn {})", body.name)),
         }
+        if let Some(work) = &mut work
+            && matches!(
+                term,
+                Terminator::Call { .. }
+                    | Terminator::CallForeign { .. }
+                    | Terminator::CallIndirect { .. }
+                    | Terminator::CallBuiltin { .. }
+                    | Terminator::InlineAsm { .. }
+            )
+        {
+            work.resume();
+        }
         // A safe point sits where control can go backwards, plus every return. A straight run of
         // blocks carries bounded work, and a cycle always contains the block of least index among
         // its members, whose in-cycle predecessor comes no earlier -- so that block polls and every
         // iteration of any loop reaches a poll, whatever order the blocks are laid out in.
         if blk <= current {
+            if let Some(work) = &mut work {
+                work.pause();
+            }
             crate::vm::ctx::drain_pending_signals(ctx);
+            if let Some(work) = &mut work {
+                work.resume();
+            }
             iterations += 1;
             if iterations == ITERATION_BATCH {
                 iterations = 0;

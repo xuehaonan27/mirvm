@@ -323,6 +323,8 @@ entries! {
     dev  purity_stats    env("MIRVM_PURITY_STATS")    default("off") => reads(bool, |o| o.purity_stats);
     /// Reuse structurally eligible generic MIR templates on lowering misses.
     dev  generic_templates env("MIRVM_GENERIC_TEMPLATES") default("off") => reads(bool, |o| o.generic_templates);
+    /// Experimentally budget shared-instance JIT compilation against sampled interpreter work.
+    dev  generic_payback env("MIRVM_GENERIC_PAYBACK") default("off") => reads(bool, |o| o.generic_payback);
     /// Print the dedup probe: canonical fragment ids and the frozen share of a lowered layer.
     dev  frag_stats      env("MIRVM_FRAG_STATS")      default("off") => reads(bool, |o| o.frag_stats);
     /// Trace guest syscalls.
@@ -583,6 +585,7 @@ struct Options {
     a2_debug: bool,
     purity_stats: bool,
     generic_templates: bool,
+    generic_payback: bool,
     frag_stats: bool,
     syscall_trace: bool,
     segv_dump: bool,
@@ -638,6 +641,7 @@ impl Options {
             a2_debug: flag("a2_debug"),
             purity_stats: nonempty("purity_stats"),
             generic_templates: flag("generic_templates"),
+            generic_payback: flag("generic_payback"),
             frag_stats: nonempty("frag_stats"),
             syscall_trace: flag("syscall_trace"),
             segv_dump: flag("segv_dump"),
@@ -1130,6 +1134,7 @@ mod tests {
         let _ = super::a2_debug();
         let _ = super::purity_stats();
         let _ = super::generic_templates();
+        let _ = super::generic_payback();
         let _ = super::frag_stats();
         let _ = super::syscall_trace();
         let _ = super::segv_dump();
