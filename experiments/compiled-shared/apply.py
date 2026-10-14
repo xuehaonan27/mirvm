@@ -19,6 +19,7 @@ root = parser.parse_args().checkout.resolve()
 if (root / ".git").exists():
     raise SystemExit("use a disposable source copy without .git")
 shutil.copyfile(Path(__file__).with_name("regions.rs"), root / "src/shared_regions.rs")
+shutil.copyfile(Path(__file__).with_name("policy.rs"), root / "src/shared_policy.rs")
 with (root / "src/lib.rs").open("a") as stream:
     stream.write("\npub(crate) mod shared_regions;\n")
 
@@ -27,6 +28,8 @@ for option, description in [
     ("shared_regions", "Compile admitted generic templates on demand through a private frame entry"),
     ("shared_region_calls", "Call concrete adapters directly from shared code"),
     ("shared_region_specialize", "Allow hot concrete instances to leave the shared tier"),
+    ("shared_region_profile", "Sample interpreted and compiled own-body work without changing admission"),
+    ("shared_region_policy", "Admit shared and concrete transitions using execution credit"),
 ]:
     replace(options, '    /// Print the dedup probe:',
             f'    /// {description} (experiment only).\n'
@@ -76,6 +79,13 @@ replace(root / "src/vm/jit/translate/term.rs", '        match t {\n',
             }
 ''')
 
+replace(root / "src/vm/jit/compiler/mod.rs", '        let started = shared.jit.work.as_ref().map(|_| std::time::Instant::now());\n',
+        '        let Ok(policy_ticket) = shared.shared_regions.compile_start(&shared, func) else { continue; };\n'
+        '        let started = shared.jit.work.as_ref().map(|_| std::time::Instant::now());\n')
+replace(root / "src/vm/jit/compiler/mod.rs", '        c.compile(func);\n',
+        '        c.compile(func);\n'
+        '        shared.shared_regions.compile_complete(&shared, func, policy_ticket);\n')
+
 # Extract the existing call implementation once: compiled adapters and interpretation share every
 # argument, return, cleanup and main-panic-boundary operation, including future source changes.
 runblocks = root / "src/vm/interp/runblocks.rs"
@@ -86,16 +96,23 @@ arm = source[start:end]
 pattern, implementation = arm.split('            } => {\n', 1)
 implementation = implementation.rsplit('            }\n', 1)[0]
 implementation = implementation.replace('                blk = *target as usize;\n', '                *target as usize\n')
-function = ('\n#[inline(always)]\npub(crate) fn exec_call(ctx: *mut Ctx, base: usize, edge: &Cell<Option<Bb>>, term: &Terminator) -> usize {\n'
+implementation = implementation.replace('                let call = || guarding_terminate',
+        '                if let Some(sample) = sample { sample.pause(); }\n'
+        '                let call = || guarding_terminate')
+implementation = implementation.replace('                edge.set(None);',
+        '                if let Some(sample) = sample { sample.resume(); }\n'
+        '                edge.set(None);')
+function = ('\n#[inline(always)]\npub(crate) fn exec_call(ctx: *mut Ctx, base: usize, edge: &Cell<Option<Bb>>, term: &Terminator, sample: Option<&crate::shared_regions::Sample<\'_>>) -> usize {\n'
             '    let ' + textwrap.dedent(pattern).strip() + '\n    } = term else { unreachable!("direct call adapter") };\n'
             + textwrap.indent(textwrap.dedent(implementation), '    ') + '}\n')
-runblocks.write_text(source[:start] + '            Terminator::Call { .. } => blk = exec_call(ctx, base, edge, term),\n' + source[end:] + function)
+runblocks.write_text(source[:start] + '            Terminator::Call { .. } => blk = exec_call(ctx, base, edge, term, policy_sample.as_ref()),\n' + source[end:] + function)
 replace(root / "src/vm/interp/mod.rs", 'pub(crate) use call::interp_frame;\n',
         'pub(crate) use call::interp_frame;\npub(crate) use runblocks::exec_call;\n')
 replace(runblocks, '    let mut work = body\n',
         '    let compiled_region = if entry == 0 {\n'
         '        unsafe { &(*ctx).shared.shared_regions }.select(ctx, func)\n'
         '    } else { 0 };\n'
+        '    let policy_sample = unsafe { &(*ctx).shared.shared_regions }.sample(func, compiled_region != 0);\n'
         '    let mut work = body\n')
 replace(runblocks, '        .as_ref()\n        .and_then',
         '        .as_ref()\n        .filter(|_| compiled_region == 0)\n        .and_then')
@@ -107,7 +124,7 @@ replace(runblocks,
         '        }\n',
         '        let current = blk;\n'
         '        if compiled_region != 0 {\n'
-        '            blk = crate::shared_regions::enter(ctx, compiled_region, base, blk, body, edge);\n'
+        '            blk = crate::shared_regions::enter(ctx, compiled_region, base, blk, body, edge, policy_sample.as_ref());\n'
         '        }\n'
         '        let block: &Block = &body.code()[blk];\n'
         '        if compiled_region == 0 {\n'
@@ -115,3 +132,16 @@ replace(runblocks,
         '                exec_stmt(ctx, base, stmt);\n'
         '            }\n'
         '        }\n')
+
+replace(runblocks, '                exec_stmt(ctx, base, stmt);\n            }\n        }\n',
+        '                exec_stmt(ctx, base, stmt);\n            }\n'
+        '            if let Some(sample) = &policy_sample { sample.statements(block.stmts.len()); }\n        }\n')
+replace(runblocks, '\n            crate::vm::ctx::drain_pending_signals(ctx);\n',
+        '\n            if let Some(sample) = &policy_sample { sample.pause(); }\n'
+        '            crate::vm::ctx::drain_pending_signals(ctx);\n'
+        '            if let Some(sample) = &policy_sample { sample.resume(); }\n')
+
+replace(runblocks, '                crate::vm::ctx::drain_pending_signals(ctx);\n',
+        '                if let Some(sample) = &policy_sample { sample.pause(); }\n'
+        '                crate::vm::ctx::drain_pending_signals(ctx);\n'
+        '                if let Some(sample) = &policy_sample { sample.resume(); }\n')

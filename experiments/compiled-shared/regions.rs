@@ -3,6 +3,10 @@
 //! Internal entries have a private ABI. Guest slots keep their concrete calling convention, so a
 //! specialized body can replace the shared path at the next call without changing a live frame.
 
+#[path = "shared_policy.rs"]
+mod policy;
+pub(crate) use policy::Sample;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,6 +18,7 @@ use crate::vm::jit::{CodeDomain, FAIL_SENTINEL};
 
 #[derive(Default)]
 pub(crate) struct Regions {
+    policy: Option<policy::Policy>,
     targets: Vec<Option<u32>>,
     representatives: Vec<u32>,
     compiled_instances: Vec<AtomicBool>,
@@ -105,6 +110,13 @@ impl Regions {
         adapter.params.truncate(2);
         headers.push(adapter);
         module.funcs.append(headers.into());
+        if crate::options::shared_region_profile() || crate::options::shared_region_policy() {
+            assert!(
+                state.calls && state.specialize,
+                "work policy requires call bridges and concrete promotion"
+            );
+            state.policy = Some(policy::Policy::new(&state));
+        }
         state.prepare_ns = started.elapsed().as_nanos();
         state
     }
@@ -151,6 +163,9 @@ impl Regions {
             return false;
         }
         assert_ne!(entry, FAIL_SENTINEL, "concrete entry failed compilation");
+        if self.policy.as_ref().is_some_and(|policy| policy.enforce) {
+            return true;
+        }
         let count = jit.counters[func as usize].fetch_add(1, Ordering::Relaxed) + 1;
         if count == jit.threshold {
             jit.request_compile(func);
@@ -162,6 +177,12 @@ impl Regions {
         let Some(target) = self.targets.get(func as usize).copied().flatten() else {
             return false;
         };
+        if let Some(policy) = &self.policy
+            && policy.enforce
+        {
+            policy.iterations(ctx, func, target, count);
+            return true;
+        }
         let jit = unsafe { &(*ctx).shared.jit };
         jit.note_iterations(target, count);
         if self.specialize {
@@ -177,7 +198,11 @@ impl Regions {
         let jit = unsafe { &(*ctx).shared.jit };
         let slot = &jit.slots[target as usize];
         let mut entry = slot.load(Ordering::Acquire);
-        if entry == 0 {
+        if let Some(policy) = &self.policy
+            && policy.enforce
+        {
+            policy.nominate(ctx, func, target, entry);
+        } else if entry == 0 {
             let count = jit.counters[target as usize].fetch_add(1, Ordering::Relaxed) + 1;
             if count == jit.threshold {
                 jit.request_compile(target);
@@ -202,9 +227,40 @@ impl Regions {
         entry
     }
 
+    pub(crate) fn sample(&self, func: u32, compiled: bool) -> Option<Sample<'_>> {
+        let target = self.targets.get(func as usize).copied().flatten()?;
+        self.policy
+            .as_ref()?
+            .sample(func, target as usize - self.targets.len(), compiled)
+    }
+
+    pub(crate) fn compile_start(
+        &self,
+        shared: &Shared,
+        func: u32,
+    ) -> Result<Option<policy::Ticket>, ()> {
+        self.policy
+            .as_ref()
+            .map_or(Ok(None), |policy| policy.start(self, shared, func))
+    }
+
+    pub(crate) fn compile_complete(
+        &self,
+        shared: &Shared,
+        func: u32,
+        ticket: Option<policy::Ticket>,
+    ) {
+        if let Some(ticket) = ticket {
+            self.policy.as_ref().unwrap().complete(shared, func, ticket);
+        }
+    }
+
     pub(crate) fn report(&self, shared: &Shared) {
         if !self.ledger || self.targets.is_empty() {
             return;
+        }
+        if let Some(policy) = &self.policy {
+            policy.report(self, shared);
         }
         let compiled = |id: usize| {
             let entry = shared.jit.slots[id].load(Ordering::Acquire);
@@ -249,6 +305,7 @@ pub(crate) struct Activation<'a> {
     base: usize,
     body: &'a FuncBody,
     edge: &'a Cell<Option<Bb>>,
+    sample: Option<&'a Sample<'a>>,
 }
 
 /// The descriptor is stack-owned by enter, including across callbacks. The original raw catch
@@ -256,6 +313,9 @@ pub(crate) struct Activation<'a> {
 pub(crate) unsafe extern "C-unwind" fn call(activation: *const Activation<'_>, block: u64) -> u64 {
     let activation = unsafe { &*activation };
     let state = unsafe { &(*activation.ctx).shared.shared_regions };
+    if let Some(sample) = activation.sample {
+        sample.statements(0);
+    }
     if state.ledger {
         state.bridges.fetch_add(1, Ordering::Relaxed);
     }
@@ -266,6 +326,7 @@ pub(crate) unsafe extern "C-unwind" fn call(activation: *const Activation<'_>, b
         activation
             .body
             .term(&activation.body.code()[block as usize]),
+        activation.sample,
     ) as u64
 }
 
@@ -278,6 +339,7 @@ pub(crate) fn enter(
     block: usize,
     body: &FuncBody,
     edge: &Cell<Option<Bb>>,
+    sample: Option<&Sample<'_>>,
 ) -> usize {
     let state = unsafe { &(*ctx).shared.shared_regions };
     if state.ledger {
@@ -288,6 +350,7 @@ pub(crate) fn enter(
         base,
         body,
         edge,
+        sample,
     };
     let args = [
         base as u64,

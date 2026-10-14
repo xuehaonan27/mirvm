@@ -31,13 +31,15 @@ fork. The private placeholders cannot be reached through guest function addresse
 The original guest PLT retains the concrete ABI. Shared entry counts and interpreted backedges
 nominate internal entries; ordinary functions retain the existing JIT policy. Entry selection is
 once per normal activation, so code publication never transfers an already running loop. There is
-no OSR. The three candidate modes isolate separate decisions:
+no OSR. The candidate modes isolate separate decisions:
 
 | Experiment options | Behavior |
 |---|---|
 | `MIRVM_SHARED_REGIONS=1` | Lazy shared regions; calls return through the interpreter loop. |
 | Above plus `MIRVM_SHARED_REGION_CALLS=1` | Shared code calls the existing concrete adapter implementation directly. |
 | Above plus `MIRVM_SHARED_REGION_SPECIALIZE=1` | Hot instances can publish concrete ABI entries for subsequent calls. |
+| All three plus `MIRVM_SHARED_REGION_PROFILE=1` | Sample interpreted/shared own-body work while retaining fixed admission. |
+| All three plus `MIRVM_SHARED_REGION_POLICY=1` | Gate shared/concrete compilation using executed diversity and work credit. |
 
 The call bridge extracts the interpreter's direct-call arm into one function used by both paths.
 It preserves argument evaluation, sret, scalar/pair writeback, cleanup edges, terminate and main
@@ -46,14 +48,38 @@ usual successor when it agrees and otherwise dispatches the returned block. The 
 still owns cleanup. This removes repeated packed-region returns and re-entries; it does not remove
 all adapter cost or the concrete interpreter prologue.
 
-Concrete nomination uses existing per-instance call and interpreted-backedge thresholds, separately
-from aggregate template heat. Publication changes the original ABI slot, leaving active shared
-frames and internal code valid. Shared compiled loops do not yet collect own-work or backedge
-credit. Threshold-one verification can request both forms immediately; it is not the timing policy
-or proof of specialization payback. The interpreter work sampler excludes shared compiled entries.
+Fixed concrete nomination uses existing per-instance call and interpreted-backedge thresholds,
+separately from aggregate template heat. Publication changes the original ABI slot, leaving active
+shared frames and internal code valid. Synchronous threshold-one verification bypasses policy
+admission and can request both forms immediately; it is not evidence of specialization payback.
+
+The experimental policy records actual entries, independently of how many descriptors are linked.
+A group needs two executed instances before shared nomination. A hot individual instance can
+nominate concrete code directly when it dominates the group and no shared request is pending.
+After shared publication, concrete admission draws on that instance's shared execution credit,
+rather than its earlier interpretation. Existing entry/backedge thresholds nominate candidates;
+sparse retries and per-instance/group pending bits bound deferred requests. Active shared loops do
+not request concrete promotion through backedges.
+
+Both sampling modes count the first and every 64th entry separately for interpretation and shared
+machine code. The clock starts after frame setup and entry selection. Direct guest calls pause it
+around the callee, including native waits and callbacks; argument and return adaptation remain
+inside the sample. Interpretation stops sampling after 4,096 instruction/terminator units and pauses
+for signal draining. Shared execution stops after 4,096 call bridges or return; a pure compiled loop
+has no intermediate sampling poll. Compiled signal delivery is not separately excluded. Weighted
+wall time can include scheduling delays and sampler overhead; it is neither exact CPU time nor an
+estimate of removable work. Concrete execution is not sampled.
+
+The worker calibrates cost per static IR unit from successful compilations. Admission requires both
+instance/group credit and unspent Engine credit; an empty calibration permits the first transition.
+Accepted generic transitions spend their actual worker time, including underestimated cost and
+failed compilations. Unrelated compilations calibrate cost without spending generic credit. Queue
+wait and rejected admission checks are not charged. This budgets compiler work; it does not predict
+remaining lifetime or compare the speed of shared and concrete code. Tiny and call-only bodies may
+still receive an unprofitable intermediate tier.
 
 The admitted experiment is plain execution with persistent JIT caching disabled. It refuses trace,
-machine-code reload and simultaneous work-budget enforcement. The generic contract covers mixed
+machine-code reload and simultaneous `MIRVM_GENERIC_PAYBACK` enforcement. The generic contract covers mixed
 layouts, cleanup, recursion, concurrent entries, native callbacks and single-threaded fork. It does
 not establish the general lifecycle, signal or trace gate for product integration. Whole-process
 time includes preparation, compilation and worker shutdown. Diagnostic ledgers also report lazy
@@ -109,3 +135,21 @@ The synthetic first stdout line follows a completed batch. Flate's first line de
 input before compression completes. Raw stdout, phase timings, binary/input hashes and the protocol
 remain in the results directory. Results and conclusions belong to
 [current-status.md](../../docs/current-status.md#runtime-generics-prototype).
+
+To evaluate the work policy, retain a fixed-admission executable with lazy groups, call bridges and
+concrete promotion, then use the same prepared input directories:
+
+```sh
+python3 "$experiment_dir/source/experiments/compiled-shared/policy_compare.py" \
+    "$experiment_dir/target/release/mirvm" /path/to/fixed-reference "$(rustup which rustc)" \
+    /path/to/reference-results /path/to/reference-controls "$experiment_dir/policy-comparison"
+```
+
+`policy_compare.py` checks synchronous bypass and asynchronous policy execution, each with separate
+normal/fork invocations. It compares the retained reference with candidate direct, fixed,
+sampling-only and policy modes over five alternating rounds on nine workloads. The candidate modes
+share an executable/image; the reference has its own prepared generation. `policy_workload.rs`
+adds two probes: two linked compute instances with only one executed per run, and generic wrappers
+around native sleeps. Separate ledger assertions check executed-instance accounting and exclusion
+of callee waits. All valid timing samples, including outliers, are retained. These are fresh-process
+bound-image hits with retained OS caches, not cold frontend builds or cold filesystem measurements.

@@ -188,10 +188,13 @@ Compiling only the common instruction array cannot share those concrete entry as
 [frame-entry experiment](../../experiments/compiled-shared/README.md) retains the concrete activation
 and runs shared code over its frame. It lazily compiles admitted groups, invokes the existing call
 adapter from compiled code, and can publish concrete entries for subsequent calls while active
-shared frames remain valid. This demonstrates the entry and promotion boundaries, not a selected
-product policy: template identity remains archive-local, locals are memory-backed, and fixed
-instance thresholds do not measure work saved by specialization. Aggregating template heat alone
-does not prove payback.
+shared frames remain valid. Its experimental policy distinguishes linked descriptors from executed
+instance diversity and keeps interpreted/shared work credit separate. After shared publication,
+concrete admission uses observed shared execution rather than earlier interpretation. A
+sampling-only control retains fixed admission to expose measurement cost. These mechanisms budget
+past worker cost; they do not estimate the future work a transition removes. Frame setup is outside
+the current sample, template identity remains archive-local and locals are memory-backed.
+Aggregating template heat or reducing compilation alone does not prove payback.
 Sparse instance use, a hot repeated loop, tiny calls, native-call-heavy work and one long invocation
 are separate policy acceptance cases. Initial thresholds are an experiment, not a product default.
 
@@ -199,10 +202,12 @@ are separate policy acceptance cases. Initial thresholds are an experiment, not 
 
 Remaining integration work is grouped by a complete execution or preparation boundary:
 
-1. **Measured tier policy.** Price shared interpretation and concrete/JIT compilation with the
-   existing compile service. Validate the experimental work budget, price call/frame adaptation and
-   concrete promotion against observed shared execution, and select which template groups benefit
-   from an intermediate tier. Compare against staying interpreted and direct specialization. Acceptance: cold complete time and first
+1. **Measured tier policy.** Validate the experimental work budget against latency, including
+   sampling overhead, scheduling bias and deferred-admission costs. Measure frame setup and the
+   removable fraction of shared execution/call adaptation before pricing concrete promotion;
+   consumed work is not expected savings. Select which groups benefit from an intermediate tier,
+   including bypass for cheap and call-only bodies. Compare against staying interpreted and direct
+   specialization. Acceptance: cold complete time and first
    useful result improve on representative inputs without hiding late work; short/native-call
    workloads retain their cheaper path, and warm throughput and memory/code size remain acceptable.
 2. **Corpus-driven coverage.** Extend remaining projection/aggregate shapes and
@@ -215,8 +220,8 @@ Remaining integration work is grouped by a complete execution or preparation bou
 
 The shared-entry gate covers mixed shared/concrete/JIT execution, concurrent first publication,
 recursion, native callbacks, unwind, signals, close and fork. These lifecycle contracts remain
-required as admission and promotion change; the isolated experiment's global hook is never a
-production publication path.
+required as admission and promotion change. The isolated contract probes do not close the full
+product gate.
 
 Do not select default enablement from the execution microbenchmarks. The release decision needs
 unmodified reference/candidate whole-process measurements, native output agreement, the relevant

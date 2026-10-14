@@ -482,79 +482,93 @@ was run for this change; OSR remains deferred.
 
 `experiments/compiled-shared` evaluates a compiled intermediate tier using production `SharedBody`
 objects. Its disposable source patch reserves private ABI headers from borrowed template identities
-and translates admitted groups only when the compile worker needs them. Single-descriptor groups
-keep direct specialization. Optional call bridges reuse the interpreter's direct-call implementation;
-optional concrete promotion publishes the original ABI entry for subsequent calls. Active shared
-frames retain their body and code. Guest locals remain memory-backed, template identity is
-archive-local, persisted JIT code and trace are refused, and there is no OSR. The product source and
-default options are unchanged.
+and translates admitted groups only when the compile worker needs them. Call bridges reuse the
+interpreter's direct-call implementation; concrete promotion publishes the original ABI entry for
+subsequent calls. Active shared frames retain their body and code. Guest locals remain memory-backed,
+template identity is archive-local, persisted JIT code and trace are refused, and there is no OSR.
+The product source and default options are unchanged.
 
-Four synchronous contract invocations agree with native: shared calls and concrete promotion, each
-with normal and separate fork execution. They exercise mixed layouts, field construction, trait/drop
-and unwind behavior, recursive/concurrent entries and native callbacks. The shared-only normal run
-enters 676 concrete instances through 167 compiled templates, invokes 27,309 call bridges and makes
-one region entry per activation. No admitted shared instance publishes concrete code; singletons may specialize. With promotion enabled, 676 admitted instances publish concrete entries.
-Both modes hit their bound image and leave 172 of 339 admitted templates untranslated. This is a
-bounded contract check, not the full lifecycle/signal/trace gate.
+The experimental work policy requires actual execution of two instances before nominating a shared
+template. A dominant hot instance can specialize directly. Separate interpreted/shared own-work
+samples exclude nested callees, including native waits; concrete promotion after shared publication
+uses shared execution credit. Worker cost calibration and an Engine credit budget gate transitions.
+The sampler begins after frame setup, includes argument/return adaptation and uses weighted wall
+time. It does not estimate remaining lifetime or the fraction of work specialization would remove.
+Sampling bounds, signal limitations and admission rules are documented in the
+[experiment README](../experiments/compiled-shared/README.md).
 
-The final timing matrix contains 175 native-matching samples: seven inputs, five policies and five
-alternating rounds. Direct, lazy, calls and promotion share a release executable and bound image.
-The eager reference is the preceding prototype executable with its own prepared build generation
-and byte-identical inputs. Every timed process hits its image; preparation misses are rejected.
-Persistent JIT caching is disabled, OS page caches are retained, diagnostic captures are separate,
-and complete time includes preparation and worker shutdown. Whole-process / engine medians are:
+Four contract invocations agree with native and hit their bound images: synchronous admission bypass
+and asynchronous policy, each with normal and separate fork execution. The fixture covers mixed
+layouts, field construction, trait/drop and unwind behavior, recursive/concurrent entries and native
+callbacks. This is a bounded contract check, not the full lifecycle/signal/trace gate.
 
-| Workload | Direct specialization | Eager reference | Lazy groups | Lazy + call bridge | Lazy + bridge + promotion |
+The final timing matrix contains 225 native-matching samples: nine inputs, five modes and five
+alternating rounds. Candidate direct, fixed, sampling-only and policy modes share one release
+executable and bound image. The retained fixed-admission reference has its own prepared build
+generation and byte-identical inputs. Every measured process hits its image; preparation misses are
+rejected. Persistent JIT caching is disabled, OS page caches are retained, diagnostics are separate,
+and whole-process time includes preparation and worker shutdown. This measures a fresh process
+against prepared inputs, not a cold frontend build. Whole-process / engine medians are:
+
+| Workload | Retained fixed reference | Candidate direct | Candidate fixed | Sampling only | Work policy |
 |---|---:|---:|---:|---:|---:|
-| 64 sparse instances | 49.5 / 9.3 ms | 55.6 / 15.2 ms | 50.1 / 10.0 ms | 52.9 / 11.3 ms | 49.8 / 11.2 ms |
-| 64 instances, 512 rounds, 32 iterations | 161.6 / 119.7 ms | 96.6 / 43.9 ms | 87.6 / 47.9 ms | 87.8 / 42.2 ms | 92.2 / 38.9 ms |
-| Two instances, 5,000 rounds, 64 iterations | 76.8 / 40.2 ms | 85.6 / 46.1 ms | 80.7 / 41.4 ms | 75.7 / 38.4 ms | 75.7 / 36.2 ms |
-| 64 instances, 512 rounds, zero iterations | 52.5 / 17.1 ms | 61.6 / 19.3 ms | 55.9 / 15.9 ms | 54.4 / 15.2 ms | 54.4 / 16.4 ms |
-| Native-call-heavy wrappers | 89.6 / 50.4 ms | 100.9 / 56.5 ms | 90.9 / 52.6 ms | 92.8 / 53.7 ms | 90.7 / 51.1 ms |
-| serde JSON | 120.1 / 23.5 ms | 119.6 / 33.1 ms | 116.5 / 29.7 ms | 110.3 / 28.3 ms | 114.9 / 25.3 ms |
-| flate2, 2 KiB input | 188.5 / 110.7 ms | 200.5 / 132.4 ms | 202.4 / 125.1 ms | 205.6 / 131.0 ms | 190.8 / 114.5 ms |
+| 64 sparse instances | 54.6 / 14.2 ms | 45.5 / 10.2 ms | 41.7 / 10.2 ms | 49.1 / 11.3 ms | 45.0 / 10.2 ms |
+| 64 instances, 512 rounds, 32 iterations | 82.1 / 48.1 ms | 159.3 / 124.7 ms | 80.5 / 44.7 ms | 83.4 / 40.3 ms | 86.7 / 42.9 ms |
+| Two instances, 5,000 rounds, 64 iterations | 88.7 / 36.9 ms | 88.1 / 40.7 ms | 74.6 / 35.7 ms | 124.1 / 41.3 ms | 87.1 / 36.2 ms |
+| 64 instances, 512 rounds, zero iterations | 53.9 / 18.0 ms | 53.9 / 17.3 ms | 53.4 / 17.1 ms | 51.6 / 17.5 ms | 61.7 / 18.6 ms |
+| Native-call-heavy wrappers | 100.2 / 55.2 ms | 91.5 / 52.4 ms | 98.6 / 53.2 ms | 94.5 / 52.0 ms | 89.4 / 53.2 ms |
+| serde JSON | 129.9 / 24.6 ms | 120.4 / 23.4 ms | 125.0 / 25.9 ms | 116.4 / 26.0 ms | 117.0 / 26.0 ms |
+| flate2, 2 KiB input | 193.9 / 120.7 ms | 195.6 / 118.7 ms | 210.2 / 129.0 ms | 195.5 / 116.9 ms | 200.4 / 122.7 ms |
+| Two linked compute instances, one executed | 65.3 / 27.8 ms | 59.2 / 22.5 ms | 60.3 / 26.7 ms | 62.5 / 26.4 ms | 66.4 / 28.5 ms |
+| Generic wrappers around native sleeps | 677.3 / 635.7 ms | 674.3 / 633.9 ms | 678.5 / 632.0 ms | 678.0 / 637.7 ms | 669.4 / 634.1 ms |
 
 The many-instance advantage over direct specialization still includes nomination policy: each
-concrete kernel stays below its 1,000-entry trigger, while aggregate template heat compiles a shared
-body. It is not a measurement of compilation reuse alone. Eager versus lazy also changes template
-grouping and singleton admission, not just preparation timing. First completed-batch medians for
-many instances are 47.4 / 52.8 / 44.1 / 53.4 / 57.6 ms in table order. Lower engine time therefore
-does not establish earlier useful output. Process startup variation is visible, particularly in
-serde; its process median does not establish a speedup when engine time remains higher.
+concrete kernel stays below its 1,000-entry trigger while aggregate template heat compiles shared
+code. It does not isolate compilation reuse. Its first completed-batch median is 41.0 ms with fixed
+admission and 50.8 ms with policy. The single-instance probe's first completed compute result also
+arrives later, 39.0 versus 44.2 ms. Reducing compilation has not established earlier useful output.
 
-Diagnostic preparation is 0.16–0.35 ms across candidate modes/inputs, versus 3.3–5.1 ms for the eager
-reference. Sparse and native-wrapper candidates translate no template. The many-instance run
-translates one of 233 admitted groups, costing approximately 13–27 microseconds on the worker.
-With call bridges its roughly 1.04 million packed-region invocations fall to 31,572, with 1,010,304
-calls handled inside shared execution. Code for that shared entry grows from 533 to 629 bytes.
-This establishes fewer region transitions, not elimination of call adaptation or frame setup.
+Several processes have large delays outside the engine interval: the hot workload's per-mode
+whole-process maxima range from 697 to 3,575 ms. All valid samples remain in the results. The short
+CPU captures do not explain these startup stalls. Sampling-only and fixed modes also vary; neither
+whole-process medians nor small engine differences establish a reliable sampling-cost or latency
+improvement. Flate policy's 122.7 ms engine median is below fixed admission's 129.0 ms but above
+sampling-only's 116.9 ms, so the difference cannot be attributed solely to admission decisions.
 
-Call bridges are not uniformly faster: flate's engine median rises from 125.1 to 131.0 ms despite
-halving region invocations from 535,744 to 267,543. Shared code grows from 7,317 to 9,630 bytes.
-Concrete promotion then reduces the engine median to 114.5 ms, with 26 admitted instances publishing
-concrete code and shared activations falling to 7,872. It still trails direct specialization's
-110.7 ms. Total compiled functions rise from 205 under direct specialization to 228 with both
-compiled tiers; fixed entry thresholds do not price that extra work. In the hot synthetic case,
-promotion publishes 11 concrete entries and reduces shared activations from 39,886 to 6,887. These
-counts come from separate ledger runs and are not the exact trajectories of every timed process.
+Separate ledger runs establish fewer transitions:
 
-Separate final-binary flate profiles contain 421 / 399 / 367 samples (direct / calls / promotion),
-with zero lost samples. Statement/operand evaluation, the interpreter block loop and dispatch
-remain prominent. The extracted direct-call implementation is inlined into its callers, avoiding
-an additional ordinary Rust call in the interpreter. These short captures locate remaining work;
-they do not establish precise causal percentages for small timing differences. Profiling overhead
-is excluded from the table.
+| Workload | Shared templates, fixed → policy | Concrete entries in admitted groups | All compiled functions | Compiler time |
+|---|---:|---:|---:|---:|
+| Hot two-instance loop | 10 → 1 | 11 → 8 | 37 → 31 | 16.2 → 13.4 ms |
+| flate2 | 23 → 10 | 26 → 23 | 228 → 212 | 69.4 → 59.4 ms |
+| Single executed compute instance | 10 → 0 | 10 → 10 | 38 → 30 | 10.8 → 8.4 ms |
 
-The experiment supports lazy shared compilation, an ABI-correct call bridge and concrete promotion
-without changing active frames. It does not justify an unconditional middle tier. Remaining policy
-work is to measure executed instance diversity and own-body work, account for frame/call adaptation,
-and compare concrete promotion against the shared work it can save. Archive identity, register
-allocation, code/RSS and full lifecycle/trace gates remain open. The isolated patch builds in release
-and passes all-target Clippy with warnings denied. No full runtime test tier was run.
+These counts include library helpers and are separate trajectories from the timed runs. Flate shared
+code falls from 9,630 to 4,449 bytes, but shared activations rise from 7,847 to 21,753 as some concrete
+compilations are deferred. The single-instance fixed mode compiles shared templates without entering
+any; policy avoids those compilations. The native-sleep wrappers receive only 0.710 ms of combined
+weighted own-work credit while their process spends about 634 ms inside the engine. Callee waits do
+not fund the wrappers' compilation. The tiny-call input still compiles a shared template and its
+engine median rises from 17.1 to 18.6 ms: past work credit alone does not identify a profitable tier.
 
-`experiments/runtime-generics` also provides bounded MIR-export and synthetic execution controls.
-The selected product contract and remaining gates belong to
-[runtime-generics-design.md](designs/runtime-generics-design.md); OSR remains deferred under T13.
+Separate final-binary flate profiles contain 388 / 368 / 355 samples (fixed / sampling-only / policy),
+with zero lost samples. Statement/operand evaluation, the interpreter block loop, dispatch and
+compiler work remain prominent. Policy nomination itself is visible in the policy capture. Perf
+maps are resolved offline for flame graphs; captures are excluded from latency measurements. Their
+sample counts and asynchronous compilation trajectories do not support precise causal percentages
+for small timing differences.
+
+The isolated patch builds in release, passes all-target Clippy with warnings denied and passes three
+focused checks for concurrent diversity, budget debt and paused sample accounting. No full
+runtime test tier was run. Reapplying the patch to a clean source copy reproduces all 359 measured
+source/build-input hashes; timing and profile captures use the same binary hash.
+
+The experiment establishes executed-diversity admission, separate execution credit and worker-cost
+admission. It does not justify an unconditional middle tier or default policy enablement.
+Remaining work is to estimate removable shared/frame/call work, quantify sampling cost and bias,
+and select cheap or call-only bodies that should bypass the middle tier. Archive identity, register
+allocation, RSS and full lifecycle/trace gates remain open. The product contract and release gates
+belong to [runtime-generics-design.md](designs/runtime-generics-design.md); OSR remains deferred under T13.
 
 ## 4. Gaps and honest limits
 
