@@ -274,7 +274,7 @@ pub fn resolve_for_known_with_features(
     known_paths: &[PackageManifest],
     workspace_features: &FeatureOverrides,
 ) -> Result<ResolvePlan, crate::error::Error> {
-    let compiler_rust_version = current_rust_version()?;
+    let compiler_rust_version = current_rust_version();
     let rust_version_policy = if root.ignore_rust_version {
         IncompatibleRustVersions::Allow
     } else {

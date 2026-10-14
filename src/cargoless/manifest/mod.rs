@@ -134,25 +134,14 @@ pub fn parse_rust_version(
 
 /// The version of the rustc mirvm actually embeds. The sysroot rustc is used at
 /// build time so another toolchain on PATH cannot affect dependency selection.
-pub fn current_rust_version() -> Result<semver::Version, crate::error::Error> {
+pub fn current_rust_version() -> semver::Version {
     static VERSION: std::sync::OnceLock<semver::Version> = std::sync::OnceLock::new();
-    if let Some(version) = VERSION.get() {
-        return Ok(version.clone());
-    }
-    let rustc = crate::sysroot::toolchain::rustc();
-    let command = std::process::Command::new(&rustc);
-    let mut version = rustc_version::VersionMeta::for_command(command)
-        .map_err(|error| {
-            crate::fail!(
-                Resolver,
-                format!("failed to read version of {}: {error}", rustc.display())
-            )
-        })?
-        .semver;
-    version.pre = semver::Prerelease::EMPTY;
-    version.build = semver::BuildMetadata::EMPTY;
-    let _ = VERSION.set(version.clone());
-    Ok(version)
+    VERSION
+        .get_or_init(|| {
+            semver::Version::parse(crate::options::build::RUSTC_VERSION)
+                .expect("build validated the pinned compiler version")
+        })
+        .clone()
 }
 
 /// Where a dependency comes from.

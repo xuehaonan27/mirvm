@@ -84,21 +84,16 @@ pub(super) fn validate_cfg_expr(expr: &str) -> Result<(), MErr> {
 /// Host platform atom set = the verbatim line set of
 /// `rustc --print cfg --target <host>` (the same source cargo matches platforms
 /// against, so an unknown/custom key such as rustix_use_libc naturally evaluates to
-/// false, and target_feature is covered exactly by rustc's list). Cached in-process
-/// with a OnceLock.
+/// false, and target_feature is covered exactly by rustc's list). The build captures
+/// this baseline independently of Cargo's flags; parsing is cached in-process.
 static HOST_CFG_ATOMS: std::sync::OnceLock<std::collections::BTreeSet<String>> =
     std::sync::OnceLock::new();
 
 /// The CARGO_CFG_* mapping exposed to buildrs.rs.
 pub(crate) fn host_cfg_atoms() -> &'static std::collections::BTreeSet<String> {
     HOST_CFG_ATOMS.get_or_init(|| {
-        let rustc = crate::sysroot::toolchain::rustc();
-        let out = std::process::Command::new(rustc)
-            .args(["--print", "cfg", "--target", crate::options::build::HOST])
-            .output()
-            .expect("rustc --print cfg failed");
-        let text = String::from_utf8(out.stdout).expect("rustc --print cfg output is not UTF-8");
-        text.lines()
+        crate::options::build::HOST_CFG
+            .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect()

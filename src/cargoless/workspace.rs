@@ -216,7 +216,7 @@ impl WorkspaceManifest {
         // Both resolver 3's fallback ordering and the new lock's format choice use the lowest
         // MSRV of the whole workspace. A member without rust-version counts as the current rustc,
         // matching Cargo's mixed-MSRV workspace heuristic.
-        let current_rust = current_rust_version()?;
+        let current_rust = current_rust_version();
         let workspace_rust = members
             .iter()
             .map(|member| {

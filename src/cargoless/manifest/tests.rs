@@ -231,6 +231,31 @@ fn parses_three_feature_value_forms() {
 }
 
 #[test]
+fn pinned_compiler_facts_match_queries() {
+    let rustc = crate::sysroot::toolchain::rustc();
+    let mut version = rustc_version::VersionMeta::for_command(std::process::Command::new(&rustc))
+        .unwrap()
+        .semver;
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    assert_eq!(current_rust_version(), version);
+
+    let cfg = std::process::Command::new(rustc)
+        .args(["--print", "cfg", "--target", crate::options::build::HOST])
+        .output()
+        .unwrap();
+    assert!(cfg.status.success());
+    let atoms: std::collections::BTreeSet<_> = String::from_utf8(cfg.stdout)
+        .unwrap()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(host_cfg_atoms(), &atoms);
+}
+
+#[test]
 fn cfg_platform_atoms_evaluate_for_host() {
     // Every atom asked about here is derived from the host rather than spelled for one platform:
     // what is under test is that the evaluator answers with this build's own cfg set.

@@ -844,12 +844,18 @@ pub mod protocol {
 /// they cannot be changed after the binary is built, so they are documented here rather than in the
 /// register.
 pub mod build {
-    /// FNV-1a over the `src/` tree plus `Cargo.lock` and `build.rs`; keys every cache layer.
+    /// FNV-1a over sources, lock, build script, target and pinned compiler facts; keys every cache layer.
     pub const BUILD_ID: &str = env!("MIRVM_BUILD_ID");
     /// `rustc --print sysroot` at build time; also the rpath target.
     pub const DEFAULT_SYSROOT: &str = env!("MIRVM_DEFAULT_SYSROOT");
     /// The build target triple, used as both host and target.
     pub const HOST: &str = env!("MIRVM_HOST");
+    /// Baseline `rustc --print cfg --target HOST`, without Cargo's compilation flags.
+    #[cfg(feature = "compiler")]
+    pub const HOST_CFG: &str = include_str!(concat!(env!("OUT_DIR"), "/host-cfg.txt"));
+    /// Pinned compiler's release version with prerelease and build metadata removed for MSRV checks.
+    #[cfg(feature = "compiler")]
+    pub const RUSTC_VERSION: &str = env!("MIRVM_RUSTC_VERSION");
 }
 
 // ===== rendering =====

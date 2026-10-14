@@ -42,3 +42,20 @@ measurement, and decoded values must agree. Times include result destruction. Sn
 16 KiB and 1 MiB synthetic buffers covering every byte value. These measurements isolate decoder
 work and do not establish complete startup payback. Keep this probe separate from product binaries
 and end-to-end timing; its global allocator exists only in the disposable test executable.
+
+For host waits outside the driver ledger, first install the script with the binary being examined,
+then run a bounded syscall capture (Linux and `strace` required):
+
+```sh
+python3 experiments/preparation/waits.py /path/to/mirvm /path/to/script.rs \
+    /path/to/native.out /path/to/managed-home /path/to/wait-results [GUEST_ARGS...]
+```
+
+Six untraced processes verify prepared-image hits; eight traced processes follow all threads and
+children with timestamps and syscall durations. All stdout must match the native result. Both pipes
+are drained during execution and files persist after exit, so trace writes do not wait on the result
+filesystem. Read/write buffer arguments are raw pointers and lengths. Rows list syscalls longer than
+20 ms for inspection; overlapping parent/child waits cannot be summed. This is an attribution probe,
+not a latency comparison: ptrace overhead changes scheduling and syscall costs, and failure to
+reproduce a rare stall does not explain it. Compiler-query children, file/lock waits, and guest/JIT
+thread joins must be distinguished by their position in the trace.

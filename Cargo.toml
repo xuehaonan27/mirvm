@@ -47,7 +47,6 @@ libc = "0.2.186"
 libffi = "5"
 libmimalloc-sys = "0.1.49"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
-rustc_version = "0.4.1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 # Dependency resolution and build scheduling for the cargoless path (src/cargoless/).
@@ -64,6 +63,12 @@ tar = "0.4"
 thiserror = "2"
 memmap2 = "0.2.3"
 rkyv = { version = "0.7.46", features = ["validation"] }
+
+[build-dependencies]
+rustc_version = "0.4.1"
+
+[dev-dependencies]
+rustc_version = "0.4.1"
 
 # Lets rust-analyzer see the rustc_private crates (enable
 # rust-analyzer.rustc.source = "discover" on the IDE side).

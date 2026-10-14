@@ -259,8 +259,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     register pressure and code-size costs before product integration. Require whole-program payback
     in addition to reduced compiler spending. Extend remaining aggregate/projection and range/array-subslice coverage
     from corpus evidence; reduce remaining repeated template verification/serialization and archive
-    metadata work according to CPU profiles. Attribute long startup gaps outside the driver phase
-    ledger to their actual waits before selecting a remedy. Require real workload cold/warm measurements,
+    metadata work according to CPU profiles. Attribute multi-second waits outside the driver phase
+    ledger on plain-file prepared-image hits before selecting a remedy. Require real workload cold/warm measurements,
     unchanged bound-image reuse and specialization payback before default enablement. Preserve
     guest trait/drop/unwind, concurrency, callbacks, fork, signal and trace contracts as admission
     grows. Retain Rust diagnostics, build-script/proc-macro, layout/ABI, std and input invalidation;

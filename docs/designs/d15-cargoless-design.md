@@ -13,8 +13,13 @@ Cargo.
 
 - **C1 resolve graph vs build graph.** Cargo.lock's resolve graph is the union across all platforms,
   including never-true `cfg(any())` edges, so windows-sys enters the lock on a Linux host. The build
-  graph is filtered by evaluating the host `rustc --print cfg`. Version solving, feature activation
-  and lock dependency lines use the resolve graph; compilation units use the build graph.
+  graph is filtered by evaluating the host `rustc --print cfg`. The build captures this baseline
+  from the pinned toolchain for MIRVM's target, without Cargo's compilation flags. It also captures
+  the compiler release for MSRV checks, stripping prerelease/build metadata. Runtime resolution and
+  `CARGO_CFG_*` construction read these embedded facts without starting compiler queries. The full
+  compiler version, target and cfg output participate in build identity; changing the pinned
+  compiler requires rebuilding MIRVM. Version solving, feature activation and lock dependency
+  lines use the resolve graph; compilation units use the build graph.
 - **C2 multi-version fork (lazy bucket).** Same-named crates may coexist at semver-incompatible
   versions (hashbrown 0.14/0.15, syn 1/2/3 in one graph). A package id is (name, bucket): when a
   dependency edge arrives and the index holds a version satisfying both the edge and an existing
