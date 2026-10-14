@@ -20,6 +20,7 @@ if (root / ".git").exists():
     raise SystemExit("use a disposable source copy without .git")
 shutil.copyfile(Path(__file__).with_name("regions.rs"), root / "src/shared_regions.rs")
 shutil.copyfile(Path(__file__).with_name("policy.rs"), root / "src/shared_policy.rs")
+shutil.copyfile(Path(__file__).with_name("scalars.rs"), root / "src/shared_scalars.rs")
 with (root / "src/lib.rs").open("a") as stream:
     stream.write("\npub(crate) mod shared_regions;\n")
 
@@ -30,6 +31,7 @@ for option, description in [
     ("shared_region_specialize", "Allow hot concrete instances to leave the shared tier"),
     ("shared_region_profile", "Sample interpreted and compiled own-body work without changing admission"),
     ("shared_region_policy", "Admit shared and concrete transitions using execution credit"),
+    ("shared_region_ssa", "Keep nonaliasing shared scalar locals in SSA between frame boundaries"),
 ]:
     replace(options, '    /// Print the dedup probe:',
             f'    /// {description} (experiment only).\n'
@@ -40,6 +42,11 @@ for option, description in [
     replace(options, '            generic_payback: flag("generic_payback"),\n',
             '            generic_payback: flag("generic_payback"),\n'
             f'            {option}: flag("{option}"),\n')
+
+replace(root / "src/vm/jit/mod.rs", 'mod frame;\n', 'pub(crate) mod frame;\n')
+frame = root / "src/vm/jit/frame.rs"
+for declaration in ("struct FrameMap", "fn contains", "fn analyze_frame"):
+    replace(frame, f'pub(super) {declaration}', f'pub(crate) {declaration}')
 
 replace(root / "src/vm/ctx/engine.rs", '    pub module: Module,\n',
         '    pub module: Module,\n    pub(crate) shared_regions: crate::shared_regions::Regions,\n')

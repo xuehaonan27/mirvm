@@ -255,8 +255,9 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     including sampling overhead/bias and deferred-admission cost. Measure frame setup and removable
     shared execution/call work to select profitable template groups, bypass tiny/call-only bodies
     where appropriate, and price concrete promotion. Resolve archive-local template identity and
-    memory-backed local costs before product integration. Require whole-program payback in addition
-    to reduced compiler spending. Extend remaining aggregate/projection and range/array-subslice coverage
+    qualify scalar SSA's synchronization, register pressure and code-size costs before product
+    integration. Require whole-program payback in addition to reduced compiler spending. Extend
+    remaining aggregate/projection and range/array-subslice coverage
     from corpus evidence; attribute repeated template verification/serialization and metadata work
     in CPU profiles. Require real workload cold/warm measurements,
     unchanged bound-image reuse and specialization payback before default enablement. Preserve

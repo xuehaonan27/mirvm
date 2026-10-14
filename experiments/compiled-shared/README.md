@@ -14,10 +14,22 @@ interpreter must execute. The activation descriptor borrows the concrete body an
 for the duration of that entry, including callbacks and unwinding. Cleanup entered after an
 exception remains interpreted.
 
-The transformation rewrites local accesses to the external frame and uses verified ordinary IR.
-Index operands are staged in temporary scalar slots. Guest locals remain in memory; this does not
-demonstrate a compiler that retains temporaries in registers across blocks. Dictionary loads remain
-dynamic. No concrete layout or guest callee is baked into shared code.
+The transformation uses verified ordinary IR and retains the interpreter's frame at execution
+boundaries. The memory control rewrites each local access to that external frame. With
+`MIRVM_SHARED_REGION_SSA=1`, scalar accesses within compiled regions use SSA unless their byte ranges
+escape, overlap or have inconsistent widths. Selection reuses the JIT's address-taken analysis;
+opaque storage and addressable locals retain memory semantics. Pointer and index values can use
+SSA without moving their pointees. Cranelift decides physical register allocation and spilling.
+Dictionary loads remain dynamic; no concrete layout or guest callee is baked into shared code.
+
+SSA values are loaded on entry and written back before returning to the interpreter. A direct scalar
+call synchronizes the slots its adapter reads or writes, including partial-width overlaps; the normal
+successor reloads the affected return slots. A cleanup edge flushes every promoted local before the
+call, because cleanup resumes interpreted. Opaque/indirect destinations retain complete
+synchronization. Any unexpected adapter continuation also flushes before entering the frame-based
+dispatcher. Addressable storage is excluded from promotion, so arbitrary callee/callback memory
+writes cannot alias a retained SSA value. Analysis and synchronization code are produced only when
+the worker translates a demanded template.
 
 Each Engine scans borrowed archive tags and template addresses to reserve internal ABI headers.
 It admits only groups with at least two descriptors; singletons keep direct specialization. This
@@ -40,6 +52,7 @@ no OSR. The candidate modes isolate separate decisions:
 | Above plus `MIRVM_SHARED_REGION_SPECIALIZE=1` | Hot instances can publish concrete ABI entries for subsequent calls. |
 | All three plus `MIRVM_SHARED_REGION_PROFILE=1` | Sample interpreted/shared own-body work while retaining fixed admission. |
 | All three plus `MIRVM_SHARED_REGION_POLICY=1` | Gate shared/concrete compilation using executed diversity and work credit. |
+| Any shared mode plus `MIRVM_SHARED_REGION_SSA=1` | Promote nonaliasing scalars across blocks with frame synchronization at adapter/interpreter boundaries. |
 
 The call bridge extracts the interpreter's direct-call arm into one function used by both paths.
 It preserves argument evaluation, sret, scalar/pair writeback, cleanup edges, terminate and main
@@ -153,3 +166,19 @@ adds two probes: two linked compute instances with only one executed per run, an
 around native sleeps. Separate ledger assertions check executed-instance accounting and exclusion
 of callee waits. All valid timing samples, including outliers, are retained. These are fresh-process
 bound-image hits with retained OS caches, not cold frontend builds or cold filesystem measurements.
+
+To compare memory-backed shared code with scalar SSA, using the same prepared input directories:
+
+```sh
+python3 "$experiment_dir/source/experiments/compiled-shared/ssa_compare.py" \
+    "$experiment_dir/target/release/mirvm" "$(rustup which rustc)" \
+    /path/to/reference-results /path/to/reference-controls "$experiment_dir/ssa-comparison"
+```
+
+`ssa_compare.py` checks synchronous SSA and asynchronous SSA policy execution, each with separate
+normal/fork invocations. Nine workloads compare direct specialization, shared memory, shared SSA,
+policy with memory and policy with SSA in five alternating rounds. A further three paired rounds
+force compilation on many/hot/tiny inputs, separating shared code from policy decisions that might
+bypass it. All 243 samples must hit their bound images and agree with native output. Ledgers report
+promoted scalar slots, actual shared code bytes, translations and call bridges. No build, lint or
+profile work should overlap timing. CPU profiles are separate from this matrix.

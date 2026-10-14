@@ -6,6 +6,8 @@
 #[path = "shared_policy.rs"]
 mod policy;
 pub(crate) use policy::Sample;
+#[path = "shared_scalars.rs"]
+mod scalars;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -28,6 +30,7 @@ pub(crate) struct Regions {
     prepare_ns: u128,
     translated: AtomicU64,
     translate_ns: AtomicU64,
+    scalar_slots: AtomicU64,
     entries: AtomicU64,
     exits: AtomicU64,
     bridges: AtomicU64,
@@ -139,7 +142,19 @@ impl Regions {
             .execution(representative as usize)
             .unwrap();
         let template = &original.shared.as_ref().unwrap().template;
-        let body = translate(template, func, self.calls.then_some(self.adapter.unwrap()));
+        let scalars = if crate::options::shared_region_ssa() {
+            scalars::Scalars::collect(template)
+        } else {
+            scalars::Scalars::default()
+        };
+        self.scalar_slots
+            .fetch_add(scalars.len() as u64, Ordering::Relaxed);
+        let body = translate(
+            template,
+            func,
+            self.calls.then_some(self.adapter.unwrap()),
+            scalars,
+        );
         crate::vm::verify::generic_template(&body, shared.module.funcs.len()).unwrap();
         self.translated.fetch_add(1, Ordering::Relaxed);
         self.translate_ns
@@ -276,7 +291,7 @@ impl Regions {
             .map(|symbol| symbol.size)
             .sum();
         crate::diag::instrument(format_args!(
-            "mirvm-shared-regions: instances={} templates={} translated={} compiled={} concrete={} entered_instances={} entries={} exits={} bridges={} prepare_ns={} translate_ns={} code_bytes={}",
+            "mirvm-shared-regions: instances={} templates={} translated={} compiled={} concrete={} entered_instances={} entries={} exits={} bridges={} prepare_ns={} translate_ns={} code_bytes={} scalar_slots={}",
             self.targets.iter().filter(|v| v.is_some()).count(),
             self.representatives.len(),
             self.translated.load(Ordering::Relaxed),
@@ -296,6 +311,7 @@ impl Regions {
             self.prepare_ns,
             self.translate_ns.load(Ordering::Relaxed),
             code_bytes,
+            self.scalar_slots.load(Ordering::Relaxed),
         ));
     }
 }
@@ -412,6 +428,7 @@ struct Translate {
     next: u32,
     size: u32,
     prefix: Vec<Stmt>,
+    scalars: scalars::Scalars,
 }
 
 impl Translate {
@@ -419,27 +436,41 @@ impl Translate {
         let PlaceBase::Local(off) = place.base else {
             unreachable!("verified shared place");
         };
-        let mut out = address(off);
+        let mut out = if matches!(place.steps.first(), Some(PlaceStep::Deref))
+            && let Some(slot) = self.scalars.get(slot(off))
+        {
+            PlaceExpr {
+                base: PlaceBase::Local(slot.off),
+                steps: Box::new([]),
+            }
+        } else {
+            address(off)
+        };
         let mut steps = out.steps.into_vec();
         for step in place.steps.iter() {
             steps.push(match step {
                 PlaceStep::Deref | PlaceStep::Offset(_) => step.clone(),
                 PlaceStep::IndexScaled { idx, stride } => {
-                    let temp = Slot {
-                        off: self.next,
-                        width: idx.width,
-                    };
-                    self.next += 8;
-                    self.size = self.size.max(self.next);
-                    self.prefix.push(Stmt::Assign {
-                        dst: ScalarPlace::Slot(temp),
-                        rv: Rvalue::Use(Operand::Mem {
-                            expr: address(idx.off),
+                    let idx = if let Some(slot) = self.scalars.get(*idx) {
+                        slot
+                    } else {
+                        let temp = Slot {
+                            off: self.next,
                             width: idx.width,
-                        }),
-                    });
+                        };
+                        self.next += 8;
+                        self.size = self.size.max(self.next);
+                        self.prefix.push(Stmt::Assign {
+                            dst: ScalarPlace::Slot(temp),
+                            rv: Rvalue::Use(Operand::Mem {
+                                expr: address(idx.off),
+                                width: idx.width,
+                            }),
+                        });
+                        temp
+                    };
                     PlaceStep::IndexScaled {
-                        idx: temp,
+                        idx,
                         stride: *stride,
                     }
                 }
@@ -452,9 +483,12 @@ impl Translate {
 
     fn operand(&mut self, op: &Operand) -> Operand {
         match op {
-            Operand::Slot(slot) => Operand::Mem {
-                expr: address(slot.off),
-                width: slot.width,
+            Operand::Slot(slot) => match self.scalars.get(*slot) {
+                Some(slot) => Operand::Slot(slot),
+                None => Operand::Mem {
+                    expr: address(slot.off),
+                    width: slot.width,
+                },
             },
             Operand::Mem { expr, width } => Operand::Mem {
                 expr: self.place(expr),
@@ -468,9 +502,12 @@ impl Translate {
 
     fn destination(&mut self, dst: &ScalarPlace) -> ScalarPlace {
         match dst {
-            ScalarPlace::Slot(slot) => ScalarPlace::Mem {
-                expr: address(slot.off),
-                width: slot.width,
+            ScalarPlace::Slot(slot) => match self.scalars.get(*slot) {
+                Some(slot) => ScalarPlace::Slot(slot),
+                None => ScalarPlace::Mem {
+                    expr: address(slot.off),
+                    width: slot.width,
+                },
             },
             ScalarPlace::Mem { expr, width } => ScalarPlace::Mem {
                 expr: self.place(expr),
@@ -528,14 +565,21 @@ impl Translate {
     }
 }
 
-fn translate(template: &GenericTemplate, id: u32, adapter: Option<u32>) -> FuncBody {
+fn translate(
+    template: &GenericTemplate,
+    id: u32,
+    adapter: Option<u32>,
+    scalars: scalars::Scalars,
+) -> FuncBody {
+    let scratch = scalars.scratch();
     let mut tr = Translate {
-        next: 32,
-        size: 32,
+        next: scratch,
+        size: scratch,
         prefix: Vec::new(),
+        scalars,
     };
     let mut blocks = vec![Block {
-        stmts: Vec::new(),
+        stmts: tr.scalars.sync(false),
         term: Terminator::SwitchInt {
             discr: SwitchDiscr::Scalar(Operand::Slot(slot(8))),
             targets: (0..template.blocks.len())
@@ -548,12 +592,12 @@ fn translate(template: &GenericTemplate, id: u32, adapter: Option<u32>) -> FuncB
     for (bb, block) in template.blocks.iter().enumerate() {
         let mut stmts = Vec::new();
         for stmt in &block.stmts {
-            tr.next = 32;
+            tr.next = scratch;
             let stmt = tr.statement(stmt);
             stmts.append(&mut tr.prefix);
             stmts.push(stmt);
         }
-        tr.next = 32;
+        tr.next = scratch;
         let term = match &block.term {
             Terminator::Goto(target) => Terminator::Goto(target + 1),
             Terminator::SwitchInt {
@@ -573,15 +617,30 @@ fn translate(template: &GenericTemplate, id: u32, adapter: Option<u32>) -> FuncB
                 }
             }
             Terminator::Call { target, .. } if adapter.is_some() => {
+                let (before, after) = tr.scalars.call(&block.term);
+                stmts.extend(before);
                 let continuation = (template.blocks.len() + 2 + continuations.len()) as u32;
+                let fallback = if tr.scalars.len() == 0 {
+                    0
+                } else {
+                    continuation + 1
+                };
                 continuations.push(Block {
-                    stmts: Vec::new(),
+                    stmts: after,
                     term: Terminator::SwitchInt {
                         discr: SwitchDiscr::Scalar(Operand::Slot(slot(8))),
                         targets: vec![(u128::from(*target), target + 1)],
-                        otherwise: 0,
+                        otherwise: fallback,
                     },
                 });
+                if fallback != 0 {
+                    // The normal successor retains SSA. A different adapter continuation goes
+                    // through the frame-based dispatcher, which reloads all locals on entry.
+                    continuations.push(Block {
+                        stmts: tr.scalars.sync(true),
+                        term: Terminator::Goto(0),
+                    });
+                }
                 Terminator::Call {
                     callee: adapter.unwrap(),
                     args: vec![
@@ -598,6 +657,7 @@ fn translate(template: &GenericTemplate, id: u32, adapter: Option<u32>) -> FuncB
                 }
             }
             _ => {
+                stmts.extend(tr.scalars.sync(true));
                 stmts.push(Stmt::Assign {
                     dst: ScalarPlace::Slot(slot(24)),
                     rv: Rvalue::Use(Operand::Imm {

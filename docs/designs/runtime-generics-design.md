@@ -193,7 +193,10 @@ instance diversity and keeps interpreted/shared work credit separate. After shar
 concrete admission uses observed shared execution rather than earlier interpretation. A
 sampling-only control retains fixed admission to expose measurement cost. These mechanisms budget
 past worker cost; they do not estimate the future work a transition removes. Frame setup is outside
-the current sample, template identity remains archive-local and locals are memory-backed.
+the current sample and template identity remains archive-local. Optional scalar SSA in the
+frame-entry experiment retains nonaliasing values across blocks and synchronizes the interpreter
+frame at call/cleanup/return boundaries. It preserves dynamic dictionaries and the concrete entry
+ABI; its code-size, synchronization and compilation costs remain part of the measured tier decision.
 Aggregating template heat or reducing compilation alone does not prove payback.
 Sparse instance use, a hot repeated loop, tiny calls, native-call-heavy work and one long invocation
 are separate policy acceptance cases. Initial thresholds are an experiment, not a product default.
