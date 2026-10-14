@@ -101,3 +101,6 @@ crate::diag_codes! {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("Not implemented for this target.");
+
+#[cfg(feature = "cli")]
+pub(crate) mod command;

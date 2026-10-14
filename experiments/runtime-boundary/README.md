@@ -2,8 +2,9 @@
 
 This probe builds the product library with and without the `compiler` feature. Both forms use the
 same package/image readers, input validation, native materialization, Engine, Cranelift JIT, guest
-stack and process-exit handling. The normal `mirvm` CLI requires `compiler`, which remains a default
-feature. The runner is an experiment entry point, not a replacement CLI.
+stack and process-exit handling. The ordinary `mirvm` CLI requires `cli`; `compiler` implies it and
+remains enabled by default. The recipe runner and the optional lightweight ordinary CLI provide
+separate experiments over the same runtime boundary.
 
 `src/native/artifact/assembly.rs` owns materialization of already-generated inline/global assembly.
 Compiler-side rendering stays in `lower`; the moved materialization code preserves emitted text
@@ -95,19 +96,54 @@ and SIGTERM status. Main return/panic classification also runs through the compi
 Results and binary hashes remain outside git; conclusions belong to
 [current-status.md](../../docs/current-status.md#runtime-boundary-prototype).
 
-## Integration limits
+## Ordinary CLI
 
-The compiler-independent feature is an experimental build boundary. Base/dependency layers,
-program-delta preparation, dependency resolution/fetching and command reports are compiler-only.
-Runtime tests retain native fixture producers, archive encoders and managed-input publishers.
-Capture and its runtime checks remain available without compiler crates; command-report tests
-belong to the compiler build. Runtime instance layouts and serialized formats stay identical.
-`repo-quality` runs both all-target Clippy with warnings denied and release library tests under
-`--no-default-features --features cranelift`, alongside the ordinary compiler gates. These gates
-qualify the library boundary, not ordinary CLI routing.
+The lightweight CLI retains project/script resolution, build-script/proc-macro scheduling, input
+validation and command reports. Valid package/image hits execute without compiler libraries. A
+miss replaces the process with a matching compiler worker, transferring exact arguments, scope,
+prepare/pack/capture state, unit inputs and the Cargo runner's original guest environment/cwd.
+The managed-input lease survives exec; the worker restores close-on-exec before guest execution.
+Private request files are consumed once. Diagnostic capture transfers its attachment and finalizer
+to the worker. See [the design](../../docs/designs/frontend-boundary.md#5-proposed-handoff) for ownership.
 
-The probe requires an explicit argument recipe and a prepared sysroot. Ordinary project/script
-dispatch and build-script/proc-macro scheduling still need a production handoff contract, including
-their distinct compile/guest environments. Capture routing and the full signal/close contract remain
-unqualified. The exec protocol covers plain recipes, not those orchestration paths. No persistent compiler process or new artifact format is introduced.
-The narrow contract probes do not qualify every library/CLI behavior or select default routing.
+```sh
+cargo build --release --locked --bin mirvm --bin mirvm-compiler
+cp "$CARGO_TARGET_DIR/release/mirvm" "$experiment_dir/bin/mirvm-full"
+cp "$CARGO_TARGET_DIR/release/mirvm-compiler" "$experiment_dir/bin/mirvm-compiler"
+cargo build --release --locked --no-default-features --features cli,cranelift --bin mirvm
+cp "$CARGO_TARGET_DIR/release/mirvm" "$experiment_dir/bin/mirvm-light"
+python3 experiments/runtime-boundary/cli.py \
+    "$experiment_dir/bin/mirvm-full" "$experiment_dir/bin/mirvm-light" \
+    "$experiment_dir/bin/mirvm-compiler" "$(rustup which rustc)" \
+    /path/to/managed-home "$experiment_dir/cli-contracts"
+python3 experiments/runtime-boundary/cli-measure.py \
+    "$experiment_dir/bin/mirvm-full" "$experiment_dir/bin/mirvm-light" "$(rustup which rustc)" \
+    /path/to/compiled-shared-results /path/to/corpus-results "$experiment_dir/cli-timings"
+```
+
+The worker is resolved from `MIRVM_COMPILER` or beside the lightweight binary. It must match the
+runtime's source/toolchain build identity. Misses retain compiler mappings through guest exit;
+hits require no worker. `cache` commands also use the worker. No persistent compiler process or
+new artifact format is introduced. The default build remains compiler-linked.
+
+`cli.py` checks both dependency tracks, host proc macros/build scripts, frontmatter, source and
+compile/runtime environment changes, private request modes, input leases across exec, executing
+process maps, cwd/arguments, warning/error diagnostics, capture, packaging, interpreter/strict-JIT
+panic status, SIGTERM/PID continuity and worker rejection. Panic text normalizes only its process
+ID. Native environment bytes round-trip through worker requests; the existing Cargo build sidecar
+still requires a UTF-8 environment, so that track uses a UTF-8 value. Relative frontmatter path
+dependencies resolve against the materialized script project; this fixture uses an absolute path.
+
+`cli-measure.py` takes ten alternating hit rounds and five program-miss rounds over minimal output,
+fib(32), generic calls, serde and flate, checking native stdout and phase routing. Program misses use
+`MIRVM_NO_IR_CACHE=1` while retaining installed std/dependencies; they are not empty-store builds.
+Both binaries share identical prepared products. Persistent JIT caching is disabled; OS caches and
+heat orders remain. Whole time brackets process creation through exit. Experiment builds, checks
+and profiling run separately; shared-host load is uncontrolled and all valid outliers remain.
+
+The pure runtime library (`cranelift` alone) also excludes dependency-resolution/fetching and report
+dependencies. Session-dependent artifact producers follow `compiler`; fixture producers remain in
+the tests that need them. Instance layouts, serialized formats and emitted assembly are shared.
+`repo-quality` lints all three feature configurations with warnings denied and runs release runtime
+library tests. These focused experiments do not qualify every CLI/library behavior, distribution
+layout, cache failure or full signal/fork/capture interaction, and do not select default routing.

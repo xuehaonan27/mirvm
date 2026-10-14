@@ -9,7 +9,7 @@
 
 /// The command did its job. Spelled for the same reason as the failure codes: a caller reads the
 /// vocabulary, not a digit.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub const SUCCESS: u8 = 0;
 
 /// An operation failed: I/O, resolution, compilation, packaging.

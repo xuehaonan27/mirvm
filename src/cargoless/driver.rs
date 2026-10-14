@@ -726,7 +726,7 @@ fn install_unit_table(plan: &ResolvePlan, fps: &[String], layout: &Layout) {
                 units.len()
             ));
         }
-        crate::image::units::install(crate::image::units::UnitTable::new(units));
+        crate::cli::worker::install_units(units);
     }
 }
 

@@ -14,7 +14,7 @@ pub(crate) mod container;
 pub(crate) mod record;
 pub(crate) mod syscall;
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 pub(crate) use crate::utils::bytes::{
     read_array, read_i32, read_i64, read_u16, read_u32, read_u64,
 };
@@ -62,13 +62,13 @@ pub(crate) const KIND_ENGINE_CONTEXT: u16 = 0x0201;
 pub(crate) const FLAG_CONTEXT_CONTROL: u8 = 1 << 0;
 pub(crate) const FLAG_RAW: u8 = 1 << 1;
 pub(crate) const FLAG_LIBC: u8 = 1 << 2;
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 const KNOWN_CONTROL_FLAGS: u8 = FLAG_CONTEXT_CONTROL | FLAG_RAW | FLAG_LIBC;
 
 pub(crate) const STATUS_ERRNO_VALID: u64 = 1 << 32;
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 const STATUS_ERRNO_MASK: u64 = u32::MAX as u64;
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 const STATUS_KNOWN_MASK: u64 = STATUS_ERRNO_MASK | STATUS_ERRNO_VALID;
 
 /// A record that does not match the v0 wire contract. The message names the field and the reason.
@@ -83,13 +83,13 @@ impl WireError {
 
     /// The refusal for a record that ends inside a field: the format names the field, while the
     /// [`crate::utils::bytes`] readers answer `Option` and keep no policy of their own.
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     fn truncated(what: &str) -> Self {
         Self(format!("truncated while reading {what}"))
     }
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 fn require_exact_len(bytes: &[u8], expected: usize, what: &str) -> Result<(), WireError> {
     if bytes.len() != expected {
         return Err(WireError::new(format!(
@@ -100,7 +100,7 @@ fn require_exact_len(bytes: &[u8], expected: usize, what: &str) -> Result<(), Wi
     Ok(())
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 fn require_magic(bytes: &[u8], magic: &[u8; 8], what: &str) -> Result<(), WireError> {
     if bytes.get(..8) != Some(magic.as_slice()) {
         return Err(WireError::new(format!("{what} magic mismatch")));
@@ -108,7 +108,7 @@ fn require_magic(bytes: &[u8], magic: &[u8; 8], what: &str) -> Result<(), WireEr
     Ok(())
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 fn require_version(bytes: &[u8], offset: usize, what: &str) -> Result<(), WireError> {
     let major = read_u16(bytes, offset).ok_or_else(|| WireError::truncated("format major"))?;
     let minor = read_u16(bytes, offset + 2).ok_or_else(|| WireError::truncated("format minor"))?;
@@ -120,7 +120,7 @@ fn require_version(bytes: &[u8], offset: usize, what: &str) -> Result<(), WireEr
     Ok(())
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 fn require_eq_u16(bytes: &[u8], offset: usize, expected: u16, what: &str) -> Result<(), WireError> {
     let value = read_u16(bytes, offset).ok_or_else(|| WireError::truncated(what))?;
     if value != expected {
@@ -131,7 +131,7 @@ fn require_eq_u16(bytes: &[u8], offset: usize, expected: u16, what: &str) -> Res
     Ok(())
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 fn require_eq_u32(bytes: &[u8], offset: usize, expected: u32, what: &str) -> Result<(), WireError> {
     let value = read_u32(bytes, offset).ok_or_else(|| WireError::truncated(what))?;
     if value != expected {
@@ -142,7 +142,7 @@ fn require_eq_u32(bytes: &[u8], offset: usize, expected: u32, what: &str) -> Res
     Ok(())
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 fn require_zero(bytes: &[u8], range: std::ops::Range<usize>, what: &str) -> Result<(), WireError> {
     let value = bytes.get(range).ok_or_else(|| WireError::truncated(what))?;
     if value.iter().any(|byte| *byte != 0) {

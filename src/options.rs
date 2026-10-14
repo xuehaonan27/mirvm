@@ -272,6 +272,9 @@ entries! {
     user jit_sync      env("MIRVM_JIT_SYNC")       default("off")            => reads(bool, |o| o.jit_sync);
     /// Print JIT helper frequency statistics at process exit.
     user jit_stats     env("MIRVM_JIT_STATS")      default("off")            => reads(bool, |o| o.jit_stats);
+    /// Compiler worker used by the CLI build without compiler linkage.
+    user compiler_worker env("MIRVM_COMPILER") default("sibling mirvm-compiler")
+        => reads(Option<PathBuf>, |o| o.compiler_worker.clone());
     /// Local store root: cache/ (deletable), data/ (expensive to lose), build/ (project space), run/ (process scratch).
     user home          env("MIRVM_HOME")           default("$HOME/.mirvm")   => reads(&'static std::path::Path, |o| &o.home);
     /// Relocate the Cargo track's target directory (the shared dependency store) out of `build/`.
@@ -560,6 +563,7 @@ pub enum OutputFormat {
 /// Private to this module: the register rows are the one surface that reads it, so an option has one
 /// place to state its default, how it is read, and how a call site spells it.
 struct Options {
+    compiler_worker: Option<PathBuf>,
     home: PathBuf,
     target_dir: PathBuf,
     jit_threshold: u32,
@@ -612,6 +616,9 @@ impl Options {
             .map(PathBuf::from)
             .unwrap_or_else(|| crate::store::TARGET.dir_in(&home).join("mirvm"));
         Self {
+            compiler_worker: raw("compiler_worker")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             home,
             target_dir,
             jit_threshold: raw("jit_threshold")
@@ -851,10 +858,10 @@ pub mod build {
     /// The build target triple, used as both host and target.
     pub const HOST: &str = env!("MIRVM_HOST");
     /// Baseline `rustc --print cfg --target HOST`, without Cargo's compilation flags.
-    #[cfg(feature = "compiler")]
+    #[cfg(feature = "cli")]
     pub const HOST_CFG: &str = include_str!(concat!(env!("OUT_DIR"), "/host-cfg.txt"));
     /// Pinned compiler's release version with prerelease and build metadata removed for MSRV checks.
-    #[cfg(feature = "compiler")]
+    #[cfg(feature = "cli")]
     pub const RUSTC_VERSION: &str = env!("MIRVM_RUSTC_VERSION");
 }
 

@@ -12,7 +12,7 @@
 
 use std::ffi::OsStr;
 use std::io;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
@@ -87,14 +87,14 @@ pub fn pipe() -> Result<[i32; 2], i32> {
 ///
 /// This is how the cargo mirror publishes itself under the tool name a guest build script looks
 /// for, and how a launcher is published for a test binary.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
 /// Give `path` the unix mode bits in `mode`, which is how a generated shell script becomes
 /// executable.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 

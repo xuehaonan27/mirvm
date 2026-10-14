@@ -241,10 +241,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   - Explain the prepared-base setup regression with separate measurements of canonical-symbol
     lookup and first-program native materialization; a cold-build gain does not establish a gain
     when the base is already present.
-  - Connect ordinary project/script dispatch to the compiler-independent runtime. Qualify
-    exec-on-miss routing against in-process preparation on representative
-    workloads, including project compile/guest environment transitions, capture and the complete
-    lifecycle.
+  - Qualify compiler-independent CLI routing for distribution and default selection. Measure true
+    empty-store/edited-project costs and peak memory, and cover cache failures plus combined
+    signal/fork/capture lifecycles. Resolve the existing Cargo build sidecar's UTF-8 environment
+    restriction. Exec-on-miss still loads the compiler; fresh-process image-hit gains alone do not
+    justify changing the default.
   - Record the reasons functions enter the guest closure and evaluate smaller/lazy products while
     retaining runtime roots, indirect targets, pointer identity and deterministic ownership.
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a

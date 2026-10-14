@@ -207,7 +207,7 @@ fn is_rt_sigreturn(restorer: Option<extern "C" fn()>) -> bool {
 /// RIP (the ucontext RIP field, x86_64 = gregs[REG_RIP=16]), the fault address (CR2 =
 /// gregs[22]) and their /proc/self/maps owners, dumps the owning executable segment to
 /// /tmp/mirvm-jitdump.bin (objdump it to find the crash site), and then exits.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub fn install_segv_dump() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -218,7 +218,7 @@ pub fn install_segv_dump() {
     }
 }
 
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 unsafe extern "C" fn segv_dump_handler(
     _sig: i32,
     _info: *mut libc::siginfo_t,

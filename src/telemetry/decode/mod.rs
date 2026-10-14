@@ -34,7 +34,7 @@ pub(crate) enum Health {
 }
 
 impl Health {
-    #[cfg(feature = "compiler")]
+    #[cfg(feature = "cli")]
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Clean => "clean",

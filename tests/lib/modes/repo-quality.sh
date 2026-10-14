@@ -338,6 +338,7 @@ mode_run() {
     run_check "cargo fmt" "${CARGO:-cargo}" fmt --all -- --check
     run_check "cargo clippy" "${CARGO:-cargo}" clippy --locked --all-targets --all-features -- -D warnings
     run_check "runtime clippy" "${CARGO:-cargo}" clippy --locked --no-default-features --features cranelift --all-targets -- -D warnings
+    run_check "runtime CLI clippy" "${CARGO:-cargo}" clippy --locked --no-default-features --features cli,cranelift --all-targets -- -D warnings
     run_check "cargo test" "${CARGO:-cargo}" test --locked --all-features
     run_check "runtime library tests" "${CARGO:-cargo}" test --locked --release --no-default-features --features cranelift --lib
     run_check "options register" check_option_register

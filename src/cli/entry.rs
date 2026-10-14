@@ -7,6 +7,7 @@ use crate::cargo_shim;
 
 use super::driver::{pack_driver, parse_stack_size, run_driver, run_verified_engine};
 use super::frontmatter::{materialize_script, parse_frontmatter};
+#[cfg(feature = "compiler")]
 use super::usage;
 
 // ===== user entry points =====
@@ -129,6 +130,7 @@ fn set_cargo_pack_env(out: &Path) {
 }
 
 /// `mirvm cache status|purge ...`: manage the local store ($HOME/.mirvm, relocatable via MIRVM_HOME).
+#[cfg(feature = "compiler")]
 pub(super) fn cache_main(
     args: impl Iterator<Item = String>,
 ) -> Result<ExitCode, crate::error::Error> {
@@ -661,4 +663,11 @@ pub(super) fn run_main(
         false,
         None,
     ))
+}
+
+#[cfg(not(feature = "compiler"))]
+pub(super) fn cache_main(
+    args: impl Iterator<Item = String>,
+) -> Result<ExitCode, crate::error::Error> {
+    super::worker::exec_command(std::iter::once("cache".to_owned()).chain(args).collect())
 }

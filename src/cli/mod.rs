@@ -12,13 +12,16 @@ use std::sync::OnceLock;
 
 use crate::cargo_shim;
 
+#[cfg(feature = "compiler")]
 mod base_image;
+#[cfg(feature = "compiler")]
 mod build_log;
 mod cargo;
 pub(crate) mod diagnostics;
 mod driver;
 mod entry;
 mod frontmatter;
+pub(crate) mod worker;
 
 pub(crate) use self::cargo::{GuestProcessState, run_dep_compiler};
 pub(crate) use self::driver::{pack_driver, run_driver};
@@ -41,6 +44,10 @@ pub enum Error {
     #[error("{}: {detail}", path.display())]
     Script { path: PathBuf, detail: String },
 
+    /// A compiler worker could not accept or execute this process's request.
+    #[error("{detail}")]
+    Worker { detail: String },
+
     /// Entering the directory cargo was invoked from failed.
     #[error("{detail}")]
     Enter { detail: String },
@@ -51,9 +58,11 @@ crate::diag_codes! {
         Frontmatter => "cli.frontmatter",
         Script => "cli.script",
         Enter => "cli.enter",
+        Worker => "cli.worker" Software,
     }
 }
 
+#[cfg(feature = "compiler")]
 static COMPILER_SESSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Prepare an exact compiler argument vector through the normal diagnostics and publication path.
@@ -78,6 +87,7 @@ pub fn run_runtime_image(args: Vec<String>, guest_args: Vec<String>) -> ExitCode
     run_driver(args, guest_args, false, None, false, false, None)
 }
 
+#[cfg(feature = "compiler")]
 pub(crate) fn compiler_session_guard() -> std::sync::MutexGuard<'static, ()> {
     COMPILER_SESSION
         .lock()
@@ -95,6 +105,7 @@ pub(crate) fn compiler_session_guard() -> std::sync::MutexGuard<'static, ()> {
 /// This is the session's *view* of the arguments, never key material: callers append it to a copy
 /// taken after the L2 key, package header and cargoless unit fingerprint were snapshotted. Letting
 /// the flag into a key would make enabling it re-key (or worse, silently mismatch) cached images.
+#[cfg(feature = "compiler")]
 pub(crate) fn parallel_frontend_arg() -> &'static str {
     PARALLEL_FRONTEND_ARG
         .get()
@@ -106,6 +117,7 @@ pub(crate) fn parallel_frontend_arg() -> &'static str {
 /// scheduler already runs crates as parallel subprocesses, and the pinned toolchain has neither a
 /// jobserver nor `--jobs` to bound a per-unit pool. Spelled out rather than omitted so a future
 /// rustc default cannot quietly raise it.
+#[cfg(feature = "compiler")]
 pub(crate) const SEQUENTIAL_FRONTEND_ARG: &str = "-Zthreads=1";
 
 static PARALLEL_FRONTEND_ARG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -197,6 +209,11 @@ pub fn main() -> ExitCode {
     }
     let mut argv = std::env::args();
     let argv0 = argv.next().unwrap_or_default();
+    let mut argv = argv.peekable();
+    let worker_process = match worker::accept_prefix(&mut argv) {
+        Ok(worker) => worker,
+        Err(error) => return crate::error::Error::from(error).report(),
+    };
 
     if cargo_shim::is_cargo_rustdoc(Path::new(&argv0)) {
         cargo_shim::phase_cargo_rustdoc(argv);
@@ -217,6 +234,17 @@ pub fn main() -> ExitCode {
         crate::diag::write(usage().as_bytes());
         return ExitCode::from(crate::diag::exit::USAGE);
     };
+    if let Some(expected) = worker_process {
+        if first == "__compiler-run" {
+            return worker::run_main(argv, &expected);
+        }
+        if let Err(error) = worker::validate_build(&expected) {
+            return crate::error::Error::from(error).report();
+        }
+        if first == "__compiler-dependency" {
+            run_dep_compiler(argv.collect());
+        }
+    }
     // One component per process, fixed at the dispatch boundary: every diagnostic emitted below —
     // including the engine's — is attributed to the command the user actually ran.
     crate::diag::enter(component_of(&first));
@@ -231,7 +259,10 @@ pub fn main() -> ExitCode {
     // Base-image build subprocess (must precede MIRVM_CARGO_SESSION dispatch: builds triggered
     // inside runner carry the cargo session env and must not be misrouted into phase_wrapper)
     if first == "__build-base-image" {
+        #[cfg(feature = "compiler")]
         return base_image::build_main(argv);
+        #[cfg(not(feature = "compiler"))]
+        worker::exec_command(std::iter::once(first).chain(argv).collect());
     }
     // Cargoless dep compilation subprocess (landing point for cargoless::driver scheduling;
     // also must precede MIRVM_CARGO_SESSION dispatch)
@@ -516,8 +547,10 @@ fn test_main(argv: impl Iterator<Item = String>) -> Result<ExitCode, crate::erro
 }
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "compiler")]
     use rustc_errors::{DiagInner, Level};
 
+    #[cfg(feature = "compiler")]
     use super::driver::is_runner_warning_summary;
     use super::{INTERNAL_CAPTURE_DIRECTORY_ARG, take_internal_capture_directory};
 
@@ -543,6 +576,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "compiler")]
     fn runner_filter_accepts_only_rustc_warning_count_summaries() {
         assert!(is_runner_warning_summary(&DiagInner::new(
             Level::ForceWarning,

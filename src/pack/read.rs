@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 
 use super::Error;
 use super::LoadedPackage;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use super::format::MAGIC;
 use super::format::{
     ParsedPackage, TAG_BASE, TAG_FUNCS, TAG_MC, TAG_META, TAG_MODULE, TAG_NATIVELIBS, TAG_RELOC,
@@ -29,7 +29,7 @@ use super::meta::{
 const MODULE_VERIFY_FAILED: &str = "MODULE bytecode verification failed";
 
 /// Package sniff: the first 8 bytes being the magic marks a package (run's branch criterion).
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub(crate) fn is_package(path: &Path) -> bool {
     let mut b = [0u8; 8];
     std::fs::File::open(path)

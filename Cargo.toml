@@ -3,13 +3,15 @@ name = "mirvm"
 version = "0.0.1"
 edition = "2024"
 publish = false
+default-run = "mirvm"
 
 [features]
 # cranelift: the real JIT backend. The tests/data/fixtures/tsan/ harness does not enable this feature,
 # so it stays off the heavy dependency and the TSan channel is unaffected (an
 # extension of the engine-core isolation discipline).
 default = ["compiler", "cranelift"]
-compiler = [
+compiler = ["cli"]
+cli = [
     "dep:toml",
     "dep:semver",
     "dep:pubgrub",
@@ -30,6 +32,11 @@ cranelift = [
 [[bin]]
 name = "mirvm"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "mirvm-compiler"
+path = "src/compiler_main.rs"
 required-features = ["compiler"]
 
 [[example]]

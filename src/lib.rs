@@ -59,11 +59,11 @@ extern crate rustc_target;
 pub(crate) const CHILD_HANG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(crate) mod arch;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub mod cargo_shim;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub(crate) mod cargoless;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod depinfo;
 pub(crate) mod diag;

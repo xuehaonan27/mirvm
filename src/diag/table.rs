@@ -107,6 +107,7 @@ impl Table {
 }
 
 /// A byte count in the largest unit that keeps it readable, at one decimal.
+#[cfg(any(feature = "compiler", test))]
 pub fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut value = bytes as f64;

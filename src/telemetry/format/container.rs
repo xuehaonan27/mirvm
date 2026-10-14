@@ -46,7 +46,7 @@ impl FileHeader {
         out
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, FILE_HEADER_BYTES, "file header")?;
         require_magic(bytes, FILE_MAGIC, "file")?;
@@ -174,7 +174,7 @@ impl ChunkHeader {
         out
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, CHUNK_HEADER_BYTES, "chunk header")?;
         require_magic(bytes, CHUNK_MAGIC, "chunk")?;
@@ -240,7 +240,7 @@ impl ChunkFooter {
         out
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, CHUNK_FOOTER_BYTES, "chunk footer")?;
         require_magic(bytes, COMMIT_MAGIC, "chunk commit")?;
@@ -255,7 +255,7 @@ impl ChunkFooter {
         })
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn verify(
         &self,
         header: &ChunkHeader,

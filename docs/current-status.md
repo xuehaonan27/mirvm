@@ -447,13 +447,57 @@ Both compiler and compiler-independent builds pass all-target Clippy with warnin
 The runtime feature excludes dependency resolution/fetching, command reports and unused artifact
 producers; tests retain the producers needed by native, archive and managed-input fixtures. The
 Linux runtime's normal dependency graph has 72 packages rather than 109, excluding the root package:
-seven direct compiler-only dependencies remove 37 packages from this graph, including HTTP/TLS,
+seven direct CLI dependencies remove 37 packages from this graph, including HTTP/TLS,
 compression and dependency-solving libraries. Build/dev dependencies are outside that count. This
 establishes a smaller build dependency surface, not a measured startup improvement. Runtime instance
 layouts, serialized formats and emitted assembly remain shared across feature configurations.
-Ordinary project scheduling, compile/guest environment
-transitions, full lifecycle/capture qualification and representative workload measurements remain
-open in [frontend-boundary.md](designs/frontend-boundary.md). Default CLI routing is unchanged.
+The optional ordinary CLI uses `--no-default-features --features cli,cranelift`. Its `cli` feature
+retains scheduling and reports while `compiler` owns rustc linkage and session-dependent producers.
+Prepared images and packages execute directly; misses exec a same-build `mirvm-compiler`, preserving
+PID, cwd, arguments, diagnostic scope, preparation state, unit inputs and Cargo's saved guest
+environment. The managed-input lease stays held through exec and becomes close-on-exec again in the
+worker. A private single-use request carries no compiler allocations or native pointers. The worker
+inherits capture ownership and consumes rejected requests before reporting incompatibility.
+
+The ordinary CLI contract batch covers both dependency tracks with a target dependency, host proc
+macro and build script; frontmatter; source/compile/runtime environment changes; absent-worker hits;
+native environment bytes on the self track; cwd and spaced/empty arguments; private requests and
+lease continuity; warnings/errors; capture; packaging; interpreter and strict-JIT panic status; and
+SIGTERM/PID continuity. The executing lightweight hit has no rustc/LLVM mappings; the miss does.
+The Cargo build sidecar still panics on non-UTF-8 environment values before handoff, so that track
+uses UTF-8 values. The request serializer itself has native-byte round-trip and malformed-input
+checks. Linux's lightweight CLI library batch passes 518 checks with one existing ignored check;
+the two request checks pass again after rejection handling changed. All three configurations pass
+Linux warnings-denied Clippy; the lightweight CLI also passes it on macOS. The native archive,
+assembly-key and embedded lifecycle fixtures pass for these exact binaries.
+
+An ordinary CLI matrix compares identical-source full and lightweight builds sharing prepared
+products: ten alternating rounds of image hits and five rounds with program IR caching disabled,
+over five workloads (150 native-matching samples). Installed std/dependency products, OS caches and
+heat orders remain; persistent JIT caching is disabled. These are fresh processes, not empty-store
+or page-cache-cold runs. Whole time brackets process creation through exit, with result persistence
+outside the clock. Experiment builds, checks and profiling are separate; shared-host load is
+uncontrolled. Complete-time medians are:
+
+| Workload | Full CLI, image hit | Lightweight CLI, image hit | Full CLI, program miss | Lightweight CLI, program miss |
+|---|---:|---:|---:|---:|
+| Minimal output | 58.0 ms | 47.4 ms | 119.1 ms | 137.1 ms |
+| Recursive fib(32) | 75.6 ms | 64.1 ms | 138.6 ms | 138.4 ms |
+| Generic calls | 186.1 ms | 177.6 ms | 297.0 ms | 273.2 ms |
+| Serde | 89.0 ms | 82.0 ms | 326.9 ms | 313.3 ms |
+| Flate | 243.3 ms | 222.0 ms | 461.2 ms | 425.5 ms |
+
+The hit-path result supports removing compiler linkage from ordinary prepared execution. It does
+not establish a universal miss improvement: the minimal-output miss regresses by 18.0 ms, and miss
+ranges overlap for every workload. Flate hit ranges are 191.2–516.5 ms full and 178.6–347.3 ms
+lightweight; its median alone is insufficient to attribute the difference to linkage. All valid
+outliers remain. Separate serde CPU captures (four fresh-process hits per binary, user cycles at
+1999 Hz with DWARF stacks) retain hashing, archived structural/semantic verification, allocation and
+interpreter guest calls among the main costs. They confirm remaining work after compiler isolation;
+the instrumented samples are excluded from latency measurements and do not establish a total CPU
+reduction. Distribution/default routing, true cold preparation, peak memory and combined
+lifecycle qualification remain open in [frontend-boundary.md](designs/frontend-boundary.md).
+The default build still includes the compiler.
 
 ### Runtime generics evaluation
 

@@ -37,7 +37,7 @@ use meta::{McEntry, NativeLibEntry};
 
 // The three free functions the CLI reaches as `crate::pack::…`, the paths its branch criteria and
 // pack step already name them by.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub(crate) use read::is_package;
 pub(crate) use read::load_package;
 #[cfg(feature = "compiler")]

@@ -66,7 +66,7 @@ pub fn info_code(info: SignalInfo) -> i32 {
 
 /// The SEGV dump is installed and implemented by the pair: its handler reads the fault instruction
 /// and the fault address out of the architecture's own `ucontext_t`.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub use crate::os_arch::signal::install_segv_dump;
 
 // The long-established flags that survive `sigaction` on this kernel. There is no

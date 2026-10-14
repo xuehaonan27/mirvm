@@ -39,7 +39,8 @@ Relevant ownership boundaries:
 
 | Owner | Current responsibility |
 |---|---|
-| `src/cli/driver.rs` | Early bound-image lookup, layer preparation, rustc callback, program publication and compiler finalization |
+| `src/cli/driver.rs`, `src/cli/worker.rs` | Bound-image lookup, guest execution and compiler-worker handoff |
+| `src/cli/driver/compiler.rs` | Layer preparation, rustc callback, program publication and compiler finalization |
 | `src/runtime/`, `src/native/artifact/assembly.rs` | Compiler-independent product execution, guest stack/exit handling and materialization of owned assembly recipes |
 | `src/cli/base_image.rs`, `src/image/base.rs` | Canonical std construction in the user session, isolated preparation, persistent base validation |
 | `src/cli/cargo.rs`, `src/cargoless/schedule/args.rs` | Target dependency metadata with MIR, host build scripts/proc-macros, required mono diagnostics and assembly extraction |
@@ -103,7 +104,7 @@ compiler teardown without changing guest event semantics.
 |---|---|---|---|
 | Prebuilt base plus cheaper/lazier base consumption | Std lowering on first program; repeated owned-IR reconstruction | Compatible build/profile variants, installed-artifact lifetime, immutable ownership and address identity | Immutable consumption implemented; release delivery pending |
 | Single-session miss path with reusable std products | Separate empty-main compiler session, intermediate base write/read and duplicated query work | Deterministic std ownership, custom allocator/profile differences, publication and cross-program reuse | Implemented; compare complete cache states |
-| Runtime executable/library separated from compiler dependency | Loading rustc/LLVM on cache/package hits | Compiler-worker startup and artifact transfer on misses; extraction of mixed modules | Real runner prototype; ordinary CLI routing remains open |
+| Runtime executable/library separated from compiler dependency | Loading rustc/LLVM on cache/package hits | Compiler-worker startup and artifact transfer on misses; extraction of mixed modules | Optional ordinary CLI build; default routing remains compiler-linked |
 | Persistent generic semantic IR, specialized by MIRVM | Some repeated rustc metadata decoding and semantic-query work | New generic type/substitution/layout/const/vtable machinery and versioned dependencies | Larger research project; require evidence from edited real crates |
 | Custom rustc backend/plugin | A different artifact-emission integration point | Most frontend and semantic-query work remains; driver dependency may still load LLVM | Useful integration choice, not a demonstrated latency fix |
 | Independent frontend or source interpreter | Rustc implementation costs which the replacement actually avoids | Rust semantics, diagnostics, macros, const evaluation, type layout, ABI and std compatibility | Feasible scope must be stated; no current full-compatibility speedup demonstrated |
@@ -203,24 +204,34 @@ per-Engine state, execution and JIT. Diagnostics must complete before guest entr
 or diagnostic-bearing compilations must keep the current publication rules.
 
 The `compiler` Cargo feature separates rustc linkage and session-dependent producers from the
-library's runtime. It remains enabled by default and is required by the ordinary CLI. Input
-validation and assembly materialization are available without it. The
-[runtime-boundary probe](../../experiments/runtime-boundary/README.md) executes real packages and
-bound images with Cranelift, and its executing process maps contain neither rustc nor LLVM. A
-compiler worker can prepare a missing image before runtime revalidation. An alternative replaces the
-runtime process with the compiler worker on a miss, executing through the ordinary driver after
-compiler finalization. It avoids parent waiting and image reload, and preserves execution for
-warning-bearing sessions that cannot publish an image. Its guest process retains compiler-library
-mappings; hits remain compiler-independent. Measurements favor this fallback over prepare/reload
-on the small probes, without establishing representative-workload or ordinary-CLI routing.
+runtime and implies `cli`. The `cli` feature owns command routing, dependency resolution/fetching,
+build-script/proc-macro scheduling and reports. Building with `cli,cranelift` and no defaults keeps
+ordinary project/script orchestration while removing rustc linkage. Building with only `cranelift`
+also removes CLI dependencies. `compiler` remains enabled by default.
+
+The lightweight CLI executes valid packages and bound images directly. A miss replaces the process
+with the matching `mirvm-compiler` executable, selected by `MIRVM_COMPILER` or its sibling location.
+The worker uses the ordinary compiler driver and runs the guest after compiler finalization. Exec
+preserves PID, cwd and signal status; the guest retains compiler-library mappings on that miss.
+It avoids parent waiting and image reload, and preserves warning-bearing sessions that cannot
+publish images. Dependency compilation, base preparation and cache commands also enter the worker.
+
+A private, single-use request carries the exact compiler/guest arguments, diagnostic scope,
+prepare/pack/capture state, topologically ordered unit inputs and the Cargo runner's original guest
+environment/cwd. Native environment values and optional paths retain their bytes. A shared managed
+input lease survives exec through an inherited descriptor; the worker checks its file identity and
+restores close-on-exec before guest entry. It validates build/PID identity, consumes the request,
+attaches captured diagnostics and reuses normal artifact validation. Incompatible workers refuse
+compiler and guest work. The protocol carries no process-local pointers or compiler allocations.
+
 Native archive materialization separates byte validation/linking from compiler metadata discovery
 and Rust-symbol recovery. The latter supplies a retry callback only after a failed link; the common
-materializer and native lifecycle fixtures compile without rustc. Sysroot producer tests remain
-compiler-only while managed-input validation runs in both configurations. Dependency resolution,
-fetching, artifact producers and command reports follow the compiler feature; runtime tests retain
-the fixture producers they exercise. Runtime instance layouts and serialized formats remain common
-to both builds. The runtime library has its own warnings-denied lint and release-test gates. The
-narrow runner probe does not cover project orchestration or the complete lifecycle/capture contract.
+materializer and native lifecycle fixtures compile without rustc. Input validation is common;
+sysroot scheduling follows `cli` and session-dependent artifact producers follow `compiler`.
+Runtime tests retain the fixture producers they exercise. Instance layouts and serialized formats
+remain common across builds. All three feature configurations have warnings-denied lint gates;
+the library also has a runtime release-test gate. The
+[experiment](../../experiments/runtime-boundary/README.md) owns reproduction and qualification limits.
 
 A compiler worker's output cannot retain its process's helper pointers, native handles or `tcx`
 values. Use the existing owned identities, relocation recipes and per-instance restoration rules.
@@ -230,8 +241,7 @@ an explicit artifact identity: current `--vm-call` is an execution choice, not c
 
 ## 6. Bounded experiments and acceptance
 
-1. **Runtime isolation:** connect ordinary project/script dispatch to compiler-independent execution
-   of owned products. Select miss routing against in-process
+1. **Runtime isolation:** qualify compiler-independent ordinary CLI routing against in-process
    preparation: child startup, publication and revalidation can outweigh the hit-path saving.
    Preserve working directory/environment, compiler diagnostics that prevent publication, capture,
    signals and close. Measure representative package/image hits and misses, including transfer and

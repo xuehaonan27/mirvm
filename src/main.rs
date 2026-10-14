@@ -1,6 +1,6 @@
-// The bin must carry rustc_private + extern rustc_driver itself,
-// so std uniformly goes through the sysroot dynamic libraries (otherwise the link shape conflicts with lib).
-#![feature(rustc_private)]
+// Compiler-enabled binaries use the same dynamic standard library as rustc_driver.
+#![cfg_attr(feature = "compiler", feature(rustc_private))]
+#[cfg(feature = "compiler")]
 extern crate rustc_driver;
 
 fn main() -> std::process::ExitCode {

@@ -27,7 +27,7 @@ impl Control {
         }
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) const fn byte_len(self) -> usize {
         self.length_qwords as usize * 8
     }
@@ -43,7 +43,7 @@ impl Control {
         self.word().to_le_bytes()
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         let word = read_u64(bytes, 0).ok_or_else(|| WireError::truncated("control"))?;
         let reserved = (word >> 48) as u16;
@@ -140,7 +140,7 @@ impl PageHeader {
         Ok(())
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, PAGE_HEADER_BYTES, "page header")?;
         let control = Control::decode(bytes)?;
@@ -197,7 +197,7 @@ impl EngineContext {
         out
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, ENGINE_CONTEXT_BYTES, "EngineContext")?;
         let control = Control::decode(bytes)?;
@@ -285,7 +285,7 @@ impl ProducerEnd {
         Ok(())
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, PRODUCER_END_BYTES, "ProducerEnd")?;
         let control = Control::decode(bytes)?;
@@ -408,7 +408,7 @@ impl SessionEnd {
         Ok(())
     }
 
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, SESSION_END_BYTES, "SessionEnd")?;
         let control = Control::decode(bytes)?;

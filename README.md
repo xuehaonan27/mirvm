@@ -56,6 +56,14 @@ fn main() { /* ... */ }
 Use the release binary: a debug build distorts every timing result. The first build and run fill a
 large rustc and sysroot cache.
 
+An experimental compiler-independent CLI is available with
+`cargo build --release --locked --no-default-features --features cli,cranelift --bin mirvm`.
+Build `mirvm-compiler` with the default features first and keep it beside that binary, or select it
+with `MIRVM_COMPILER`. Both must come from the same source and pinned toolchain. Prepared-image and
+package hits run without loading rustc/LLVM; compilation misses replace the process with the worker.
+The default build still includes the compiler. Reproduction and measured limits are in the
+[runtime boundary experiment](experiments/runtime-boundary/README.md).
+
 ## Test
 
 ```bash

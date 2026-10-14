@@ -286,19 +286,22 @@ families! {
     // keyed by its IR arguments. The compile worker writes the order under the owner's path.
     Cache PACKAGE_HEAT    "package-heat"    keyed;
     // owners: cargoless::registry — crate and git sources, read through to `~/.cargo`; fetched, not derived.
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     Data  REGISTRY        "registry"        unit;
     // owners: sysroot — the MIR-rich std; keyed by the toolchain stat + build recipe.
     Data  SYSROOT         "sysroot-{host}"  unit;
     // owners: cli::frontmatter — materialized frontmatter projects; keyed by script path.
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     Build SCRIPTS         "scripts"         unit flag(Scripts);
     // owners: sysroot — `build_sysroot` staging; reused across rebuilds, so `--data` keeps it.
-    #[cfg(any(feature = "compiler", test))]
+    #[cfg(any(feature = "cli", test))]
     Build SYSROOT_BUILD   "sysroot-build"   unit;
     // owners: options, cli::frontmatter, cargoless::audit, cargoless::schedule, sysroot — the shared
     // target root of every track; rebuilt from the sources.
     Build TARGET          "target"          unit flag(Target);
+    // owners: cli::worker — private requests consumed by a replacement compiler process.
+    #[cfg(any(feature = "cli", test))]
+    Run   COMPILER_HANDOFF "compiler-handoff" unit;
     // owners: vm::native_instance — per-Engine copies of required native libraries (glibc keys by path).
     Run   RUNTIME_NATIVE  "runtime-native"  unit;
     // owners: vm::native_instance — private copies of self-produced objects while lowering opens them.
@@ -369,6 +372,35 @@ pub(crate) struct InputLease {
     _file: std::fs::File,
 }
 
+impl InputLease {
+    /// Keep the same open file description, and therefore its flock, alive through exec.
+    #[cfg(all(feature = "cli", not(feature = "compiler")))]
+    pub(crate) fn inherit(&self) -> std::io::Result<i32> {
+        crate::os::command::inherit_file(&self._file)
+    }
+
+    /// Adopt the descriptor carried by a private request from the process exec replaced.
+    ///
+    /// # Safety
+    /// `fd` must be an unowned inherited descriptor from that request, not a live Rust File.
+    #[cfg(feature = "cli")]
+    pub(crate) unsafe fn from_inherited(root: &Path, fd: i32) -> std::io::Result<Self> {
+        let file = unsafe { crate::os::command::take_inherited_file(fd)? };
+        let actual = crate::os::fs::FileIdentity::of(&file.metadata()?);
+        let expected =
+            crate::os::fs::FileIdentity::of(&std::fs::metadata(root.join(MANAGED_INPUTS_LOCK))?);
+        if !actual.same_object(&expected) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "input lease names another file",
+            ));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+const MANAGED_INPUTS_LOCK: &str = ".managed-inputs.lock";
+
 fn input_lock(root: &Path, name: &str, exclusive: bool) -> std::io::Result<InputLease> {
     std::fs::create_dir_all(root)?;
     let file = std::fs::OpenOptions::new()
@@ -382,10 +414,10 @@ fn input_lock(root: &Path, name: &str, exclusive: bool) -> std::io::Result<Input
 }
 
 pub(crate) fn input_lease(root: &Path, exclusive: bool) -> std::io::Result<InputLease> {
-    input_lock(root, ".managed-inputs.lock", exclusive)
+    input_lock(root, MANAGED_INPUTS_LOCK, exclusive)
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 pub(crate) fn input_writer(root: &Path) -> std::io::Result<InputLease> {
     input_lock(root, ".managed-publish.lock", true)
 }

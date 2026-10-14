@@ -24,7 +24,7 @@ struct Manifest {
 }
 
 #[derive(Serialize, Deserialize)]
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 struct Selection {
     freshness: String,
     generation: String,
@@ -220,7 +220,7 @@ fn load(root: &Path, store_root: &Path, id: &str, recipe: Option<&str>) -> io::R
     Ok(generation)
 }
 
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 pub(super) fn selected(
     root: &Path,
     store_root: &Path,
@@ -262,7 +262,7 @@ pub(super) fn reopen(
 }
 
 /// Copy the producer's complete lib tree; no hard links retain a mutable source inode.
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 pub(super) fn publish(
     root: &Path,
     store_root: &Path,

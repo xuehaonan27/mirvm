@@ -9,7 +9,7 @@
 use std::io::Write as _;
 
 /// Write an already-rendered block exactly as given: the renderer owns its newlines.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub fn text(text: impl std::fmt::Display) {
     write!(std::io::stdout().lock(), "{text}").expect("failed printing to stdout");
 }

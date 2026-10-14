@@ -22,21 +22,21 @@
 //! Dependency artifacts use `-Zno-codegen` (metadata-only): mirvm consumes only MIR, so
 //! object code is pure waste.
 
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use std::collections::BTreeMap;
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 use std::path::Path;
 use std::path::PathBuf;
 
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use crate::cargoless::driver::compile_plan;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use crate::cargoless::manifest::{OptLevel, PackageManifest, ProfileFlags};
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use crate::cargoless::schedule::Layout;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use crate::cargoless::vendor::VendorDir;
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 use crate::cargoless::{buildrs, resolve};
 
 pub(crate) mod managed;
@@ -189,9 +189,9 @@ crate::diag_codes! {
 /// `build.rs` bakes in the sysroot this binary was built against, and every consumer trusts only
 /// that one: a `rustc` on `PATH` may belong to another toolchain, and a proc-macro dylib's compiler
 /// version must match the interpreter session's exactly.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub(crate) mod toolchain {
-    #[cfg(feature = "compiler")]
+    #[cfg(feature = "cli")]
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -222,7 +222,7 @@ pub(crate) mod toolchain {
 }
 
 /// Location of the stamp file (the content key) inside the sysroot.
-#[cfg(any(feature = "compiler", test))]
+#[cfg(any(feature = "cli", test))]
 fn stamp_file(sysroot_dir: &Path) -> PathBuf {
     sysroot_dir
         .join("lib/rustlib")
@@ -237,7 +237,7 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// dependency fingerprint — has to name the same one: a base image lowered from one std and merged
 /// with a delta compiled against another puts two copies of the language runtime in a single module,
 /// which is exactly the shape `verify` refuses as two main panic boundaries.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub(crate) fn effective_dir() -> PathBuf {
     GENERATION
         .get()
@@ -255,7 +255,7 @@ pub(crate) fn effective_dir() -> PathBuf {
 ///
 /// Only the home's own sysroot is built here. A sysroot chosen with `--sysroot`/`MIRVM_SYSROOT` is
 /// the caller's to provide, and mirvm neither writes into it nor replaces it.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub fn ensure_sysroot() -> Result<PathBuf, Error> {
     if let Some(chosen) = crate::options::sysroot() {
         return select_path(chosen);
@@ -306,7 +306,7 @@ pub fn ensure_sysroot() -> Result<PathBuf, Error> {
 
 /// Stamp value of the sysroot in effect (reused in the base-image key); `None` when it is not
 /// built, or was not built by mirvm and so carries no stamp.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 pub(crate) fn current_stamp_value() -> Option<String> {
     if let Some(generation) = GENERATION.get() {
         return Some(crate::utils::content::digest_hex(&generation.id));
@@ -320,7 +320,7 @@ pub(crate) fn current_stamp_value() -> Option<String> {
 ///
 /// Hand-editing a rust-src leaf is outside the sentinel's protected surface. Removing the
 /// sysroot family forces reconstruction. An unreadable compiler or sentinel yields `None`.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn stamp_value() -> Option<String> {
     let mut key = rustc_stat()?;
     key.push('\n');
@@ -331,7 +331,7 @@ fn stamp_value() -> Option<String> {
 }
 
 /// Semantic build flags, independent of the producer's filesystem metadata.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn build_recipe() -> String {
     let p = sysroot_profile();
     let mut key = format!(
@@ -346,7 +346,7 @@ fn build_recipe() -> String {
 }
 
 /// rustc binary stat string (len + mtime_ns; `None` when absent).
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn rustc_stat() -> Option<String> {
     let md = std::fs::metadata(toolchain::rustc()).ok()?;
     if !md.is_file() {
@@ -364,7 +364,7 @@ fn rustc_stat() -> Option<String> {
 /// The sysroot build recipe (matches the distribution std: debug-assertions off,
 /// overflow-checks on). Full MIR comes from `-Zalways-encode-mir` in dep_rustc_args, not
 /// here.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn sysroot_profile() -> ProfileFlags {
     ProfileFlags {
         debug_assertions: false,
@@ -381,7 +381,7 @@ fn sysroot_profile() -> ProfileFlags {
 /// sources rather than from anything a user wrote: measured, the vendored `std` carries an
 /// `#[expect]` its own build does not fulfil, so an uncapped build prints a warning in the middle
 /// of whatever command was running, once per cold sysroot, about code the user never sees.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn sysroot_rustflags() -> Vec<String> {
     vec![
         "-Zforce-unstable-if-unmarked".to_string(),
@@ -400,7 +400,7 @@ fn sysroot_rustflags() -> Vec<String> {
 /// `None` when the sentinel cannot be read: the sysroot is then rebuilt, which fails loudly on the
 /// rust-src check. There is no separate report for an unreadable sentinel because nothing acts on
 /// one — the only two answers are "this content key" and "cannot say".
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn library_sentinel() -> Option<String> {
     let root = toolchain::std_source();
     let mut rows: Vec<String> = Vec::new();
@@ -428,7 +428,7 @@ fn library_sentinel() -> Option<String> {
 /// a stamp of the compiling toolchain (BUILD_ID + rustc binary len+mtime_ns). A toolchain
 /// swap changes the fingerprint and correctly invalidates the host-side staging cache that
 /// is otherwise reused across rebuilds.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn toolchain_stamp() -> String {
     match rustc_stat() {
         Some(stat) => format!("{}\n{}", crate::options::build::BUILD_ID, stat),
@@ -439,7 +439,7 @@ fn toolchain_stamp() -> String {
 }
 
 /// The four `[patch.crates-io]` entries (as in library/Cargo.toml): registry name -> local path.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn workspace_overrides(library: &Path) -> BTreeMap<String, PathBuf> {
     [
         "rustc-std-workspace-core",
@@ -463,7 +463,7 @@ fn workspace_overrides(library: &Path) -> BTreeMap<String, PathBuf> {
 ///   the root would make the pseudo-root missing from the lock a loud failure, and the
 ///   toolchain directory is not writable, so the pseudo-root is materialized in our own
 ///   staging.)
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(root_dir)?;
     let toml = format!(
@@ -492,7 +492,7 @@ fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> Result<(), Error>
 
 /// Do not rewrite identical content (stable mtimes are a precondition for fingerprints and
 /// incremental builds).
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     if std::fs::read(path).ok().is_none_or(|old| old != bytes) {
         std::fs::write(path, bytes)?;
@@ -503,7 +503,7 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// Full rebuild: pseudo-root -> resolve (supplied by VendorDir) -> compile_plan (using the
 /// toolchain as the compile base) -> write the stamp into tmp -> publish with an atomic
 /// rename.
-#[cfg(feature = "compiler")]
+#[cfg(feature = "cli")]
 fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
     let target = crate::options::build::HOST;
     let library = toolchain::std_source();
@@ -587,7 +587,7 @@ fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "compiler")]
+    #[cfg(feature = "cli")]
     fn tmpdir(tag: &str) -> PathBuf {
         let d =
             std::env::temp_dir().join(format!("mirvm-sysroot-test-{}-{}", tag, std::process::id()));
@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "compiler")]
+    #[cfg(feature = "cli")]
     fn pseudo_root_reparses_and_lock_gains_root_row() {
         let tmp = tmpdir("pseudo-root");
         let library = tmp.join("library");
@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "compiler")]
+    #[cfg(feature = "cli")]
     fn stamp_value_tracks_recipe_and_tree() {
         // This repo's toolchain ships rust-src, so the stamp must exist and contain the
         // recipe lines
