@@ -112,7 +112,8 @@ logical addresses, not host pointers. Every instantiation allocates independent 
 rebuilds native, GOT, entry and asm state. Its removal loses only an optimization. It cannot keep a
 partially restored image alive after a missing member or validation failure. A cache hit consumes its
 metadata into the instance used for verification and execution, so it need not instantiate twice.
-Reusable packages retain their metadata and check address obligations on each fresh instance.
+It validates every address directly without collecting obligations for a later instance. Reusable
+packages retain their metadata and address obligations and check them on each fresh instance.
 
 Frozen snapshot payloads decode through serde's byte-buffer channel. Their postcard bytes remain
 identical to the existing byte-sequence encoding; the change does not weaken domain, length or
@@ -124,6 +125,9 @@ structure/index construction, instance restoration plus semantic verification, a
 materialization. It starts after the file read and excludes command routing, dependency resolution,
 Engine startup and guest execution. The outer phase ledger and whole-process timings remain
 necessary when attributing cold-process latency; a cache miss does not emit a successful-load ledger.
+The nested `mirvm-image-instance` ledger separates instance restoration, semantic verification and
+lazy function-table initialization within `instantiate-verify`. Its intervals must not be added to
+the enclosing load ledger. A successful instance check can precede a later materialization failure.
 
 ## Immutable verification
 
@@ -135,6 +139,12 @@ and borrows its immutable file allocation. The loader checks the allocation's ac
 copies only when necessary; it never maps a mutable inode. Archive-only relative pointers keep large
 address expressions and foreign signatures from enlarging every operand, instruction and block.
 Runtime IR keeps its existing layout.
+
+An archived module uses one immutable verification context for its module counts and address owner.
+Each function still checks its frame, operands, references and control flow; main panic boundary and
+catcher counts are accumulated during that same walk. Owned and archived bodies compile the same
+verification rules. No serialized flag, checksum or previously loaded instance substitutes for these
+checks.
 
 Verification evidence is an ownership-bearing internal type, never a disk boolean. It binds the
 module tables, function bytes and instantiated address context. Only validated transformations may

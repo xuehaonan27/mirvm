@@ -23,6 +23,9 @@ The whole-process clock starts immediately before process creation and stops aft
 covering command routing, image loading, execution and shutdown. Result-file setup, closing and
 persistence are outside this clock; setup and spawn latency are recorded separately.
 The image ledger begins after reading the file; its intervals do not sum to complete startup latency.
+When present, the nested `mirvm-image-instance` ledger is saved separately as `instance`: it splits
+restoration, semantic verification and lazy function-table initialization inside the image ledger's
+`instantiate-verify`. These intervals are already included in the outer time, not additional costs.
 The first stdout byte is recorded separately and is not necessarily a useful completed result:
 flate prints an input description before compression. Profiles are separate diagnostic captures.
 `protocol.json` records executable and input hashes; raw stdout/stderr accompany every measurement.

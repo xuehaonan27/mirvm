@@ -66,8 +66,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     metadata/native sections; large native payloads can duplicate resident bytes.
   - Bound execution images avoid stack reconstruction and managed sysroots avoid full payload
     hashing. Their remaining costs are archive I/O/validation, instance materialization and process
-    setup; external inputs still require full content hashing. Runtime-only hits also load compiler
-    libraries: evaluate that loading boundary separately from archive pruning. The timing ledger includes base
+    setup; external inputs still require full content hashing. Qualify default runtime/compiler
+    routing under D7 separately from archive pruning. The timing ledger includes base
     preparation inside `frontend` and excludes work before driver entry, so use whole-process wall
     measurements alongside its phases.
   - Rayon's hot functions can execute many interpreted calls before the single compiler worker

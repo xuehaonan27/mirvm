@@ -161,6 +161,37 @@ fn executable_requires_exactly_one_main_panic_boundary() {
 }
 
 #[test]
+fn archived_and_owned_main_role_counts_agree_without_decoding() {
+    use crate::vm::archive::{bytes::Bytes, functions};
+    for boundaries in 0..=2 {
+        for catchers in 0..=2 {
+            let mut artifact = executable_with_roles(
+                &vec![(CallRole::MainPanicBoundary, UnwindAction::Continue); boundaries],
+                &vec![(Builtin::CatchUnwind, UnwindAction::Continue); catchers],
+            );
+            artifact.module.ensure_function_names();
+            let bytes = Bytes::new(functions::encode(&artifact.module.funcs).unwrap().to_vec());
+            let archive = functions::Functions::load(bytes.clone(), 0..bytes.len()).unwrap();
+            let owned = artifact.verify().map_err(|error| error.to_string());
+            for collect in [false, true] {
+                let addresses = std::cell::RefCell::new(AddressUses::default());
+                let archived = archived::module(
+                    &artifact.module,
+                    &artifact.instance,
+                    &archive,
+                    collect.then_some(&addresses),
+                )
+                .map_err(|error| error.to_string());
+                assert_eq!(
+                    owned, archived,
+                    "boundaries={boundaries} catchers={catchers}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn main_panic_boundary_requires_continue_unwind() {
     let invalid = executable_with_roles(
         &[(CallRole::MainPanicBoundary, UnwindAction::Cleanup(0))],

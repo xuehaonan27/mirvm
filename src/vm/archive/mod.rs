@@ -27,11 +27,12 @@ impl Image {
         functions: functions::Functions,
     ) -> Result<Self, Error> {
         let (module, instance) = meta.instantiate()?;
-        let addresses = Self::verify(&module, &instance, &functions)?;
+        let addresses = std::cell::RefCell::new(crate::vm::verify::AddressUses::default());
+        crate::vm::verify::archived::module(&module, &instance, &functions, Some(&addresses))?;
         Ok(Self {
             meta,
             functions: Arc::new(functions),
-            addresses,
+            addresses: addresses.into_inner(),
         })
     }
 
@@ -40,46 +41,22 @@ impl Image {
         meta: meta::ModuleMeta,
         functions: functions::Functions,
     ) -> Result<VerifiedArtifact, Error> {
+        let start = crate::options::timing().then(std::time::Instant::now);
         let (mut module, instance) = meta.into_instance()?;
-        Self::verify(&module, &instance, &functions)?;
+        let restored = start.map(|_| std::time::Instant::now());
+        // This instance consumes the proof directly; it has no later address rebinding.
+        crate::vm::verify::archived::module(&module, &instance, &functions, None)?;
+        let verified = start.map(|_| std::time::Instant::now());
         module.funcs = crate::vm::ir::FuncTable::from_archive(Arc::new(functions));
-        Ok(VerifiedArtifact { module, instance })
-    }
-
-    fn verify(
-        module: &Module,
-        instance: &Instance,
-        functions: &functions::Functions,
-    ) -> Result<crate::vm::verify::AddressUses, Error> {
-        if module.function_names.len() != functions.len() {
-            return Err(crate::fail!(
-                Engine,
-                "function name table and archive lengths differ"
+        if let Some(((start, restored), verified)) = start.zip(restored).zip(verified) {
+            crate::diag::instrument(format_args!(
+                "mirvm-image-instance: restore={:.3}ms verification={:.3}ms functions={:.3}ms",
+                (restored - start).as_secs_f64() * 1e3,
+                (verified - restored).as_secs_f64() * 1e3,
+                verified.elapsed().as_secs_f64() * 1e3,
             ));
         }
-        crate::vm::verify::module_header_with_count(module, instance, functions.len())?;
-        let addresses = std::cell::RefCell::new(crate::vm::verify::AddressUses::default());
-        let (mut boundaries, mut catchers) = (0, 0);
-        for (index, body) in functions.bodies().enumerate() {
-            if body.name.as_ref() != module.function_names[index].as_ref() {
-                return Err(crate::fail!(
-                    Engine,
-                    format!("function {index} name differs from module table")
-                ));
-            }
-            let (b, c) = crate::vm::verify::archived::function(
-                module,
-                instance,
-                functions.len(),
-                index,
-                body,
-                &addresses,
-            )?;
-            boundaries += b;
-            catchers += c;
-        }
-        crate::vm::verify::main_role_counts(module, boundaries, catchers)?;
-        Ok(addresses.into_inner())
+        Ok(VerifiedArtifact { module, instance })
     }
 
     pub(crate) fn native_paths(&self) -> &[Box<str>] {

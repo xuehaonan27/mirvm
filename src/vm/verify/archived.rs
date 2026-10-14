@@ -61,18 +61,40 @@ impl Operand {
     }
 }
 
-pub(crate) fn function(
+pub(crate) fn module(
     module: &super::Module,
     instance: &super::Instance,
-    funcs: usize,
-    index: usize,
-    body: &FuncBody,
-    addresses: &std::cell::RefCell<super::AddressUses>,
-) -> Result<(usize, usize), crate::error::Error> {
-    let mut context =
-        super::Verifier::new_with_count(module, instance, super::Prefix::default(), &[], funcs)?;
-    context.address_uses = Some(addresses);
-    function_in(context, index, body)
+    functions: &crate::vm::archive::functions::Functions,
+    addresses: Option<&std::cell::RefCell<super::AddressUses>>,
+) -> Result<(), crate::error::Error> {
+    if module.function_names.len() != functions.len() {
+        return Err(crate::fail!(
+            Engine,
+            "function name table and archive lengths differ"
+        ));
+    }
+    let mut context = super::Verifier::new_with_count(
+        module,
+        instance,
+        super::Prefix::default(),
+        &[],
+        functions.len(),
+    )?;
+    context.run_header()?;
+    context.address_uses = addresses;
+    let (mut boundaries, mut catchers) = (0, 0);
+    for (index, body) in functions.bodies().enumerate() {
+        if body.name.as_ref() != module.function_names[index].as_ref() {
+            return Err(crate::fail!(
+                Engine,
+                format!("function {index} name differs from module table")
+            ));
+        }
+        let (b, c) = function_in(context, index, body)?;
+        boundaries += b;
+        catchers += c;
+    }
+    super::main_role_counts(module, boundaries, catchers)
 }
 
 pub(super) fn function_in(
@@ -81,25 +103,9 @@ pub(super) fn function_in(
     body: &FuncBody,
 ) -> Result<(usize, usize), crate::error::Error> {
     let verifier = Verifier(context);
-    verifier.body(body).map_err(|error| {
-        crate::fail!(Engine, format!("function {index} `{}`: {error}", body.name))
-    })?;
-    Ok(body
-        .code()
-        .iter()
-        .fold((0, 0), |(boundaries, catchers), block| {
-            match body.term(block) {
-                Terminator::Call {
-                    role: CallRole::MainPanicBoundary,
-                    ..
-                } => (boundaries + 1, catchers),
-                Terminator::CallBuiltin {
-                    role: BuiltinCallRole::MainPanicCatcher,
-                    ..
-                } => (boundaries, catchers + 1),
-                _ => (boundaries, catchers),
-            }
-        }))
+    verifier
+        .body(body)
+        .map_err(|error| crate::fail!(Engine, format!("function {index} `{}`: {error}", body.name)))
 }
 
 fn ffi_index(index: u32) -> usize {

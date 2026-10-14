@@ -54,6 +54,10 @@ for case, path, guest, wanted in cases:
             assert len(detail) == 1, log
             row.update(case=case, mode=mode, repeat=repeat,
                        image=dict((k, float(v)) for k, v in re.findall(r"([\w-]+)=([\d.]+)ms", detail[0])))
+            instance = [line for line in log.splitlines() if line.startswith("mirvm-image-instance:")]
+            assert len(instance) <= 1, log
+            if instance:
+                row["instance"] = dict((k, float(v)) for k, v in re.findall(r"([\w-]+)=([\d.]+)ms", instance[0]))
             rows.append(row)
             (root / "measurements.json").write_text(json.dumps(rows, indent=2) + "\n")
             print(json.dumps(row), flush=True)
@@ -62,7 +66,8 @@ for case, path, guest, wanted in cases:
     input_sha256={case: hashlib.sha256(path.read_bytes()).hexdigest() for case, path, _, _ in cases},
     scope="Ten alternating rounds over five workloads, two binaries with independent prepared-image "
           "generations. All samples hit bound images and match native stdout. OS caches and heat orders "
-          "retained, persistent JIT cache disabled. No overlapping builds, checks or CPU captures. "
+          "retained, persistent JIT cache disabled. No overlapping experiment builds, checks or CPU "
+          "captures; shared-host load is uncontrolled. "
           "Whole time brackets process creation through exit, including command routing, loading, execution "
           "and shutdown; result-file setup/close/writes are outside that clock. Capture setup and spawn "
           "latencies are reported separately. Per-child CPU usage "

@@ -63,15 +63,7 @@ pub(crate) fn generic_template(body: &FuncBody, calls: usize) -> Result<(), crat
         calls,
     )?
     .body(body)
-}
-
-/// Verify module-level references before function archive validation or context rebinding.
-pub(crate) fn module_header_with_count(
-    module: &Module,
-    instance: &Instance,
-    funcs: usize,
-) -> Result<(), crate::error::Error> {
-    Verifier::new_with_count(module, instance, Prefix::default(), &[], funcs)?.run_header()
+    .map(|_| ())
 }
 
 pub(crate) fn main_role_counts(
@@ -94,24 +86,6 @@ pub(crate) fn main_role_counts(
         ));
     }
     Ok(())
-}
-
-pub(crate) fn body_main_role_counts(body: &FuncBody) -> (usize, usize) {
-    body.code()
-        .iter()
-        .fold((0, 0), |(boundaries, catchers), block| {
-            match body.term(block) {
-                Terminator::Call {
-                    role: CallRole::MainPanicBoundary,
-                    ..
-                } => (boundaries + 1, catchers),
-                Terminator::CallBuiltin {
-                    role: BuiltinCallRole::MainPanicCatcher,
-                    ..
-                } => (boundaries, catchers + 1),
-                _ => (boundaries, catchers),
-            }
-        })
 }
 
 #[derive(Clone, Copy)]
@@ -245,10 +219,9 @@ impl<'a> Verifier<'a> {
             match part {
                 FuncPart::Owned(bodies) => {
                     for body in bodies {
-                        self.body(body).map_err(|e| {
+                        let (boundaries, catchers) = self.body(body).map_err(|e| {
                             crate::fail!(Engine, format!("function {index} `{}`: {e}", body.name))
                         })?;
-                        let (boundaries, catchers) = body_main_role_counts(body);
                         main_boundaries += boundaries;
                         main_catchers += catchers;
                         index += 1;

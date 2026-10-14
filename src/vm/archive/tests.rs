@@ -416,3 +416,53 @@ fn bound_image_restores_all_frozen_domains_independently() {
         }
     }
 }
+
+#[test]
+fn single_use_address_checks_match_reusable_images_and_rebinding() {
+    use crate::os_arch::addrspace::DELTA_FIXED_ADDR;
+    use crate::vm::frozen::FrozenSnapshot;
+
+    for address in [0, 17, DELTA_FIXED_ADDR as u64] {
+        let mut module = module();
+        module.frozen =
+            Some(FrozenSnapshot::from_home_and_bytes(DELTA_FIXED_ADDR, vec![1; 8]).unwrap());
+        let mut bodies = Vec::new();
+        module.funcs.drain_into(&mut bodies);
+        bodies[0].blocks[0].stmts.push(Stmt::Assign {
+            dst: ScalarPlace::Slot(Slot {
+                off: 0,
+                width: Width::W64,
+            }),
+            rv: Rvalue::Use(Operand::AddrImm(LinkAddr(address))),
+        });
+        module.funcs = bodies.into();
+        let mut instance = Instance::materialize_dynamic(&module).unwrap();
+        instance.load_map.require_mapped();
+        let owned =
+            crate::vm::verify::module(&module, &instance).map_err(|error| error.to_string());
+        let single = load_once(&module, &instance)
+            .map(|artifact| assert_eq!(artifact.module().funcs.decoded_count(), 0))
+            .map_err(|error| error.to_string());
+        let reusable = load(&module, &instance);
+        assert_eq!(owned, single, "address={address:#x}");
+        assert_eq!(
+            owned,
+            reusable
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            "address={address:#x}"
+        );
+        if let Ok(image) = reusable {
+            image.instantiate().unwrap();
+            let mut unrelated = Instance::default();
+            unrelated.load_map.require_mapped();
+            assert!(
+                image
+                    .addresses
+                    .check(&module, &unrelated, module.funcs.len())
+                    .is_err()
+            );
+        }
+    }
+}

@@ -221,72 +221,70 @@ paused; the local equivalent is authoritative.
 
 ### Preparation and startup
 
-Successful bound-image hits expose six sequential load intervals with `MIRVM_TIMING`;
+Successful bound-image hits expose six sequential load intervals with `MIRVM_TIMING` and a nested
+instance ledger separating restoration, semantic verification and lazy function-table initialization.
 [startup-cache-design.md](designs/startup-cache-design.md#bound-execution-images) owns their scope.
-A seven-run serde baseline attributes medians of 2.593 ms to payload integrity, 5.111 ms to inputs,
-2.515 ms to metadata, 3.604 ms to archive structure/indexing, 5.451 ms to instance restoration and
-semantic verification, and 0.221 ms to assembly. File reading, command routing and guest execution
-are outside these intervals. A CPU capture also identifies registry JSON parsing before image lookup.
+File reading, command routing and guest execution remain outside these load intervals.
 
-Registry index lines decode their ordinary schema directly into resolver fields. Object-only
-visitors reject positional arrays; unknown fields and unusual shapes use the value parser to retain
-its JSON validation, tolerant field rules and diagnostics. Frozen snapshots use bulk byte decoding
-with byte-identical postcard encodings and a sequence fallback for JSON. Neither change skips
-freshness, integrity, address-domain or bytecode checks.
+Archive verification builds one immutable module context, checks every body, and accumulates main
+panic boundary/catcher counts during that walk. One-shot images validate addresses without retaining
+obligations for a later instance; reusable images retain those obligations and recheck each new
+address context. Structural byte checks, input freshness, integrity and semantic rules remain intact.
 
-An isolated allocation/decoder probe uses one real 277,240-byte serde_json registry index and 32
-alternating pairs in one process. Decoded values agree. Allocation/reallocation calls fall from
-38,182 to 8,749 and cumulative requested bytes from 2,953,252 to 1,062,193; parse-and-drop medians
-fall from 1.849 to 0.758 ms. Allocation counting is disabled during timing. Synthetic snapshot
-buffers covering every byte value retain one allocation: 16 KiB decoding falls from 8.533 to
-0.170 microseconds and 1 MiB from 557.063 to 17.882 microseconds. These isolate decoder work;
-real image metadata has other costs and decoder savings alone do not establish complete startup payback.
+A validation comparison uses 100 native-matching fresh-process image hits: ten alternating rounds
+on five inputs, both with compiler-independent CLI builds and independent prepared generations.
+OS caches and heat orders remain; persistent JIT caching is disabled. Whole time brackets process
+creation through exit, excluding result-file setup/close/persistence. Experiment builds, checks and
+CPU captures do not overlap timing; shared-host load is uncontrolled. Medians are reference / candidate:
 
-Pinned compiler facts are embedded at build time. Host syscall captures identify two queries before
-the driver ledger on prepared dependency scripts: `rustc -vV` for MSRV and `rustc --print cfg` for
-platform matching/build-script environments. Eight serde captures per binary show three executable
-starts in the reference (MIRVM and both queries), and one in the candidate. The ordinary command
-still links the compiler; this removes its query children, not that linkage. The full compiler
-version, target and baseline cfg output participate in the build identity shared with the independent
-runtime. [D15](designs/d15-cargoless-design.md#1-contract) owns the selection contract.
+| Workload | Restore + verify + function table | Complete process |
+|---|---:|---:|
+| Minimal output | 3.991 / 3.694 ms | 41.0 / 36.0 ms |
+| fib(32) through main | 3.892 / 3.489 ms | 51.6 / 50.7 ms |
+| Many generic instances | 4.405 / 3.644 ms | 148.8 / 150.9 ms |
+| serde JSON | 5.492 / 5.162 ms | 75.7 / 72.9 ms |
+| flate2, 2 KiB | 5.689 / 5.455 ms | 162.9 / 164.2 ms |
 
-The complete-process comparison isolates embedded compiler facts against a reference that already
-has both decoder optimizations. It contains 100 native-matching samples: ten alternating rounds on
-five inputs, with independent prepared image generations per binary. Every sample hits its image;
-OS caches and heat orders remain, persistent JIT caching is disabled, and no builds, lints or CPU
-captures overlap latency measurement. The process clock brackets creation through observed exit;
-result-file setup, closing and persistence are outside it. Setup and spawn latencies are separate
-fields. Child CPU usage includes waited descendants; the table's combined user/system CPU is
-measured separately from elapsed time. Medians are reference / candidate.
+The enclosing instance phase has lower medians, but its paired differences favor the candidate in
+only five of ten flate pairs (median paired difference is -0.044 ms). The other four cases favor it
+in 7, 10, 7 and 7 pairs. This is a bounded local reduction, not a uniform end-to-end improvement;
+whole-run changes exceed the local savings and cannot all be attributed to verification. All valid
+outliers remain. Candidate serde medians split into 0.584 ms restoration, 4.044 ms verification and
+0.503 ms function-table initialization. Individual medians need not sum to the enclosing median.
 
-| Workload | Complete process | First stdout byte | User + system CPU |
-|---|---:|---:|---:|
-| Empty main | 48.4 / 45.4 ms | 43.2 / 40.4 ms | 33.3 / 32.7 ms |
-| fib(32) through main | 63.0 / 61.7 ms | 55.1 / 53.6 ms | 48.5 / 50.5 ms |
-| Many generic instances | 187.1 / 169.6 ms | 64.1 / 51.0 ms | 151.4 / 151.4 ms |
-| serde JSON | 123.0 / 105.7 ms | 103.8 / 87.3 ms | 87.5 / 69.7 ms |
-| flate2, 2 KiB | 196.6 / 187.8 ms | 88.2 / 79.4 ms | 229.0 / 215.8 ms |
+Separate serde CPU captures cover four fresh-process hits per binary, with 798 / 785 samples.
+Semantic verification accounts for 10.90% / 9.49% of recorded user cycles; the reference's sampled
+address-obligation tree work is absent on the candidate's one-shot path. These small instrumented
+captures identify work removed and remaining; they do not establish a precise total CPU reduction.
+Structural archive validation, hashing, operand/frame checks and interpretation remain visible.
 
-Serde and flate improve in this comparison, with lower CPU consumption and the query processes
-removed. The three plain-file controls do not need these queries; their median changes do not
-establish a benefit from embedded facts. All valid outliers remain, including a reference many-instance
-run lasting 9,047.7 ms with 150.5 ms combined CPU and 140.0 ms in the driver ledger; a candidate
-run of the same workload lasts 1,529.8 ms with 154.7 ms CPU and a 143.5 ms driver ledger. Capture
-setup and spawn are each below 0.6 ms in these two samples. The long wait outside recorded driver
-phases remains unattributed. Bounded syscall captures drain pipes in memory and write traces after
-exit; they do not reproduce the multi-second wait, so they cannot close that issue. Independent
-profiles over four fresh serde processes per binary contain 1,389 / 1,081 events; compiler-query
-children account for 11.56% / 0% of recorded user cycles. Those profile percentages are diagnostic,
-not a causal estimate of total elapsed savings.
-
-Focused validation passes 120 cargoless checks, including exact agreement with both pinned compiler
-queries, the registry decoder differential and build-script cfg behavior. An isolated build-script
-probe changes cfg, target and compiler commit independently and checks build-identity invalidation;
-compiler/runtime features retain the same identity, and failed queries fail the build. The independent
-runtime runner executes the generic package's normal and fork cases with native stdout agreement.
-Release builds, all-target/all-feature Clippy for the compiler build, formatting and repository
-boundaries pass. No full runtime suite was run for this timing comparison. The
+Focused verification passes 13 verifier and 11 archive checks, including invalid references, lazy
+ownership, panic role-count agreement and address rejection/rebinding. Sixteen native-matching guest
+invocations cover return/panic, generics, callbacks/concurrency and separate fork, each through
+interpreter/strict JIT and image hit/compiler miss. Native archive symbol recovery, byte-identical
+assembly content keys, independent package execution and embedded constructor/finalizer/close
+contracts also pass. Compiler, lightweight CLI and pure runtime builds pass Linux warnings-denied
+all-target Clippy; the pure runtime also passes it on macOS. No full runtime suite was run. The
 [preparation harness](../experiments/preparation/README.md) owns reproduction.
+
+Registry index lines decode their schema directly into resolver fields. Object-only visitors reject
+positional arrays; unusual shapes use the value parser to retain tolerant field rules and diagnostics.
+Frozen snapshots use bulk byte decoding with unchanged postcard bytes and a sequence fallback for
+JSON. An isolated 277,240-byte index probe records 38,182 → 8,749 allocation/reallocation calls and
+1.849 → 0.758 ms parse/drop medians over 32 alternating pairs with counting disabled during timing.
+The 1 MiB synthetic snapshot probe falls from 557.063 to 17.882 microseconds with one allocation.
+These isolate decoder costs and do not establish complete startup payback.
+
+Pinned compiler version, target and host cfg facts are embedded in the build identity. Prepared
+script syscall captures show one executable start instead of MIRVM plus two rustc query children;
+[D15](designs/d15-cargoless-design.md#1-contract) owns the selection contract. Bound-image hits in the
+optional lightweight CLI also avoid compiler linkage, evaluated separately below.
+
+Multi-second waits outside the driver ledger remain unattributed: observed complete runs of 9,047.7
+and 1,529.8 ms have only 140.0 and 143.5 ms in that ledger, with capture setup/spawn each below
+0.6 ms. Bounded syscall captures drain pipes in memory and persist traces after exit but do not
+reproduce the long wait. Those observations remain open under D7 rather than being attributed to
+archive validation or guest execution.
 
 ### Frontend research
 
@@ -876,8 +874,9 @@ product covering all of Rust.
    `src/out.rs` is the one writer of product output, and the `MIRVM_*_DEBUG` instruments are the other
    raw channel. Every fallible signature names `crate::error::Error`, and the four source checks that
    keep a second spelling out live in `repo-quality` ([output-grammar.md](designs/output-grammar.md)).
-6. **Product capability.** Direct archive semantic verification needs a new offset-based read-only
-   representation before a format freeze can be reviewed. OS-level sandboxing is deliberately paused.
+6. **Product capability.** Artifact-format freeze needs a compatibility and corruption policy under
+   D4; direct immutable archive verification alone does not establish that promise. OS-level
+   sandboxing is deliberately paused.
    Remaining stage boundaries and acceptance criteria are in `open-issues.md`.
 7. **Harness budget.** Touch the harness only when a current RED cannot be reproduced or judged, and
    never harden it for a hypothetical future.

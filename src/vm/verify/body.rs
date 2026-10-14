@@ -4,7 +4,7 @@
 use super::*;
 
 impl<'a> Verifier<'a> {
-    pub(super) fn body(&self, body: &FuncBody) -> Result<(), crate::error::Error> {
+    pub(super) fn body(&self, body: &FuncBody) -> Result<(usize, usize), crate::error::Error> {
         if body.frame_align == 0 || !body.frame_align.is_power_of_two() {
             return Err(crate::fail!(
                 Engine,
@@ -32,15 +32,28 @@ impl<'a> Verifier<'a> {
         if let Some(off) = body.caller_loc_off.as_ref() {
             self.span(body, *off, 8, "track_caller slot")?;
         }
+        let (mut boundaries, mut catchers) = (0, 0);
         for (bb, block) in body.code().iter().enumerate() {
             for (si, stmt) in block.stmts.iter().enumerate() {
                 self.stmt(body, stmt)
                     .map_err(|e| crate::fail!(Engine, format!("bb{bb} statement {si}: {e}")))?;
             }
-            self.term(body, body.term(block))
+            let term = body.term(block);
+            self.term(body, term)
                 .map_err(|e| crate::fail!(Engine, format!("bb{bb} terminator: {e}")))?;
+            match term {
+                Terminator::Call {
+                    role: CallRole::MainPanicBoundary,
+                    ..
+                } => boundaries += 1,
+                Terminator::CallBuiltin {
+                    role: BuiltinCallRole::MainPanicCatcher,
+                    ..
+                } => catchers += 1,
+                _ => {}
+            }
         }
-        Ok(())
+        Ok((boundaries, catchers))
     }
 
     pub(super) fn param_abi(
