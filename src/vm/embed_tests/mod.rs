@@ -87,6 +87,13 @@ unsafe extern "C" fn first_external_native_signal(_signum: i32) {
     SIGNAL_FIRST_EXTERNAL_HANDLER_RAN.fetch_add(1, Ordering::SeqCst);
 }
 
+fn first_external_native_signal_addr() -> usize {
+    // One function may have different addresses across codegen units. Both the installed
+    // action and its observer must use the same captured address.
+    static ADDRESS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *ADDRESS.get_or_init(|| first_external_native_signal as *const () as usize)
+}
+
 unsafe extern "C-unwind" fn read_current_errno() -> u64 {
     unsafe { *crate::os::process::errno_location() as u64 }
 }
@@ -569,7 +576,7 @@ fn first_external_native_signal_module() -> Module {
                     width: Width::W32,
                 },
                 Operand::Imm {
-                    bits: first_external_native_signal as *const () as usize as u64,
+                    bits: first_external_native_signal_addr() as u64,
                     width: Width::W64,
                 },
             ],

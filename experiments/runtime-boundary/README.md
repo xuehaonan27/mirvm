@@ -11,6 +11,11 @@ and content keys. Lowering's diagnostic vocabulary is available without compiler
 failures retain their existing classifications. Compiler-session collection is feature-gated while
 input-manifest validation remains available to the runtime.
 
+Native archive metadata discovery and Rust-symbol recovery live in `archive/compiler.rs`. The
+common archive materializer validates bytes and links objects without rustc types; a caller can
+retry a failed link with compiler-resolved symbols. Native archive and Engine lifecycle fixtures
+therefore run in both builds, including the same interposition bridge and loader.
+
 ## Protocol
 
 `runtime-runner package PATH [ARGS...]` runs a self-contained package. `runtime-runner image WORKER
@@ -95,9 +100,10 @@ Results and binary hashes remain outside git; conclusions belong to
 The compiler-independent feature is an experimental build boundary. Base/dependency layers and program-delta preparation are compiler-only. Other unused producer/tool
 helpers still compile and produce dead-code warnings in that configuration; it does not yet meet the
 warnings-denied runtime-library gate. The default compiler build keeps its existing lint gate.
-The no-compiler unit-test inventory still fails to compile where native archive fixtures use the
-compiler-coupled materializer and sysroot producer tests use compiler-only helpers. These tests must
-retain coverage when their fixture builders are separated.
+`repo-quality` also runs `cargo test --release --no-default-features --features cranelift --lib`.
+This executes the runtime/native/telemetry/managed-input test inventory without compiler crates;
+only tests of compiler-owned sysroot production remain behind the compiler feature. The ordinary
+compiler test and lint gates remain in place. This library gate does not qualify CLI routing.
 
 The probe requires an explicit argument recipe and a prepared sysroot. Ordinary project/script
 dispatch and build-script/proc-macro scheduling still need a production handoff contract, including

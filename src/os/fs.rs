@@ -185,6 +185,10 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        self.device == other.device && self.inode == other.inode
+    }
+
     pub(crate) fn of(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
 

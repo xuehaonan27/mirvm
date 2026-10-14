@@ -29,6 +29,13 @@ The lock identities live outside removable families. Existing directory replacem
 for a live generation because it removes the previous reader's paths. Old generations remain until
 an explicit data-family purge; cache-only collection cannot remove compiler inputs.
 
+Copy and content-validation consistency compare complete sorted namespaces, directory device/inode
+identities and every file's full revision before and after copying or hashing. Directory revision
+timestamps alone do not invalidate those operations: filesystems may report a delayed timestamp
+update after child creation. Changed names, replaced directories and changed file identities still
+reject the snapshot. The receipt fast path continues to compare complete metadata; a changed
+directory revision requires full content validation before a receipt refresh.
+
 A discardable local receipt records member and directory identities. Normal selection checks the
 small manifest and these metadata observations. A missing or changed receipt requires a complete
 content check; equal bytes refresh the receipt, unequal bytes reject the generation. A receipt is

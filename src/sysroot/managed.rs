@@ -93,6 +93,24 @@ fn receipt_bytes(observations: &[Observation]) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Each scan enumerates the full namespace and file revisions. Directory revision timestamps
+/// can be updated lazily by a filesystem after creating children; their inode identity and the
+/// enumerated names detect replacement or namespace changes without treating that update as a
+/// changed compiler input. Receipt hits still compare complete observations; this comparison
+/// is used only around a full copy or content-hash validation.
+fn snapshot_unchanged(before: &[Observation], after: &[Observation]) -> bool {
+    before.len() == after.len()
+        && before.iter().zip(after).all(|(left, right)| {
+            left.path == right.path
+                && left.directory == right.directory
+                && if left.directory {
+                    left.identity.same_object(&right.identity)
+                } else {
+                    left.identity == right.identity
+                }
+        })
+}
+
 impl Generation {
     pub fn input(&self, path: &Path) -> Option<Input> {
         let relative = path.strip_prefix(&self.path).ok()?;
@@ -145,10 +163,11 @@ impl Generation {
                 return Err(invalid("managed input content changed"));
             }
         }
-        if before != observe(&self.path)? {
+        let after = observe(&self.path)?;
+        if !snapshot_unchanged(&before, &after) {
             return Err(invalid("managed input changed during validation"));
         }
-        let _ = crate::store::publish_bytes(&self.receipt, &receipt_bytes(&before)?);
+        let _ = crate::store::publish_bytes(&self.receipt, &receipt_bytes(&after)?);
         Ok(())
     }
 }
@@ -275,7 +294,7 @@ pub(super) fn publish(
                 });
             }
         }
-        if before != observe(&source.join("lib"))? {
+        if !snapshot_unchanged(&before, &observe(&source.join("lib"))?) {
             return Err(invalid("sysroot changed during generation publication"));
         }
         members.sort_unstable_by(|a, b| a.path.cmp(&b.path));
@@ -358,6 +377,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn copy_observations_check_namespace_and_file_revisions() {
+        let f = Fixture::new("copy-observations");
+        let root = f.0.join("source/lib");
+        let before = observe(&root).unwrap();
+        let extra = root.join("extra");
+        std::fs::write(&extra, b"new").unwrap();
+        assert!(!snapshot_unchanged(&before, &observe(&root).unwrap()));
+        std::fs::remove_file(&extra).unwrap();
+        assert!(snapshot_unchanged(&before, &observe(&root).unwrap()));
+
+        let old = root.join("target");
+        let moved = f.0.join("moved");
+        std::fs::rename(&old, &moved).unwrap();
+        std::fs::create_dir(&old).unwrap();
+        std::fs::rename(moved.join("core.rmeta"), old.join("core.rmeta")).unwrap();
+        assert!(!snapshot_unchanged(&before, &observe(&root).unwrap()));
+
+        let before = observe(&root).unwrap();
+        let file = old.join("core.rmeta");
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::fs::write(&file, b"other").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(file)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert!(!snapshot_unchanged(&before, &observe(&root).unwrap()));
     }
 
     #[test]

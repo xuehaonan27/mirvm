@@ -28,14 +28,16 @@ fn guest_signal_accepts_a_first_seen_external_native_handler() {
         let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         if !matches!(installed, Ok(RunOutcome::Returned(value)) if value.lo == baseline.handler() as u64)
-            || current.handler() != first_external_native_signal as *const () as usize
+            || current.handler() != first_external_native_signal_addr()
             || external_ran != 1
             || baseline_ran != 0
             || !restored.same_disposition(&baseline)
         {
             failures.push(format!(
-                "{mode}: install={installed:?}, current={:#x}, external={external_ran}, baseline={baseline_ran}, restored={}",
+                "{mode}: install={installed:?}, baseline_handler={:#x}, current={:#x}, expected={:#x}, external={external_ran}, baseline={baseline_ran}, restored={}",
+                baseline.handler(),
                 current.handler(),
+                first_external_native_signal_addr(),
                 restored.same_disposition(&baseline),
             ));
         }

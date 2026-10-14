@@ -577,6 +577,7 @@ fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "compiler")]
     fn tmpdir(tag: &str) -> PathBuf {
         let d =
             std::env::temp_dir().join(format!("mirvm-sysroot-test-{}-{}", tag, std::process::id()));
@@ -600,6 +601,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "compiler")]
     fn pseudo_root_reparses_and_lock_gains_root_row() {
         let tmp = tmpdir("pseudo-root");
         let library = tmp.join("library");
@@ -654,6 +656,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "compiler")]
     fn stamp_value_tracks_recipe_and_tree() {
         // This repo's toolchain ships rust-src, so the stamp must exist and contain the
         // recipe lines

@@ -2,7 +2,10 @@
 
 use super::*;
 
-extern "C" fn second_test_restorer() {}
+extern "C" fn second_test_restorer() {
+    // Distinct code prevents release optimizers from merging both restorer addresses.
+    std::hint::black_box(1usize);
+}
 
 // The flags this test drives are the Linux kernel's: it is the one that clears a probing bit
 // on the way back out, and the only one whose action carries a restorer to change.
@@ -20,6 +23,10 @@ fn kernel_normalization_rejects_restorer_and_supported_flag_changes() {
     assert!(accepted.is_kernel_normalization_of(&requested));
 
     let mut wrong_restorer = accepted;
+    assert!(!std::ptr::fn_addr_eq(
+        first_test_restorer as extern "C" fn(),
+        second_test_restorer as extern "C" fn(),
+    ));
     wrong_restorer.set_restorer(second_test_restorer);
     assert!(!wrong_restorer.is_kernel_normalization_of(&requested));
 

@@ -213,8 +213,12 @@ compiler finalization. It avoids parent waiting and image reload, and preserves 
 warning-bearing sessions that cannot publish an image. Its guest process retains compiler-library
 mappings; hits remain compiler-independent. Measurements favor this fallback over prepare/reload
 on the small probes, without establishing representative-workload or ordinary-CLI routing.
-Unused producer/tool helpers and the no-compiler test inventory still need separation. The narrow
-probe does not cover project orchestration or the complete lifecycle/capture contract.
+Native archive materialization separates byte validation/linking from compiler metadata discovery
+and Rust-symbol recovery. The latter supplies a retry callback only after a failed link; the common
+materializer and native lifecycle fixtures compile without rustc. Sysroot producer tests remain
+compiler-only while managed-input validation runs in both configurations. The runtime library has
+its own release-test gate. Unused producer/tool helpers still prevent a clean no-compiler lint gate;
+the narrow runner probe does not cover project orchestration or the complete lifecycle/capture contract.
 
 A compiler worker's output cannot retain its process's helper pointers, native handles or `tcx`
 values. Use the existing owned identities, relocation recipes and per-instance restoration rules.

@@ -6,7 +6,7 @@
 //! [`asmtext`] is their assembler source vocabulary. The flags a platform's linker needs are
 //! `crate::os::linker`'s, and the formats themselves are [`crate::native::object`]'s.
 
-#[cfg(feature = "compiler")]
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod archive;
 pub(crate) mod asmtext;
 pub(crate) mod assembly;

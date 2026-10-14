@@ -488,11 +488,21 @@ mod tests {
             );
             names.push(name);
             if let Some(flag) = family.flag {
-                assert!(
-                    flags.iter().all(|f| f != &flag),
-                    "`{flag:?}` names two families"
-                );
-                flags.push(flag);
+                if flags.contains(&flag) {
+                    let expected = match flag {
+                        FamilyFlag::Ir => [IR.path(), EXECUTION.path()],
+                        FamilyFlag::Units => [UNITS.path(), GENERIC_TEMPLATES.path()],
+                        _ => panic!("`{flag:?}` unexpectedly names multiple families"),
+                    };
+                    let members: Vec<_> = FAMILIES
+                        .iter()
+                        .filter(|family| family.flag == Some(flag))
+                        .map(Family::path)
+                        .collect();
+                    assert_eq!(members, expected);
+                } else {
+                    flags.push(flag);
+                }
             }
         }
         // Both sysroot families are spelled for every target, and neither is left unclaimed.

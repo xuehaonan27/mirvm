@@ -166,6 +166,16 @@ fn unreferenced_archive_symbol_is_dlsym_visible() {
     );
 
     let so = materialize_in(&archive, &temp.path().join("cache")).unwrap();
+    let cached = materialize_for_target_in(
+        &archive,
+        &temp.path().join("cache"),
+        crate::options::build::HOST,
+        Path::new("cc"),
+        &[],
+        |_| panic!("a cached native image must not request symbol recovery"),
+    )
+    .unwrap();
+    assert_eq!(cached, so);
     let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
     let handle = crate::os::dll::open_with_flags(
         &c_so,
@@ -371,7 +381,7 @@ fn cache_key_separates_target_triples() {
         "x86_64-unknown-linux-gnu",
         Path::new("cc"),
         &[],
-        None,
+        |_| Ok(None),
     )
     .unwrap();
     let second = materialize_for_target_in(
@@ -380,7 +390,7 @@ fn cache_key_separates_target_triples() {
         "aarch64-unknown-linux-gnu",
         Path::new("cc"),
         &[],
-        None,
+        |_| Ok(None),
     )
     .unwrap();
     assert_ne!(first, second, "target triple must participate in cache key");
@@ -399,8 +409,32 @@ fn unresolved_archive_dependency_never_becomes_a_usable_image() {
     // cannot -- its linker is told to leave undefined references for the loader -- is caught one
     // step later, and that is the guarantee worth stating: an archive with an open dependency never
     // becomes an image the engine can use.
-    match materialize_in(&archive, &temp.path().join("cache")) {
+    let cache = temp.path().join("cache");
+    let mut rescue_called = false;
+    let result = materialize_for_target_in(
+        &archive,
+        &cache,
+        crate::options::build::HOST,
+        Path::new("cc"),
+        &[],
+        |failed| {
+            rescue_called = true;
+            assert_eq!(failed.archive, archive);
+            assert_eq!(failed.cache_dir, cache);
+            assert_eq!(failed.target, crate::options::build::HOST);
+            assert_eq!(failed.cc, Path::new("cc"));
+            assert_eq!(failed.archive_bytes, std::fs::read(&archive).unwrap());
+            assert!(!failed.cc_identity.is_empty());
+            assert!(failed.extra_flags.is_empty());
+            assert!(failed.link_flags.contains("<archive>"));
+            assert!(!failed.interpose.is_empty());
+            assert!(failed.native_runtime_bridge.is_file());
+            Ok(None)
+        },
+    );
+    match result {
         Err(error) => {
+            assert!(rescue_called);
             // The conversion refusal covers every reason a member cannot join a shared library
             // (non-PIC and an open dependency alike); the linker's own output is the detail.
             assert_eq!(error.code(), Some("archive.unsupported"));
@@ -472,7 +506,9 @@ fn cc_is_text_file_busy(error: &crate::native::artifact::archive::Error) -> bool
 /// failure panics with its own diagnosis.
 fn materialize_with_written_cc(dir: &Path, archive: &Path, cc: &Path) -> PathBuf {
     for _ in 0..2000 {
-        match materialize_for_target_in(archive, dir, "x86_64-unknown-linux-gnu", cc, &[], None) {
+        match materialize_for_target_in(archive, dir, "x86_64-unknown-linux-gnu", cc, &[], |_| {
+            Ok(None)
+        }) {
             Ok(path) => return path,
             Err(error) if cc_is_text_file_busy(&error) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -569,7 +605,7 @@ fn cache_key_separates_extra_libs() {
         "x86_64-unknown-linux-gnu",
         Path::new("cc"),
         none,
-        None,
+        |_| Ok(None),
     )
     .unwrap();
     let second = materialize_for_target_in(
@@ -578,7 +614,7 @@ fn cache_key_separates_extra_libs() {
         "x86_64-unknown-linux-gnu",
         Path::new("cc"),
         with_m,
-        None,
+        |_| Ok(None),
     )
     .unwrap();
     assert_ne!(
@@ -609,7 +645,7 @@ fn duplicate_symbols_across_archives_are_rejected_as_link_order_ambiguity() {
         "x86_64-unknown-linux-gnu",
         Path::new("cc"),
         &[],
-        None,
+        |_| Ok(None),
     )
     .unwrap();
     let second = materialize_for_target_in(
@@ -618,7 +654,7 @@ fn duplicate_symbols_across_archives_are_rejected_as_link_order_ambiguity() {
         "x86_64-unknown-linux-gnu",
         Path::new("cc"),
         &[],
-        None,
+        |_| Ok(None),
     )
     .unwrap();
 
@@ -664,7 +700,7 @@ fn duplicate_weak_symbols_follow_native_link_semantics() {
             "x86_64-unknown-linux-gnu",
             Path::new("cc"),
             &[],
-            None,
+            |_| Ok(None),
         )
         .unwrap()
     };

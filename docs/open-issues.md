@@ -241,11 +241,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   - Explain the prepared-base setup regression with separate measurements of canonical-symbol
     lookup and first-program native materialization; a cold-build gain does not establish a gain
     when the base is already present.
-  - Close the compiler-independent runtime's lint/test boundary and connect ordinary project/script
+  - Close the compiler-independent runtime's lint boundary and connect ordinary project/script
     dispatch to it. Qualify exec-on-miss routing against in-process preparation on representative
     workloads, including project compile/guest environment transitions, capture and the complete
-    lifecycle. Separate native archive fixture builders and sysroot producer tests so no-compiler
-    test coverage compiles without weakening the compiler build's gates.
+    lifecycle. Separate remaining unused producer/reporting surfaces from the runtime build without
+    weakening the compiler build's gates.
   - Record the reasons functions enter the guest closure and evaluate smaller/lazy products while
     retaining runtime roots, indirect targets, pointer identity and deterministic ownership.
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a

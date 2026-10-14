@@ -122,76 +122,125 @@ unsafe extern "C-unwind" fn unwind_through_boundary(_args: *const u64, _ret: *mu
     panic!("trace boundary unwind probe");
 }
 
-/// The trace domain's boundary is the one place the pinned register is installed
-/// and the one place it is restored. A body that reads the pin
-/// proves the install; reading the *host's* register before and after a call
-/// proves the restore, on the normal path and on the unwinding path alike --
-/// the latter is why the boundary carries an LSDA instead of being a plain
-/// save/call/restore sequence.
+/// Observe the caller's reserved register immediately after the inner boundary returns or
+/// unwinds. Rust may reuse a callee-saved register between statements, so two reads around a
+/// Rust `catch_unwind` do not establish the ABI value at the boundary itself.
+fn define_restore_probe(compiler: &mut Compiler<'_>, enter: u64, recorder: u64) -> u64 {
+    use cranelift_codegen::ir::{
+        BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
+    };
+    let mut signature = compiler.module.make_signature();
+    signature.params.extend([AbiParam::new(types::I64); 2]);
+    let id = compiler
+        .module
+        .declare_function("mirvm_test_restore_pinned", Linkage::Local, &signature)
+        .unwrap();
+    let mut context = compiler.module.make_context();
+    context.func.signature = signature;
+    {
+        let mut b = FunctionBuilder::new(&mut context.func, &mut compiler.fbc);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let arguments = b.block_params(entry)[0];
+        let result = b.block_params(entry)[1];
+        let body = b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), arguments, 0);
+        let boundary = b.ins().iconst(types::I64, enter as i64);
+        let recorder = b.ins().iconst(types::I64, recorder as i64);
+        let mut inner_signature = compiler.module.make_signature();
+        inner_signature
+            .params
+            .extend([AbiParam::new(types::I64); 4]);
+        let signature = b.func.import_signature(inner_signature);
+        let normal = b.create_block();
+        let unwind = b.create_block();
+        b.append_block_param(unwind, types::I64);
+        let normal_call = BlockCall::new(
+            normal,
+            std::iter::empty::<BlockArg>(),
+            &mut b.func.dfg.value_lists,
+        );
+        let unwind_call = b.func.dfg.block_call(unwind, &[BlockArg::TryCallExn(0)]);
+        let table = b.func.dfg.exception_tables.push(ExceptionTableData::new(
+            signature,
+            normal_call,
+            [ExceptionTableItem::Tag(
+                ExceptionTag::with_number(0).unwrap(),
+                unwind_call,
+            )],
+        ));
+        b.ins()
+            .try_call_indirect(boundary, &[recorder, body, arguments, result], table);
+        b.switch_to_block(normal);
+        let restored = b.ins().get_pinned_reg(types::I64);
+        b.ins().store(MemFlagsData::trusted(), restored, result, 8);
+        b.ins().return_(&[]);
+        b.switch_to_block(unwind);
+        let exception = b.block_params(unwind)[0];
+        let restored = b.ins().get_pinned_reg(types::I64);
+        b.ins().store(MemFlagsData::trusted(), restored, result, 8);
+        let resume = compiler
+            .module
+            .declare_func_in_func(compiler.unwind_resume, b.func);
+        b.ins().call(resume, &[exception]);
+        b.ins().trap(TrapCode::user(1).unwrap());
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    compiler.module.define_function(id, &mut context).unwrap();
+    let unwind = context
+        .compiled_code()
+        .unwrap()
+        .create_unwind_info(compiler.module.isa())
+        .unwrap()
+        .unwrap();
+    let lsda = build_lsda(&collect_call_sites(&context));
+    compiler.pending_unwind.push((id, unwind, Some(lsda)));
+    compiler.module.clear_context(&mut context);
+    compiler.module.finalize_definitions().unwrap();
+    compiler.register_pending_eh_frames();
+    compiler.module.get_finalized_function(id) as u64
+}
+
 #[test]
 fn trace_entry_pins_the_recorder_and_restores_it_even_when_it_unwinds() {
-    const PINNED: u64 = 0x5052_4f44_5543_4552;
+    const CALLER: u64 = 0x4341_4c4c_4552;
+    const RECORDER: u64 = 0x5052_4f44_5543_4552;
     let shared = Shared::new(ir::Module {
         funcs: vec![body("domain_body", Terminator::Return)].into(),
         ..ir::Module::default()
     });
     let mut compiler = test_compiler(&shared, CodeDomain::Trace);
     let enter = shared.jit.trace_enter.load(Ordering::Acquire);
-    assert_ne!(enter, 0, "the trace domain published no boundary entry");
-
-    let probe = define_pin_probe(&mut compiler);
-    type Packed = extern "C" fn(*const u64, *mut u64);
-    let read_pin: Packed = unsafe { std::mem::transmute(probe as usize) };
-
-    let mut ret = [0u64; 2];
-    // Read the host's own register first: everything below must leave it
-    // exactly like this.
-    let mut host = [0u64; 2];
-    read_pin(std::ptr::null(), host.as_mut_ptr());
-    let host_value = std::hint::black_box(host[0]);
-    assert_ne!(
-        host_value, PINNED,
-        "the host already held the probe value, so this test proves nothing"
-    );
-
-    // Called through the boundary, the probe sees the recorder the boundary
-    // installed. It only reads, so the host's own register survives.
-    unsafe { crate::vm::jit::call_trace_body(enter, PINNED as *mut _, probe, &[], &mut ret) };
+    assert_ne!(enter, 0);
+    let read_pin = define_pin_probe(&mut compiler);
+    let observe = define_restore_probe(&mut compiler, enter, RECORDER);
+    let mut result = [0; 2];
+    unsafe {
+        crate::vm::jit::call_trace_body(enter, CALLER as *mut _, observe, &[read_pin], &mut result);
+    }
     assert_eq!(
-        ret[0], PINNED,
-        "the boundary did not pin the recorder register before the call"
+        result,
+        [RECORDER, CALLER],
+        "install and normal-path restore"
     );
 
-    unsafe { crate::vm::jit::call_trace_body(enter, PINNED as *mut _, probe, &[], &mut ret) };
-    read_pin(std::ptr::null(), host.as_mut_ptr());
-    assert_eq!(
-        std::hint::black_box(host[0]),
-        host_value,
-        "the normal path did not restore the host's register"
-    );
-
+    result = [0; 2];
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         crate::vm::jit::call_trace_body(
             enter,
-            PINNED as *mut _,
-            unwind_through_boundary as *const u8 as u64,
-            &[],
-            &mut ret,
+            CALLER as *mut _,
+            observe,
+            &[unwind_through_boundary as *const u8 as u64],
+            &mut result,
         )
     }));
-    assert!(
-        caught.is_err(),
-        "a panic raised inside a trace body did not reach the host"
-    );
-    read_pin(std::ptr::null(), host.as_mut_ptr());
-    let after_unwind = std::hint::black_box(host[0]);
-    assert_ne!(
-        after_unwind, PINNED,
-        "the unwinding path left the recorder pinned in the host's register"
-    );
+    assert!(caught.is_err(), "the guest unwind must reach the host");
     assert_eq!(
-        after_unwind, host_value,
-        "the unwinding path did not restore the host's register"
+        result[1], CALLER,
+        "unwind-path restore before the caller resumes"
     );
 }
 

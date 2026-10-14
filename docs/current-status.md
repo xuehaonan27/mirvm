@@ -286,7 +286,7 @@ compiler/runtime features retain the same identity, and failed queries fail the 
 runtime runner executes the generic package's normal and fork cases with native stdout agreement.
 Release builds, all-target/all-feature Clippy for the compiler build, formatting and repository
 boundaries pass. The no-compiler release build still reports existing unused producer-code warnings;
-its full lint/test boundary remains open. No full runtime suite was run. The
+its lint boundary remains open. No full runtime suite was run for this timing comparison. The
 [preparation harness](../experiments/preparation/README.md) owns reproduction.
 
 ### Frontend research
@@ -416,10 +416,34 @@ return/panic classification. The latter two also run through a compiler miss wit
 disabled. The generic artifact is prepared with sharing enabled and executed without the exporter
 flag. Native stdout and exit status agree.
 
-Release builds and all-target/all-feature Clippy with warnings denied pass. The compiler-independent
-library still emits unused-producer/tool warnings; its test inventory does not compile because
-native archive fixture builders and sysroot producer tests depend on the compiler feature. This is
-not a clean standalone lint/test gate. Ordinary project scheduling, compile/guest environment
+Native archive materialization now has a compiler-independent byte/link layer and a compiler-only
+metadata/symbol-recovery layer. Runtime unit tests use the same native fixture producer, preserving
+native interposition and lifecycle coverage. The release runtime inventory has 376 passing checks
+and one existing ignored check, established by a full batch and focused reruns after failures were
+fixed. The final managed-input check passes with the eight-check sysroot subset. Compiler-build
+validation passes 33 native checks, ten sysroot checks and the trace boundary check. `repo-quality`
+includes the release runtime library tests in addition to the compiler build's existing gates.
+
+A C-archive/Rust-callback fixture forces the real compiler symbol-recovery path in reference and
+candidate binaries. Both packages match native output, and emitted trampoline assembly and its
+content-addressed filenames are byte-identical. The candidate package also runs in the independent
+runtime. The existing package embedding fixture, linked to the no-compiler library, passes concurrent
+instance creation, constructors/finalizers, native and assembly callbacks, explicit close, stale
+callback rejection and instance-address isolation. Compiler/runtime build identities agree and the
+runtime executable's dynamic dependencies contain neither rustc nor LLVM.
+
+The release checks use one captured native-handler address across codegen units and distinct restorer
+code, avoiding function-pointer duplication/merging assumptions. The trace ABI check observes the
+reserved register in a compiled caller immediately after normal return and at its unwind landing
+pad, rather than comparing values across unrelated Rust statements. Store flag checks allow the two
+declared multi-family purge groups. Managed input copy/full-hash validation compares complete names,
+directory inode identities and file revisions; delayed directory timestamps cannot falsely reject
+an unchanged snapshot. Receipt hits still compare full metadata and content checks remain mandatory
+on a mismatch.
+
+Release builds and all-target/all-feature Clippy with warnings denied pass for the compiler build.
+The compiler-independent library still emits unused-producer/tool warnings and does not yet meet a
+warnings-denied lint gate. Ordinary project scheduling, compile/guest environment
 transitions, full lifecycle/capture qualification and representative workload measurements remain
 open in [frontend-boundary.md](designs/frontend-boundary.md). Default CLI routing is unchanged.
 
