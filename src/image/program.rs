@@ -13,16 +13,24 @@
 //! frozen.rs); missing required .so is a miss (self-heal rather than runtime error).
 //! `MIRVM_NO_IR_CACHE=1` bypasses the cache entirely.
 
+#[cfg(feature = "compiler")]
 use std::collections::HashMap;
+#[cfg(feature = "compiler")]
 use std::path::PathBuf;
 
+#[cfg(feature = "compiler")]
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "compiler")]
 use crate::depinfo::InputManifest;
+#[cfg(feature = "compiler")]
 use crate::image::manifest;
+#[cfg(feature = "compiler")]
 use crate::vm::instance::Instance;
+#[cfg(feature = "compiler")]
 use crate::vm::ir;
 
+#[cfg(feature = "compiler")]
 #[derive(Serialize, Deserialize)]
 struct Header {
     build_id: String,
@@ -35,10 +43,12 @@ struct Header {
     base_key: Option<String>,
 }
 
+#[cfg(feature = "compiler")]
 fn disabled() -> bool {
     crate::options::no_ir_cache()
 }
 
+#[cfg(feature = "compiler")]
 fn entry_path(rustc_args: &[String]) -> PathBuf {
     crate::store::IR
         .dir()
@@ -72,6 +82,7 @@ pub(crate) fn heat(rustc_args: &[String]) -> crate::vm::jit::Heat {
 /// base key exact equality (S4: delta embeds base absolutes — FuncId offsets / base addresses — a
 /// base replacement or presence change makes a mismatched load globally wrong; None side must also
 /// match exactly, a no-base session must not consume a base delta).
+#[cfg(feature = "compiler")]
 fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>) -> bool {
     crate::store::entry::is_current_generation(&header.build_id)
         && header.args == rustc_args
@@ -81,6 +92,7 @@ fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>
 /// Hot-path lookup. The returned module and instance: the frozen area is restored to a fixed base,
 /// asm_stub_addrs are stale addresses from serialization, the caller **must** rematerialize and
 /// overwrite via asm_sites before executing.
+#[cfg(feature = "compiler")]
 pub fn lookup(
     rustc_args: &[String],
     stack: &crate::image::ImageStack,
@@ -137,6 +149,7 @@ pub fn lookup(
 /// Mark the fragments and frozen chunks one L2 entry names, for collection. The entry is
 /// `[Header][manifest]`, so the marker skips exactly what the loader skips, and an entry from another
 /// build marks nothing.
+#[cfg(feature = "compiler")]
 pub(crate) fn mark_live(
     path: &std::path::Path,
     fragments: &mut std::collections::HashSet<[u8; 32]>,
@@ -162,6 +175,7 @@ pub(crate) fn mark_live(
 
 /// The lowering fingerprint a delta above this stack was built with: the base's, because every
 /// absolute the delta embeds is laid out against it.
+#[cfg(feature = "compiler")]
 fn lowering_fp(stack: &crate::image::ImageStack) -> (bool, bool, bool) {
     stack
         .base_image()
@@ -171,6 +185,7 @@ fn lowering_fp(stack: &crate::image::ImageStack) -> (bool, bool, bool) {
 
 /// Publish the program delta before guest execution. Its input manifest also identifies the
 /// self-contained execution image, independently of whether this optional symbolic delta is stored.
+#[cfg(feature = "compiler")]
 pub fn store(
     rustc_args: &[String],
     inputs: &InputManifest,
@@ -308,7 +323,7 @@ pub fn store(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 mod tests {
     #[test]
     fn base_key_must_match_exactly_including_absence() {

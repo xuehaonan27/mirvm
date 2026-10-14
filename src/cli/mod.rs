@@ -67,6 +67,17 @@ pub fn prepare_runtime_image(args: Vec<String>) -> ExitCode {
     run_driver(args, Vec::new(), false, None, false, false, None)
 }
 
+/// Execute an exact compiler argument vector after a runtime process hands off a cache miss.
+/// The driver finishes compiler diagnostics before guest entry, including sessions whose
+/// diagnostics prevent cache publication. Guest arguments are not compiler argument key material.
+pub fn run_runtime_image(args: Vec<String>, guest_args: Vec<String>) -> ExitCode {
+    if let Err(error) = validate_parallel_frontend_arg() {
+        return crate::error::Error::from(error).report();
+    }
+    crate::diag::enter(crate::diag::Component::Run);
+    run_driver(args, guest_args, false, None, false, false, None)
+}
+
 pub(crate) fn compiler_session_guard() -> std::sync::MutexGuard<'static, ()> {
     COMPILER_SESSION
         .lock()

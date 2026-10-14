@@ -207,8 +207,12 @@ library's runtime. It remains enabled by default and is required by the ordinary
 validation and assembly materialization are available without it. The
 [runtime-boundary probe](../../experiments/runtime-boundary/README.md) executes real packages and
 bound images with Cranelift, and its executing process maps contain neither rustc nor LLVM. A
-compiler worker prepares a missing image through the ordinary driver before the runtime revalidates
-it. These are concrete build and artifact boundaries, not a selected ordinary-CLI process policy.
+compiler worker can prepare a missing image before runtime revalidation. An alternative replaces the
+runtime process with the compiler worker on a miss, executing through the ordinary driver after
+compiler finalization. It avoids parent waiting and image reload, and preserves execution for
+warning-bearing sessions that cannot publish an image. Its guest process retains compiler-library
+mappings; hits remain compiler-independent. Measurements favor this fallback over prepare/reload
+on the small probes, without establishing representative-workload or ordinary-CLI routing.
 Unused producer/tool helpers and the no-compiler test inventory still need separation. The narrow
 probe does not cover project orchestration or the complete lifecycle/capture contract.
 

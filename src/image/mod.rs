@@ -18,15 +18,22 @@
 //! engine IR). Each is a keyed file in the store; [`crate::store::entry`] owns the mechanism they
 //! share.
 
+#[cfg(feature = "compiler")]
 pub(crate) mod base;
+#[cfg(feature = "compiler")]
 pub(crate) mod collect;
+#[cfg(feature = "compiler")]
 pub(crate) mod deps;
 pub(crate) mod execution;
+#[cfg(feature = "compiler")]
 pub(crate) mod manifest;
 pub(crate) mod program;
+#[cfg(feature = "compiler")]
 pub(crate) mod units;
 
+#[cfg(feature = "compiler")]
 use crate::vm::instance::Instance;
+#[cfg(feature = "compiler")]
 use crate::vm::ir::{FuncId, LinkAddr, Module, TlsId};
 
 /// Why a persisted image layer could not be produced.
@@ -68,6 +75,7 @@ crate::diag_codes! {
 }
 
 /// A loaded layer, ready for a program session to use.
+#[cfg(feature = "compiler")]
 pub struct BaseImage {
     pub module: Module,
     /// The layer's own loaded instance: its frozen mapping and address tables.
@@ -85,6 +93,7 @@ pub struct BaseImage {
     pub unit: Option<u32>,
 }
 
+#[cfg(feature = "compiler")]
 impl BaseImage {
     /// The fn-entry links this layer owns, which a module loaded above it may reference.
     pub fn entry_links(&self) -> impl Iterator<Item = LinkAddr> + '_ {
@@ -93,6 +102,7 @@ impl BaseImage {
 }
 
 /// The base image plus a chain of dependency images.
+#[cfg(feature = "compiler")]
 pub struct ImageStack {
     images: Vec<BaseImage>,
     /// Union lookups (sym -> absolute id/address; image id domains are disjoint, so the union is unambiguous)
@@ -112,6 +122,7 @@ pub struct ImageStack {
     entry_links: Vec<LinkAddr>,
 }
 
+#[cfg(feature = "compiler")]
 impl ImageStack {
     pub fn empty() -> Self {
         ImageStack {

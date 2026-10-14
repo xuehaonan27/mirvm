@@ -242,10 +242,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     lookup and first-program native materialization; a cold-build gain does not establish a gain
     when the base is already present.
   - Close the compiler-independent runtime's lint/test boundary and connect ordinary project/script
-    dispatch to it. Select miss routing against in-process preparation, including child startup,
-    image publication and revalidation. Preserve child cwd/environment, diagnostic-bearing sessions,
-    capture and lifecycle contracts; qualify hit/miss latency on representative workloads before
-    default routing.
+    dispatch to it. Qualify exec-on-miss routing against in-process preparation on representative
+    workloads, including project compile/guest environment transitions, capture and the complete
+    lifecycle. Separate native archive fixture builders and sysroot producer tests so no-compiler
+    test coverage compiles without weakening the compiler build's gates.
   - Record the reasons functions enter the guest closure and evaluate smaller/lazy products while
     retaining runtime roots, indirect targets, pointer identity and deterministic ownership.
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a

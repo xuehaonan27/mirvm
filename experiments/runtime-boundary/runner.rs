@@ -4,6 +4,7 @@
 #[cfg(feature = "compiler")]
 extern crate rustc_driver;
 
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 
 fn run() -> Result<i32, Box<dyn std::error::Error>> {
@@ -24,7 +25,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>();
             Ok(unsafe { mirvm::runtime::run_package(Path::new(&path), &guest)? })
         }
-        Some("image") => {
+        Some(mode @ ("image" | "image-exec")) => {
             let worker = args.next().ok_or("missing compiler worker path")?;
             let recipe = args.next().ok_or("missing compiler arguments JSON path")?;
             let compiler_args: Vec<String> = serde_json::from_slice(&std::fs::read(&recipe)?)?;
@@ -32,7 +33,17 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             if let Some(code) = unsafe { mirvm::runtime::run_image(&compiler_args, &guest)? } {
                 return Ok(code);
             }
-            let status = std::process::Command::new(worker).arg(&recipe).status()?;
+            if mode == "image-exec" {
+                // Replacement retains the caller's PID, cwd, environment and signal exit status.
+                // This miss executes in the compiler process after its session has finished.
+                return Err(std::process::Command::new(worker)
+                    .arg("run")
+                    .arg(&recipe)
+                    .args(&guest)
+                    .exec()
+                    .into());
+            }
+            let status = std::process::Command::new(worker).arg("prepare").arg(&recipe).status()?;
             if !status.success() {
                 return Ok(status.code().unwrap_or(70));
             }
@@ -40,7 +51,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 .ok_or_else(|| "compiler worker did not publish a current execution image".into())
         }
         _ => Err(
-            "usage: runtime-runner package PATH [ARGS...] | image WORKER RECIPE GUEST_ARGV..."
+            "usage: runtime-runner package PATH [ARGS...] | image[-exec] WORKER RECIPE GUEST_ARGV..."
                 .into(),
         ),
     }

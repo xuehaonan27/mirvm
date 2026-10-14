@@ -299,51 +299,59 @@ The default CLI links `librustc_driver`. Building the library without its defaul
 and with `cranelift` produces a real artifact runner with no rustc/LLVM dependency. Both its dynamic
 dependency list and mappings captured during guest execution confirm the absence. It uses the
 ordinary package/bound-image readers, input validation, assembly materialization, JIT and shared
-guest stack/exit implementation. The compiler-linked reference runner uses the same protocol and
-source/build identity. The ordinary `mirvm run` command is a third control.
+guest stack/exit implementation. Compiler-only base/dependency layers and program-delta preparation
+are excluded from that build. The compiler-linked reference runner uses the same protocol and
+source/build identity. Ordinary `mirvm run` is a separate control.
 
-On a miss the independent runner starts a compiler worker, which uses the normal prepare driver,
-finishes diagnostics and publishes the existing bound-image format. The parent reopens and
-validates that image before guest entry. Source edits rebuild; a compile error produces no guest
-stdout. A missing or invalid artifact cannot be treated as successful worker output. The protocol
-currently requires complete compiler arguments and a prepared sysroot, rather than ordinary
-project/script dispatch. Reproduction is in the
-[experiment README](../experiments/runtime-boundary/README.md).
+Two miss routes use the existing compiler driver and artifact contract. Prepare/reload starts a
+worker, waits for diagnostics and publication, then reopens and validates its image before guest
+entry. Exec replaces the runtime with the worker and executes in that process after compiler
+finalization. Exec avoids parent waiting and image reload but retains rustc/LLVM mappings for that
+run, confirmed during guest execution. Hits remain compiler-independent. Warning-bearing sessions
+cannot publish an image: prepare/reload reports that absence without entering the guest; exec emits
+the same diagnostics as the direct driver and executes normally, without caching those sessions.
+The explicit recipe still requires complete compiler arguments and a prepared sysroot. Reproduction
+is in the [experiment README](../experiments/runtime-boundary/README.md).
 
-The final matrix contains 90 native-matching fresh-process measurements: two workloads, three paths,
-three executables and five alternating rounds. OS caches remain populated and persistent JIT caching
-is disabled. Hits cannot launch a worker; misses remove only that probe's bound image, retaining std,
-dependency and program products. Packages are identical across runners. Complete-time medians are:
+The timing matrix contains 100 native-matching fresh-process measurements, five alternating rounds
+per case/mode, collected separately from this experiment's builds, linting and profiling. OS caches
+and heat orders are retained; persistent JIT caching is disabled. Hits cannot launch a worker. Misses remove only the
+probe's bound image, retaining std, dependency and program products; they are not empty-store builds.
+Packages are identical across runners. Complete-time medians are:
 
-| Workload/path | Ordinary CLI | Compiler-linked runner | Independent runtime |
-|---|---:|---:|---:|
-| Minimal output, image hit | 43.3 ms | 43.4 ms | 38.3 ms |
-| Minimal output, package | 37.2 ms | 39.4 ms | 33.3 ms |
-| Minimal output, image miss | 111.8 ms | 132.1 ms | 119.1 ms |
-| Recursive fib(32), image hit | 79.7 ms | 107.9 ms | 81.1 ms |
-| Recursive fib(32), package | 54.9 ms | 55.4 ms | 48.8 ms |
-| Recursive fib(32), image miss | 109.6 ms | 157.5 ms | 163.7 ms |
+| Workload/path | Ordinary CLI | Compiler-linked runner | Independent runtime, prepare/reload miss | Independent runtime, exec miss |
+|---|---:|---:|---:|---:|
+| Minimal output, image hit | 44.7 ms | 47.0 ms | 37.2 ms | Same hit path |
+| Minimal output, package | 35.8 ms | 35.4 ms | 29.5 ms | Same package path |
+| Minimal output, image miss | 106.5 ms | 127.1 ms | 115.6 ms | 109.6 ms |
+| Recursive fib(32), image hit | 55.5 ms | 59.4 ms | 52.3 ms | Same hit path |
+| Recursive fib(32), package | 49.6 ms | 47.7 ms | 43.7 ms | Same package path |
+| Recursive fib(32), image miss | 108.4 ms | 142.8 ms | 133.3 ms | 118.6 ms |
 
-These results support a cheaper minimal/package startup path, not a universal speedup. The fib
-image hit does not beat the ordinary CLI, and worker misses lose to in-process preparation. Fib
-image-hit ranges are 67.2–96.9 / 86.7–123.1 / 63.0–90.6 ms in table order; this matrix does not
-isolate the reference runner's execution/publication variation. Minimal-output misses include
-325.9 ms and 321.7 ms whole-process outliers, retained in the data. This fib program runs through
-`main`; it is not the repository's `--vm-call fib(32)` timing gate. The runner files are both about
-10 MB; omitting compiler linkage does not establish a smaller runner executable or an RSS saving.
+Independent hits/packages are cheaper in this matrix. Exec misses improve on prepare/reload by
+6.0 ms for minimal output and 14.7 ms for fib, while still trailing ordinary in-process preparation.
+Minimal-output miss ranges are 82.3–111.9 / 105.5–129.0 / 88.0–110.7 ms for ordinary CLI,
+prepare/reload runtime and exec runtime; fib ranges are 95.4–130.9 / 127.9–144.4 / 106.1–121.0 ms.
+All valid timing outliers remain in the data. These small workloads support the fallback direction,
+not default routing or a representative-workload speedup. This fib runs through `main`, not the
+repository's `--vm-call fib(32)` gate. The experiment establishes no executable-size or RSS saving.
 
-Seven separate strict-JIT contract invocations cover inline assembly, syscall rewriting, global
-assembly calling guest code, generic templates with native callbacks/concurrency and separate fork,
-and main return/panic classification. The generic artifact is prepared with sharing enabled and
-executed without the exporter flag. Native stdout/exit agree. Release builds, all-target/all-feature
-Clippy with warnings denied, four focused materializer unit checks and all repository source-boundary
-checks pass. The source-shared TSan fixture builds with its current generic IR fields and serde
-features; no TSan execution or full runtime test tier is claimed.
+Handoff probes preserve cwd, spaced/empty arguments, runtime environment and SIGTERM status.
+Runtime-only environment changes hit with an unavailable worker; source and compile-time `env!`
+changes invalidate. A compilation error produces no guest stdout. Repeated warning-bearing exec
+runs preserve the direct driver's stdout, stderr and exit status without publishing an image.
+Seven separate strict-JIT invocations cover inline assembly, syscall rewriting, global assembly
+calling guest code, generic templates with callbacks/concurrency and separate fork, and main
+return/panic classification. The latter two also run through a compiler miss with IR caching
+disabled. The generic artifact is prepared with sharing enabled and executed without the exporter
+flag. Native stdout and exit status agree.
 
-The compiler-independent configuration still emits unused-producer/tool warnings and has not closed
-its own lint/unit inventory. Ordinary project scheduling, miss routing, working directory/environment
-handoff, diagnostic-bearing sessions and full lifecycle/capture qualification remain open in
-[frontend-boundary.md](designs/frontend-boundary.md). The normal CLI's default routing is unchanged.
+Release builds and all-target/all-feature Clippy with warnings denied pass. The compiler-independent
+library still emits 295 unused-producer/tool warnings; its test inventory does not compile because
+native archive fixture builders and sysroot producer tests depend on the compiler feature. This is
+not a clean standalone lint/test gate. Ordinary project scheduling, compile/guest environment
+transitions, full lifecycle/capture qualification and representative workload measurements remain
+open in [frontend-boundary.md](designs/frontend-boundary.md). Default CLI routing is unchanged.
 
 ### Runtime generics evaluation
 
