@@ -13,11 +13,14 @@ class Runner:
         self.rows = []
 
     def __call__(self, label, command, extra=None, expected=None, first_byte=False):
-        started = time.perf_counter_ns()
+        capture_started = time.perf_counter_ns()
         # A compile ledger must not fill a stderr pipe while the first stdout byte is awaited.
         with (self.root / (label + ".err")).open("wb") as diagnostics:
+            started = time.perf_counter_ns()
+            capture_setup_ms = (started - capture_started) / 1e6
             child = subprocess.Popen(list(map(str, command)), env=dict(self.env, **(extra or {})),
                                      stdout=subprocess.PIPE, stderr=diagnostics, bufsize=0)
+            spawn_ms = (time.perf_counter_ns() - started) / 1e6
             first_ms, prefix = None, b""
             try:
                 if first_byte:
@@ -29,8 +32,8 @@ class Runner:
                 if child.poll() is None:
                     child.kill()
                     child.communicate()
+            wall_ms = (time.perf_counter_ns() - started) / 1e6
         output = prefix + output
-        wall_ms = (time.perf_counter_ns() - started) / 1e6
         (self.root / (label + ".out")).write_bytes(output)
         log = (self.root / (label + ".err")).read_text(errors="replace")
         assert child.returncode == 0, (label, child.returncode, log[-8000:])
@@ -38,7 +41,8 @@ class Runner:
             assert output == expected, (label, output, expected)
         phases = [dict((k, float(v)) for k, v in re.findall(r"([\w-]+)=([\d.]+)ms", line))
                   for line in log.splitlines() if line.startswith("mirvm-timing:")]
-        return output, dict(wall_ms=wall_ms, first_ms=first_ms, phases=phases), log
+        return output, dict(wall_ms=wall_ms, first_ms=first_ms, spawn_ms=spawn_ms,
+                            capture_setup_ms=capture_setup_ms, phases=phases), log
 
     def measure(self, case, command, expected, modes, rounds):
         for repeat in range(rounds):

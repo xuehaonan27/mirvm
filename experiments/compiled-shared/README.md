@@ -96,7 +96,9 @@ The admitted experiment is plain execution with persistent JIT caching disabled.
 machine-code reload and simultaneous `MIRVM_GENERIC_PAYBACK` enforcement. The generic contract covers mixed
 layouts, cleanup, recursion, concurrent entries, native callbacks and single-threaded fork. It does
 not establish the general lifecycle, signal or trace gate for product integration. Whole-process
-time includes preparation, compilation and worker shutdown. Diagnostic ledgers also report lazy
+time brackets process creation through observed exit, including preparation, compilation and worker
+shutdown. Result-file setup, closing and persistence are outside the clock; setup and spawn latency
+are reported separately. Diagnostic ledgers also report lazy
 translations, bridges, concrete publications and actual shared code size.
 
 ## Reproduce

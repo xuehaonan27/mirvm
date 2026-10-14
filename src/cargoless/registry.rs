@@ -53,12 +53,16 @@ pub type IndexEntry = Arc<[IndexVersion]>;
 
 /// Dependency metadata in the index (authoritative dependency description for registry crates — resolve does not read
 /// Cargo.toml, same as cargo it uses the index as source of truth).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndexDep {
     pub name: String,
     pub req: VersionReq,
+    #[serde(default)]
     pub features: Vec<String>,
+    #[serde(default)]
     pub optional: bool,
+    #[serde(default = "default_features")]
     pub default_features: bool,
     /// `cfg(...)` platform expression (None = all platforms); evaluation goes to manifest::eval_cfg.
     pub target: Option<String>,
@@ -1466,11 +1470,96 @@ fn download_url(
 
 // ---------- index JSON line parsing ----------
 
+fn default_features() -> bool {
+    true
+}
+
+/// Serde also accepts positional arrays for derived structs; index entries and dependencies
+/// require objects. Unknown fields go through the value parser to preserve its JSON validation.
+struct IndexObject<T>(T);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for IndexObject<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+            type Value = IndexObject<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an index object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(IndexObject)
+            }
+        }
+        deserializer.deserialize_map(Visitor(std::marker::PhantomData))
+    }
+}
+
+/// Decode the ordinary index schema directly into owned resolver fields. Unusual shapes use the
+/// value-based parser so its tolerant field rules and diagnostics remain authoritative.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexLine {
+    name: String,
+    vers: Version,
+    cksum: String,
+    #[serde(default)]
+    yanked: bool,
+    #[serde(default)]
+    deps: Vec<IndexObject<IndexDep>>,
+    #[serde(default)]
+    features: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    features2: BTreeMap<String, Vec<String>>,
+    links: Option<String>,
+    rust_version: Option<String>,
+    rust_version2: Option<String>,
+    #[serde(rename = "v")]
+    _schema: Option<u32>,
+    #[serde(rename = "pubtime")]
+    _published: Option<String>,
+}
+
+impl IndexLine {
+    fn into_version(self) -> Result<IndexVersion, RErr> {
+        let rust_version = self
+            .rust_version
+            .or(self.rust_version2)
+            .map(|version| parse_rust_version(&version, "registry rust_version"))
+            .transpose()?;
+        let mut features = self.features;
+        for (name, values) in self.features2 {
+            features.entry(name).or_default().extend(values);
+        }
+        Ok(IndexVersion {
+            name: self.name,
+            version: self.vers,
+            cksum: self.cksum,
+            yanked: self.yanked,
+            deps: self.deps.into_iter().map(|dep| dep.0).collect(),
+            features,
+            links: self.links,
+            rust_version,
+        })
+    }
+}
+
 fn parse_index_lines(text: &str) -> Result<Vec<IndexVersion>, RErr> {
     let mut out = Vec::new();
     for (ln, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+        if let Ok(IndexObject(line)) = serde_json::from_str::<IndexObject<IndexLine>>(line) {
+            out.push(
+                line.into_version()
+                    .map_err(|e| crate::fail!(Resolver, format!("index line {}: {e}", ln + 1)))?,
+            );
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {

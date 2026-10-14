@@ -38,12 +38,22 @@ pub(crate) fn lookup(args: &[String]) -> Option<VerifiedArtifact> {
 }
 
 fn load_bytes(bytes: Vec<u8>, args: &[String]) -> Option<VerifiedArtifact> {
+    let mut mark = crate::options::timing().then(std::time::Instant::now);
+    let mut lap = || {
+        mark.as_mut().map_or(0.0, |previous| {
+            let now = std::time::Instant::now();
+            let millis = now.duration_since(*previous).as_secs_f64() * 1000.0;
+            *previous = now;
+            millis
+        })
+    };
     let bytes = Bytes::new(bytes);
     let (data, hash) = bytes.split_at_checked(bytes.len().checked_sub(32)?)?;
     let data_len = data.len();
     if blake3::hash(data).as_bytes().as_slice() != hash {
         return None;
     }
+    let integrity = lap();
     let (header, data) = postcard::take_from_bytes::<Header>(data).ok()?;
     if !crate::store::entry::is_current_generation(&header.build_id)
         || header.target != crate::options::build::HOST
@@ -53,14 +63,24 @@ fn load_bytes(bytes: Vec<u8>, args: &[String]) -> Option<VerifiedArtifact> {
     {
         return None;
     }
+    let inputs = lap();
     let (meta, remaining) = postcard::take_from_bytes::<meta::ModuleMeta>(data).ok()?;
+    let metadata = lap();
     let start =
         (data_len - remaining.len()).checked_next_multiple_of(rkyv::AlignedVec::ALIGNMENT)?;
     let functions = functions::Functions::load(bytes, start..data_len).ok()?;
+    let structure = lap();
     let mut artifact = Image::load_once(meta, functions).ok()?;
+    let instantiate_verify = lap();
     let addresses =
         crate::native::artifact::assembly::try_materialize(&artifact.module().asm_sites).ok()?;
     artifact.set_asm_addrs(addresses).ok()?;
+    let assembly = lap();
+    if crate::options::timing() {
+        crate::diag::instrument(format_args!(
+            "mirvm-image-load: integrity={integrity:.3}ms inputs={inputs:.3}ms metadata={metadata:.3}ms structure={structure:.3}ms instantiate-verify={instantiate_verify:.3}ms assembly={assembly:.3}ms"
+        ));
+    }
     Some(artifact)
 }
 

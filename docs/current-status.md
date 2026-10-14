@@ -201,9 +201,9 @@ instance. Reusable packages restore independent frozen domains. Archive pruning,
 compiler-library loading, and empty-cache frontend/base preparation remain separate optimization
 questions; caller-side checks do not establish improvements to those paths.
 
-These focused checks do not certify the full fast, smoke or gate tiers. The existing `fib32` case and
-all measured cache-hit fib32 samples meet 80 ms; this does not guarantee that ceiling under arbitrary
-storage or scheduling delays. Large dependency closures retain the fixed-address layout conflict
+These focused checks do not certify the full fast, smoke or gate tiers. The existing `fib32` case has met
+80 ms in focused checks; broader fresh-process measurements include startup and scheduling outliers
+above it. This is not a ceiling under arbitrary storage or scheduling delays. Large dependency closures retain the fixed-address layout conflict
 recorded in E52. A completely green gate is not claimed.
 
 Build notes: debug and release both build, and only the release binary is executed — under the pinned
@@ -218,6 +218,67 @@ CI (`.github/workflows/ci.yml`) installs the pinned toolchain plus `strace` and 
 `make test` and `make case C=tsan`. It stops there on purpose: `smoke` and `gate` add the
 corpus and the timing gates, which need a machine larger than a shared runner. GitHub-side operation is
 paused; the local equivalent is authoritative.
+
+### Preparation decoding
+
+Successful bound-image hits expose six sequential load intervals with `MIRVM_TIMING`;
+[startup-cache-design.md](designs/startup-cache-design.md#bound-execution-images) owns their scope.
+A seven-run serde baseline attributes medians of 2.593 ms to payload integrity, 5.111 ms to inputs,
+2.515 ms to metadata, 3.604 ms to archive structure/indexing, 5.451 ms to instance restoration and
+semantic verification, and 0.221 ms to assembly. File reading, command routing and guest execution
+are outside these intervals. A CPU capture also identifies registry JSON parsing before image lookup.
+
+Registry index lines decode their ordinary schema directly into resolver fields. Object-only
+visitors reject positional arrays; unknown fields and unusual shapes use the value parser to retain
+its JSON validation, tolerant field rules and diagnostics. Frozen snapshots use bulk byte decoding
+with byte-identical postcard encodings and a sequence fallback for JSON. Neither change skips
+freshness, integrity, address-domain or bytecode checks.
+
+An isolated allocation/decoder probe uses one real 277,240-byte serde_json registry index and 32
+alternating pairs in one process. Decoded values agree. Allocation/reallocation calls fall from
+38,182 to 8,749 and cumulative requested bytes from 2,953,252 to 1,062,193; parse-and-drop medians
+fall from 1.849 to 0.758 ms. Allocation counting is disabled during timing. Synthetic snapshot
+buffers covering every byte value retain one allocation: 16 KiB decoding falls from 8.533 to
+0.170 microseconds and 1 MiB from 557.063 to 17.882 microseconds. These isolate decoder work;
+real image metadata has other costs. Serde metadata medians are 2.657 / 2.263 ms and flate metadata
+2.587 / 2.365 ms for reference/candidate.
+
+The final-source comparison contains 100 native-matching samples: ten alternating rounds on five
+inputs, with independent prepared image generations per binary. Every sample hits its image;
+OS caches and heat orders remain, persistent JIT caching is disabled, and no builds, lints or CPU
+captures overlap latency measurement. The process clock brackets creation through observed exit;
+result-file setup, closing and persistence are outside it. Setup and spawn latencies are separate
+fields. Child CPU usage includes waited descendants; user CPU below is separate from system and
+elapsed time. Medians are reference / candidate.
+
+| Workload | Complete process | First stdout byte | User CPU |
+|---|---:|---:|---:|
+| Empty main | 48.9 / 44.0 ms | 43.4 / 39.1 ms | 15.9 / 14.6 ms |
+| fib(32) through main | 60.9 / 58.2 ms | 53.1 / 50.5 ms | 27.6 / 27.9 ms |
+| Many generic instances | 168.0 / 165.5 ms | 44.7 / 46.7 ms | 137.7 / 132.5 ms |
+| serde JSON | 111.8 / 110.7 ms | 94.2 / 92.1 ms | 49.7 / 43.4 ms |
+| flate2, 2 KiB | 190.6 / 192.9 ms | 81.4 / 81.8 ms | 185.8 / 181.0 ms |
+
+The decoder savings are established; stable end-to-end improvement is not. Flate's complete median
+still regresses slightly. All valid outliers remain, including a reference serde run lasting
+6,551.9 ms with 95.3 ms combined user/system CPU and 47.8 ms in the driver phase ledger. Its capture
+setup is 0.484 ms and process creation 0.615 ms, excluding those two costs as the explanation for
+this sample's gap. The wait after spawning and outside recorded driver phases is not yet attributed.
+Independent profiles over four fresh processes per binary contain 1,257 / 1,180 samples. Inclusive
+registry parsing occupies 11.65% / 8.71% of recorded user cycles, metadata decoding 2.55% / 3.69%,
+structural validation 7.91% / 8.48% and semantic verification 8.16% / 9.18%. These diagnostic
+percentages are not a causal estimate of total latency saved.
+
+Focused validation covers 119 cargoless checks, four frozen-memory checks, ten archive checks,
+thirteen package checks and input/argument/payload invalidation. The eight registry checks also
+cover the final object-only decoder. One configuration-discovery check requires its documented
+premise that temporary and HOME paths are disjoint; it passes with the same scratch directory's
+resolved filesystem path. The index differential check covers defaults, feature merging, aliases,
+duplicate/unknown fields, tolerant shapes, positional arrays and error messages. Snapshot checks
+cover all byte values, legacy bytes, JSON, truncation and invalid domains. The independent runtime
+runner executes the generic package's normal and fork cases with native stdout agreement. Release
+builds, all-target/all-feature Clippy, formatting and repository boundaries pass. No full runtime
+suite was run. The [preparation harness](../experiments/preparation/README.md) owns reproduction.
 
 ### Frontend research
 
@@ -508,7 +569,8 @@ The JIT ledger records sampled own-body interpreter work, queue delay, concrete 
 worker time and final publication. `MIRVM_GENERIC_PAYBACK=1` enables an experimental compile-work
 budget; it remains off by default. A separate 36-sample comparison uses bound-image hits with the
 persistent JIT cache disabled, three alternating rounds, native output comparison and separate
-ledger captures. Whole-process / engine medians are:
+ledger captures. Its whole-process clock includes diagnostic-file creation and closing as well as execution.
+Whole-process / engine medians are:
 
 | Workload | Stay interpreted | Direct specialization | Work budget |
 |---|---:|---:|---:|
@@ -549,7 +611,8 @@ Identity qualification compares content IDs with address grouping in the same re
 prepared images. One hundred samples cover five workloads, fixed nomination and work policy, with
 five alternating rounds per mode. Every sample hits its image and agrees with native; persistent
 JIT caching is disabled, OS caches and heat orders are retained, and builds/lints/profiles do not
-overlap timing. Complete / engine medians are:
+overlap timing. Its complete-time clock includes diagnostic-file creation and closing; long gaps cannot be
+attributed to guest startup from that clock alone. Complete / engine medians are:
 
 | Workload | Address, fixed | Content, fixed | Address, policy | Content, policy |
 |---|---:|---:|---:|---:|

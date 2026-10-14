@@ -196,3 +196,74 @@ fn index_validators_are_kept_beside_the_body_they_describe() {
     assert!(junk.etag.is_none() && junk.last_modified.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn typed_index_decode_preserves_values_tolerant_shapes_and_errors() {
+    let base = r#"{"name":"demo","vers":"1.2.3","cksum":"abc","deps":[{"name":"dep","req":"^1.0"}],"features":{"shared":["first"]},"features2":{"shared":["second"]},"rust_version2":"1.70"}"#;
+    let mut cases = vec![
+        base.to_string(),
+        r#"["demo","1.2.3","abc",false,[],{},{},null,null,null,null,null]"#.to_string(),
+    ];
+    for (before, after) in [
+        (
+            "\"deps\":[{\"name\":\"dep\",\"req\":\"^1.0\"}]",
+            "\"deps\":null",
+        ),
+        ("\"shared\":[\"first\"]", "\"shared\":[false,\"first\",3]"),
+        (
+            "\"features2\":{\"shared\":[\"second\"]}",
+            "\"features2\":false",
+        ),
+        ("\"vers\":\"1.2.3\"", "\"vers\":\"bad\""),
+        ("\"req\":\"^1.0\"", "\"req\":\"bad\""),
+        ("\"name\":\"dep\"", "\"name\":null"),
+        ("\"cksum\":\"abc\"", "\"cksum\":17"),
+        ("\"rust_version2\":\"1.70\"", "\"rust_version2\":\"bad\""),
+        (
+            "\"rust_version2\":\"1.70\"",
+            "\"rust_version\":\"1.60\",\"rust_version2\":\"1.70\"",
+        ),
+        ("\"name\":\"demo\"", "\"name\":\"first\",\"name\":\"demo\""),
+        (
+            "\"cksum\":\"abc\"",
+            "\"cksum\":\"abc\",\"unknown\":{\"nested\":[1,true]}",
+        ),
+        (
+            "\"req\":\"^1.0\"",
+            "\"req\":\"^1.0\",\"optional\":null,\"default_features\":3",
+        ),
+    ] {
+        cases.push(base.replace(before, after));
+    }
+    cases.push(base.replace(
+        r#"[{"name":"dep","req":"^1.0"}]"#,
+        r#"[["dep","^1.0",[],false,true,null,null,null,null]]"#,
+    ));
+    for line in cases {
+        let old = parse_index_version(&serde_json::from_str(&line).unwrap());
+        let new = parse_index_lines(&format!("\n{line}\n"));
+        match (old, new) {
+            (Ok(old), Ok(new)) => assert_eq!(format!("{old:?}"), format!("{:?}", new[0]), "{line}"),
+            (Err(old), Err(new)) => assert_eq!(new.to_string(), format!("index line 2: {old}")),
+            (old, new) => panic!("different result for {line}: {old:?} / {new:?}"),
+        }
+    }
+    assert!(
+        parse_index_lines("\n{\"name\":")
+            .unwrap_err()
+            .to_string()
+            .starts_with("index JSON line 2 parse failed:")
+    );
+    let bad_unknown = base.replace("\"cksum\":\"abc\"", "\"cksum\":\"abc\",\"unknown\":1e999");
+    assert!(
+        parse_index_lines(&bad_unknown)
+            .unwrap_err()
+            .to_string()
+            .starts_with("index JSON line 1 parse failed:")
+    );
+    let wire: IndexLine = serde_json::from_str(base).unwrap();
+    assert!(wire.deps[0].0.default_features);
+    assert!(!wire.deps[0].0.optional);
+    let parsed = wire.into_version().unwrap();
+    assert_eq!(parsed.features["shared"], ["first", "second"]);
+}

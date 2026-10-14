@@ -84,7 +84,7 @@ pub(crate) struct ModuleMeta {
     function_names: Vec<Box<str>>,
     exports: std::collections::HashMap<Box<str>, crate::vm::ir::FuncId>,
     frozen: Option<crate::vm::frozen::FrozenSnapshot>,
-    image_frozens: Vec<(u64, Vec<u8>)>,
+    image_frozens: Vec<(u64, crate::vm::frozen::SnapshotBytes)>,
     link_fn_addrs: std::collections::HashMap<crate::vm::ir::LinkAddr, crate::vm::ir::FuncId>,
     native_libs: Vec<Box<str>>,
     required_native_libs: Vec<Box<str>>,
@@ -153,7 +153,7 @@ impl ModuleMeta {
                     "duplicate frozen domain in execution image"
                 ));
             }
-            let snapshot = crate::vm::frozen::FrozenSnapshot::from_home_and_bytes(home, bytes)?;
+            let snapshot = crate::vm::frozen::FrozenSnapshot::from_home_and_bytes(home, bytes.0)?;
             instance
                 .image_frozens
                 .push(crate::vm::frozen::FrozenArena::restore_dynamic(&snapshot)?);

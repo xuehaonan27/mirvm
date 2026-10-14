@@ -124,7 +124,11 @@ sysroot.
 2. **Lock read and write** — read v3/v4; write a lock from the self-solved graph for reproducibility.
 3. **Version resolution** — with a lock, follow it; without one, semver solve.
 4. **Registry access** — sparse index over HTTP, `.crate` download, sha256 verification and unpack into
-   an own store.
+   an own store. Ordinary index objects decode directly into resolver fields; unknown fields or
+   unusual shapes use the value parser's existing validation, defaults and diagnostics. Both entry
+   and dependency records require objects rather than positional arrays. `features2` extends the
+   corresponding `features` lists, and `rust_version` takes precedence over `rust_version2`. Parsed
+   entries remain process-local; this does not replace the freshness checks above.
 5. **Feature unification** — the resolver v2 subset: normal versus build edge separation, optional and
    `dep:` and weak `?` forms, `default-features`; dev-dependencies are not solved at all.
 6. **Topological scheduling and per-crate rustc arguments** — edition, `--cfg` features, the full

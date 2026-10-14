@@ -107,6 +107,17 @@ partially restored image alive after a missing member or validation failure. A c
 metadata into the instance used for verification and execution, so it need not instantiate twice.
 Reusable packages retain their metadata and check address obligations on each fresh instance.
 
+Frozen snapshot payloads decode through serde's byte-buffer channel. Their postcard bytes remain
+identical to the existing byte-sequence encoding; the change does not weaken domain, length or
+relocation checks. Formats providing byte sequences, including JSON, retain the sequence visitor.
+
+`MIRVM_TIMING=1` adds a `mirvm-image-load` ledger for a successful bound-image hit. Its sequential
+intervals separate payload integrity, header/input validation, metadata decoding, function archive
+structure/index construction, instance restoration plus semantic verification, and assembly
+materialization. It starts after the file read and excludes command routing, dependency resolution,
+Engine startup and guest execution. The outer phase ledger and whole-process timings remain
+necessary when attributing cold-process latency; a cache miss does not emit a successful-load ledger.
+
 ## Immutable verification
 
 The loader owns one immutable byte snapshot. Archive bounds, discriminants, lengths and semantic

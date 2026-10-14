@@ -106,7 +106,7 @@ pub(crate) fn serialize_module_frozen<S: serde::Serializer>(
 pub(crate) fn deserialize_module_frozen<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<FrozenSnapshot>, D::Error> {
-    let wire: Option<(u64, Vec<u8>)> = serde::Deserialize::deserialize(deserializer)?;
+    let wire: Option<(u64, SnapshotBytes)> = serde::Deserialize::deserialize(deserializer)?;
     wire.map(|(home, bytes)| {
         let home = usize::try_from(home).map_err(|_| {
             crate::fail!(
@@ -114,7 +114,7 @@ pub(crate) fn deserialize_module_frozen<'de, D: serde::Deserializer<'de>>(
                 format!("frozen snapshot domain {home:#x} does not fit this host")
             )
         })?;
-        FrozenSnapshot::from_home_and_bytes(home, bytes)
+        FrozenSnapshot::from_home_and_bytes(home, bytes.0)
     })
     .transpose()
     .map_err(serde::de::Error::custom)
@@ -355,8 +355,9 @@ impl serde::Serialize for FrozenSnapshot {
 
 impl<'de> serde::Deserialize<'de> for FrozenSnapshot {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (home, link_base, bytes): (u64, u64, Vec<u8>) =
+        let (home, link_base, bytes): (u64, u64, SnapshotBytes) =
             serde::Deserialize::deserialize(deserializer)?;
+        let bytes = bytes.0;
         let home = usize::try_from(home).map_err(serde::de::Error::custom)?;
         let link_base = usize::try_from(link_base).map_err(serde::de::Error::custom)?;
         if !is_valid_home(home) || link_base != home {
@@ -377,7 +378,45 @@ impl<'de> serde::Deserialize<'de> for FrozenSnapshot {
     }
 }
 
-/// Tuple-embedded form of serialize_bytes: Serialize for &[u8] would serialize each u8 (varint per byte under postcard, worse size/speed)—wrap it to force the bytes channel.
+/// Owned snapshot payload decoded through serde's bulk-byte channel. Postcard's byte sequence and
+/// byte-buffer encodings are identical; JSON sequences still use the element-wise visitor.
+#[derive(Clone)]
+pub(crate) struct SnapshotBytes(pub Vec<u8>);
+
+impl<'de> serde::Deserialize<'de> for SnapshotBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = SnapshotBytes;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("frozen snapshot bytes")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+                Ok(SnapshotBytes(bytes.to_vec()))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Self::Value, E> {
+                Ok(SnapshotBytes(bytes))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(FROZEN_CAP));
+                while let Some(byte) = seq.next_element()? {
+                    bytes.push(byte);
+                }
+                Ok(SnapshotBytes(bytes))
+            }
+        }
+        deserializer.deserialize_byte_buf(Visitor)
+    }
+}
+
+/// Use the bulk bytes channel instead of visiting every byte as a sequence element.
 mod serde_bytes_shim {
     pub struct Bytes<'a>(pub &'a [u8]);
     impl serde::Serialize for Bytes<'_> {
@@ -396,11 +435,35 @@ unsafe impl Sync for FrozenArena {}
 mod tests {
     use std::sync::{LazyLock, Mutex};
 
-    use super::FrozenArena;
+    use super::{FrozenArena, FrozenSnapshot, SnapshotBytes};
     use crate::os_arch::addrspace::{
         BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, IMAGE_SPLINE_BASE, IMAGE_SPLINE_COUNT,
         IMAGE_SPLINE_STEP, image_addr, is_valid_home,
     };
+
+    #[test]
+    fn snapshot_bulk_bytes_preserve_postcard_and_json_sequences() {
+        let bytes: Vec<u8> = (0..4096).map(|i| i as u8).collect();
+        let home = BASE_IMAGE_FIXED_ADDR as u64;
+        let legacy = postcard::to_stdvec(&(home, home, bytes.clone())).unwrap();
+        let snapshot: FrozenSnapshot = postcard::from_bytes(&legacy).unwrap();
+        assert_eq!(snapshot.bytes(), bytes);
+        assert_eq!(postcard::to_stdvec(&snapshot).unwrap(), legacy);
+        let json = serde_json::to_vec(&(home, home, bytes.clone())).unwrap();
+        let snapshot: FrozenSnapshot = serde_json::from_slice(&json).unwrap();
+        assert_eq!(snapshot.bytes(), bytes);
+        let payload = postcard::to_stdvec(&vec![(home, bytes.clone())]).unwrap();
+        let images: Vec<(u64, SnapshotBytes)> = postcard::from_bytes(&payload).unwrap();
+        assert_eq!(images[0].1.0, bytes);
+        assert!(
+            postcard::from_bytes::<Vec<(u64, SnapshotBytes)>>(&payload[..payload.len() - 1])
+                .is_err()
+        );
+        let wrong_home = postcard::to_stdvec(&(0u64, 0u64, &bytes)).unwrap();
+        assert!(postcard::from_bytes::<FrozenSnapshot>(&wrong_home).is_err());
+        let wrong_link = postcard::to_stdvec(&(home, home + 8, &bytes)).unwrap();
+        assert!(postcard::from_bytes::<FrozenSnapshot>(&wrong_link).is_err());
+    }
 
     static FIXED_ADDRESS_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
