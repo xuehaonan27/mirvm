@@ -22,6 +22,7 @@ pub const ASM_STUB: &[&str] = &["-Wl,-undefined,dynamic_lookup", "-Wl,-no_fixup_
 
 /// Extra arguments for the global-asm image. The same as [`ASM_STUB`]: the two intentions that
 /// differ on the other platform are both spelled by the pair of flags above.
+#[cfg(any(feature = "compiler", test))]
 pub const GLOBAL_ASM: &[&str] = &["-Wl,-undefined,dynamic_lookup", "-Wl,-no_fixup_chains"];
 
 /// Nothing, and that is the whole answer: this platform expresses the redirection by *what the
@@ -44,6 +45,7 @@ pub const GLOBAL_ASM: &[&str] = &["-Wl,-undefined,dynamic_lookup", "-Wl,-no_fixu
 /// name no replacement, so its `pthread_create` would reach libSystem and the engine would lose a
 /// thread it never learned about, with no diagnostic anywhere. A caller that gets `None` fails the
 /// link instead.
+#[cfg(any(feature = "compiler", test))]
 pub fn interpose_args(_calls: &[&str]) -> Option<Vec<String>> {
     Some(Vec::new())
 }
@@ -73,6 +75,7 @@ pub fn bridge_entry_name(call: &str) -> String {
 /// The suffix is empty, and that is measured rather than assumed: libSystem carries every library
 /// the other platform's line names, so an image referencing `log`, `pthread_create` or `dlopen`
 /// needs no `-l` of its own.
+#[cfg(any(feature = "compiler", test))]
 pub const NATIVE_ARCHIVE_PREFIX: &[&str] = &[
     "-shared",
     "-fPIC",
@@ -81,6 +84,7 @@ pub const NATIVE_ARCHIVE_PREFIX: &[&str] = &[
 ];
 
 /// Nothing: every library the other platform's line names is in libSystem here.
+#[cfg(any(feature = "compiler", test))]
 pub const NATIVE_ARCHIVE_SUFFIX: &[&str] = &[];
 
 /// How this linker is told to take every member of `archive` rather than only the ones something
@@ -89,6 +93,7 @@ pub const NATIVE_ARCHIVE_SUFFIX: &[&str] = &[];
 /// The whole archive has to go in: the symbols mirvm resolves out of it are reached by name at run
 /// time, so nothing references them at link time. `-force_load` names the archive it applies to, so
 /// unlike the other platform's mode there is nothing to turn off afterwards.
+#[cfg(any(feature = "compiler", test))]
 pub fn whole_archive(archive: &std::path::Path) -> Vec<std::ffi::OsString> {
     let mut argument = std::ffi::OsString::from("-Wl,-force_load,");
     argument.push(archive);
@@ -102,7 +107,9 @@ pub fn whole_archive(archive: &std::path::Path) -> Vec<std::ffi::OsString> {
 /// first library that defines it, so the bridge has to be a library of its own for the image's
 /// references to land on it. As an object of the image it would define the call without redirecting
 /// anything, because an image's own definition does not displace the binding it recorded.
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_ARTIFACT: &[&str] = &["-x", "assembler", "-fPIC", "-dynamiclib"];
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_ARTIFACT_EXTENSION: &str = "dylib";
 
 /// `-install_name`, because this format records the library's name *in the image that links
@@ -111,6 +118,7 @@ pub const BRIDGE_ARTIFACT_EXTENSION: &str = "dylib";
 /// Without it the name defaults to the path the library was built at, which for a content-addressed
 /// artifact is a staging name that is renamed away before anything can load it: measured, an image
 /// built against a bridge produced this way fails at `dlopen` naming the temporary.
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_INSTALL_NAME: Option<&str> = Some("-install_name");
 
 /// Whether a bridge entry has to be reachable from outside the object it is built into.
@@ -119,6 +127,7 @@ pub const BRIDGE_INSTALL_NAME: Option<&str> = Some("-install_name");
 /// `pthread_create` to the definition in *another* image, and a loader only offers the definitions
 /// an image exports. Measured the other way round, a private entry leaves the caller bound to
 /// libSystem and the bridge receives nothing.
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_ENTRY_IS_EXPORTED: bool = true;
 
 /// Whether a bridge slot has to be reachable by name through the loader.
@@ -126,4 +135,5 @@ pub const BRIDGE_ENTRY_IS_EXPORTED: bool = true;
 /// Here it does: the slots live in the bridge library rather than in the image that uses them, so
 /// the image's own symbol table does not have them and the loader's search of the load closure is
 /// the only way to reach them.
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_SLOT_IS_EXPORTED: bool = true;

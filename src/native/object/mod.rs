@@ -9,6 +9,7 @@
 //! an object or resolving a name through it is `crate::native::symbol`'s, which reads these layouts
 //! and never re-spells them.
 
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod ar;
 pub(crate) mod elf;
 pub(crate) mod macho;

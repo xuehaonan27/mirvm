@@ -7,10 +7,15 @@
 //! generation check, and the guards that decide whether a snapshot's embedded absolute addresses
 //! are valid in another process.
 
+#[cfg(feature = "compiler")]
 use std::path::Path;
 
+#[cfg(any(feature = "compiler", test))]
 use crate::vm::instance::Instance;
-use crate::vm::{ir, verify};
+#[cfg(any(feature = "compiler", test))]
+use crate::vm::ir;
+#[cfg(feature = "compiler")]
+use crate::vm::verify;
 
 /// Separator between key parts (ASCII unit separator). `cargoless` builds its own composite keys
 /// with the same byte; the two grammars never mix, but neither may change without invalidating
@@ -38,6 +43,7 @@ impl Key {
     }
 
     /// The key text, as a layer records it in its key chain.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -59,6 +65,7 @@ pub(crate) fn is_current_generation(generation: &str) -> bool {
 /// area sits at a fixed base: for a delta at *any* fixed base (the file records its own domain), and
 /// for a base or dependency image at the fixed domain the layer below expects it in. An fn-ptr value
 /// is a stub code address, so a module that has entry stubs needs that area pinned too.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn snapshot_is_publishable(
     module: &ir::Module,
     instance: &Instance,
@@ -69,6 +76,7 @@ pub(crate) fn snapshot_is_publishable(
 
 /// The other half of the same rule, for a caller that wants to name which half failed: an fn-ptr
 /// value is a stub code address, so the stub area must be pinned when the module has one.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn entry_stubs_pinned(module: &ir::Module, instance: &Instance) -> bool {
     module.entry_stub_sites.is_empty() || instance.entry_stubs.at_fixed_base()
 }
@@ -76,6 +84,7 @@ pub(crate) fn entry_stubs_pinned(module: &ir::Module, instance: &Instance) -> bo
 /// The load side of the same rule: whether a loaded snapshot really landed in `domain` (`None`: any
 /// fixed base). A taken domain and a swapped file are rejected alike. The artifact carries the bytes
 /// only when they were linked against a fixed base, so the recorded home is the whole answer.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn frozen_at(module: &ir::Module, domain: Option<usize>) -> bool {
     module
         .frozen
@@ -85,6 +94,7 @@ pub(crate) fn frozen_at(module: &ir::Module, domain: Option<usize>) -> bool {
 
 /// Whether the native modules a snapshot needs on disk are still there. A missing one is a miss,
 /// never a runtime error: the cold path rebuilds and self-heals.
+#[cfg(feature = "compiler")]
 pub(crate) fn native_libs_present(module: &ir::Module) -> bool {
     module
         .required_native_libs
@@ -96,6 +106,7 @@ pub(crate) fn native_libs_present(module: &ir::Module) -> bool {
 /// file does not carry, then verify the module against the stack it is about to join (or against
 /// nothing, for the layer that starts the stack). `None` is a miss — an unverified module is never
 /// used.
+#[cfg(feature = "compiler")]
 pub(crate) fn revive(module: &mut ir::Module, below: verify::Below<'_>) -> Option<Instance> {
     let instance = Instance::materialize(module).ok()?;
     verify::module_below(module, &instance, below)

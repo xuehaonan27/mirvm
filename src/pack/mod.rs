@@ -22,6 +22,7 @@
 //! libraries.
 
 mod format;
+#[cfg(any(feature = "compiler", test))]
 mod funcs;
 mod meta;
 mod read;
@@ -36,7 +37,9 @@ use meta::{McEntry, NativeLibEntry};
 
 // The three free functions the CLI reaches as `crate::pack::…`, the paths its branch criteria and
 // pack step already name them by.
-pub(crate) use read::{is_package, load_package};
+#[cfg(feature = "compiler")]
+pub(crate) use read::is_package;
+pub(crate) use read::load_package;
 #[cfg(feature = "compiler")]
 pub(crate) use write::write_package;
 
@@ -103,9 +106,10 @@ crate::diag_codes! {
 /// The variant list and the constructors are the same fact, so they are written once: a hand-written
 /// constructor whose variant was later renamed would keep compiling and return the wrong class.
 macro_rules! detail_constructors {
-    ($( $constructor:ident => $variant:ident, )+) => {
+    ($( $(#[$attr:meta])* $constructor:ident => $variant:ident, )+) => {
         impl Error {
             $(
+                $(#[$attr])*
                 fn $constructor(detail: impl Into<String>) -> Self {
                     Error::$variant {
                         detail: detail.into(),
@@ -121,6 +125,7 @@ detail_constructors! {
     corrupt => Corrupt,
     reject => Reject,
     incompatible => Incompatible,
+    #[cfg(any(feature = "compiler", test))]
     build => Build,
 }
 

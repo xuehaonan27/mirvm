@@ -5,8 +5,10 @@ use std::time::Duration;
 pub(crate) mod capture;
 pub(crate) mod capture_session;
 pub(crate) mod capture_writer;
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod decode;
 pub(crate) mod format;
+#[cfg(feature = "compiler")]
 pub(crate) mod tool;
 
 /// Why a `mirvm log` command could not produce its report.
@@ -16,6 +18,7 @@ pub(crate) mod tool;
 /// one session (`Session`), a stream that violates the v0 contract (`Decode`, which carries the
 /// path-bearing decoder error as its source) and a filesystem step that failed (`Io`).
 #[derive(Debug, thiserror::Error, serde::Serialize)]
+#[cfg(feature = "compiler")]
 pub(crate) enum Error {
     #[error("{detail}")]
     Usage { detail: String },
@@ -42,6 +45,7 @@ pub(crate) enum Error {
     },
 }
 
+#[cfg(feature = "compiler")]
 crate::diag_codes! {
     Error: Log => {
         Usage => "log.usage" Usage,
@@ -52,6 +56,7 @@ crate::diag_codes! {
     }
 }
 
+#[cfg(feature = "compiler")]
 impl Error {
     fn usage(detail: impl Into<String>) -> Self {
         Error::Usage {

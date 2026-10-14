@@ -58,11 +58,13 @@ pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
 }
 
 /// Read one little-endian `i32` at `offset`. `None` when the buffer is shorter than four bytes.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn read_i32(bytes: &[u8], offset: usize) -> Option<i32> {
     Some(i32::from_le_bytes(read_array(bytes, offset)?))
 }
 
 /// Read one little-endian `i64` at `offset`. `None` when the buffer is shorter than eight bytes.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn read_i64(bytes: &[u8], offset: usize) -> Option<i64> {
     Some(i64::from_le_bytes(read_array(bytes, offset)?))
 }

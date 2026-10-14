@@ -46,6 +46,7 @@ crate::diag_codes! {
 }
 
 impl Error {
+    #[cfg(feature = "compiler")]
     pub(crate) fn unsupported(detail: impl Into<String>) -> Self {
         Error::Unsupported {
             detail: detail.into(),

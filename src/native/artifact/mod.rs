@@ -10,4 +10,5 @@
 pub(crate) mod archive;
 pub(crate) mod asmtext;
 pub(crate) mod assembly;
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod bridge;

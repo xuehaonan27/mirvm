@@ -55,6 +55,7 @@ pub(crate) mod addrspace;
 /// The runtime-interposition bridge, whose text every pair shares the shape of: the call list is
 /// the engine's, the entry name is the platform's, the instructions are the CPU's and the spelling
 /// is the object format's. Its own header carries the structure.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod bridge;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

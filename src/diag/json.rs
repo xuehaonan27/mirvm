@@ -45,6 +45,7 @@ impl Writer {
         self
     }
 
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn boolean(&mut self, name: &str, value: bool) -> &mut Self {
         self.key(name);
         self.out.push_str(if value { "true" } else { "false" });

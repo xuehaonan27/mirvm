@@ -72,27 +72,33 @@ pub(crate) use aarch64::ELF_MACHINE;
 /// `arch::PINNED_REG`.
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::PINNED_REG;
+#[cfg(target_arch = "aarch64")]
+#[cfg(any(feature = "compiler", test))]
+pub(crate) use aarch64::asm_text;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use aarch64::asmstub;
 /// The architecture's Mach-O machine identity, named once for every caller:
 /// `arch::MACHO_CPU_TYPE` and `arch::MACHO_CPU_SUBTYPE`.
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::{MACHO_CPU_SUBTYPE, MACHO_CPU_TYPE};
-#[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::{asm_text, asmstub};
 /// The architecture's ELF machine identity, named once for every caller: `arch::ELF_MACHINE`.
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86_64::ELF_MACHINE;
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86_64::PINNED_REG;
-/// The architecture's Mach-O machine identity, named once for every caller:
-/// `arch::MACHO_CPU_TYPE` and `arch::MACHO_CPU_SUBTYPE`.
 #[cfg(target_arch = "x86_64")]
-pub(crate) use x86_64::{MACHO_CPU_SUBTYPE, MACHO_CPU_TYPE};
+#[cfg(any(feature = "compiler", test))]
+pub(crate) use x86_64::asm_text;
 /// The architecture's assembly vocabulary and its machine-code emission, named once for every
 /// caller: `arch::asm_text::…` and `arch::asmstub::…`. The materializer in `src/lower/` asks for
 /// the syntax directive and the instruction forms through the first and supplies no
 /// architecture-specific text itself.
 #[cfg(target_arch = "x86_64")]
-pub(crate) use x86_64::{asm_text, asmstub};
+pub(crate) use x86_64::asmstub;
+/// The architecture's Mach-O machine identity, named once for every caller:
+/// `arch::MACHO_CPU_TYPE` and `arch::MACHO_CPU_SUBTYPE`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) use x86_64::{MACHO_CPU_SUBTYPE, MACHO_CPU_TYPE};
 
 /// The instruction bodies behind the guest's own intrinsic boundary, which the builtin lane in
 /// `src/vm/semantics/builtin` names through one path on every target: `arch::intrinsics::…`.

@@ -6,8 +6,10 @@
 //! place that turns them into "the loader resolves this", "the image hides this" and "the image
 //! offers this".
 
+#[cfg(any(feature = "compiler", test))]
+use crate::native::object::macho::N_WEAK_DEF;
 use crate::native::object::macho::{
-    HEADER_SIZE, LC_SYMTAB, N_EXT, N_PEXT, N_TYPE, N_UNDF, N_WEAK_DEF, NLIST_SIZE,
+    HEADER_SIZE, LC_SYMTAB, N_EXT, N_PEXT, N_TYPE, N_UNDF, NLIST_SIZE,
 };
 use crate::native::object::macho::{header, load_command};
 use crate::utils::bytes::{read_u32, read_u64};
@@ -25,9 +27,11 @@ pub(crate) struct ImageSymbol {
     /// it by name even though the image defines it.
     pub(crate) private_extern: bool,
     /// Whether the image defines it and offers it to other images.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) exported: bool,
     /// Whether the image marks it a weak definition, which is how this format says two images may
     /// define one name and the linker picks either.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) weak: bool,
 }
 
@@ -52,6 +56,7 @@ pub(crate) fn symbols(bytes: &[u8]) -> Result<Vec<ImageSymbol>, crate::error::Er
 
 /// The names of the symbols the loader has to resolve, which is what an image's own undefined
 /// range is: the external symbols its table defines nowhere.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, crate::error::Error> {
     Ok(symbols(bytes)?
         .into_iter()
@@ -119,9 +124,11 @@ fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, cr
                 .ok_or_else(|| crate::fail!(Native, "a symbol entry is truncated".to_string()))?,
             undefined: entry[4] & N_TYPE == N_UNDF && entry[4] & N_EXT != 0,
             private_extern: entry[4] & N_PEXT != 0,
+            #[cfg(any(feature = "compiler", test))]
             exported: entry[4] & N_TYPE != N_UNDF
                 && entry[4] & N_EXT != 0
                 && entry[4] & N_PEXT == 0,
+            #[cfg(any(feature = "compiler", test))]
             weak: u16::from_le_bytes([entry[6], entry[7]]) & N_WEAK_DEF != 0,
         });
     }

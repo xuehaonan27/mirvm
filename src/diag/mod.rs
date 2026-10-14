@@ -21,6 +21,7 @@
 
 pub mod exit;
 pub(crate) mod json;
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod table;
 
 use std::fmt::{self, Write as _};
@@ -140,6 +141,7 @@ impl Severity {
 static THRESHOLD: AtomicU8 = AtomicU8::new(Severity::Warning as u8);
 
 /// Set the quietest severity that still prints. Called once, before any diagnostic is reported.
+#[cfg(any(feature = "compiler", test))]
 pub fn set_min_severity(severity: Severity) {
     THRESHOLD.store(severity as u8, Ordering::Relaxed);
 }
@@ -153,6 +155,7 @@ pub fn prints(severity: Severity) -> bool {
 ///
 /// One meaning, two users: progress lines that are otherwise silent, and guest build diagnostics
 /// that are otherwise held back until the build fails.
+#[cfg(any(feature = "compiler", test))]
 pub fn verbose() -> bool {
     prints(Severity::Info)
 }
@@ -252,6 +255,7 @@ static SCOPE: OnceLock<Component> = OnceLock::new();
 
 /// Declare which component this process is speaking for. Called once at a command boundary; the
 /// first caller wins, so an outer command (`capture`) keeps the scope of an inner one (`run`).
+#[cfg(feature = "compiler")]
 pub fn enter(component: Component) {
     let _ = SCOPE.set(component);
 }
@@ -265,6 +269,7 @@ static TEE: OnceLock<fn(&[u8])> = OnceLock::new();
 
 /// Install the capture tee. The CLI installs the router's appender; a process with no capture
 /// leaves it unset and every line goes to fd 2 alone.
+#[cfg(feature = "compiler")]
 pub fn install_tee(tee: fn(&[u8])) {
     let _ = TEE.set(tee);
 }
@@ -349,6 +354,7 @@ pub fn instrument(arguments: fmt::Arguments<'_>) {
 ///
 /// Cargo's own warnings are part of the cargo-compatible track's frozen surface, so the grammar
 /// must not touch them; like [`instrument`], this writes fd 2 alone.
+#[cfg(feature = "compiler")]
 pub fn mirror(arguments: fmt::Arguments<'_>) {
     write_raw(arguments);
 }
@@ -362,6 +368,7 @@ pub fn mirror(arguments: fmt::Arguments<'_>) {
 /// For the one command that owns its output writers (`mirvm log` takes them so its report can be
 /// asserted in a unit test): the rendering, the mode and the grammar still come from here, so a
 /// diagnostic cannot look different because of where it is written.
+#[cfg(feature = "compiler")]
 pub fn render_line(diagnostic: &dyn Diagnostic) -> String {
     render(diagnostic)
 }

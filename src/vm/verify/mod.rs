@@ -53,6 +53,7 @@ pub fn module_below(
 }
 
 /// Unbound shared instructions have call ordinals but no external addresses or linked module.
+#[cfg(feature = "compiler")]
 pub(crate) fn generic_template(body: &FuncBody, calls: usize) -> Result<(), crate::error::Error> {
     Verifier::new_with_count(
         &Module::default(),

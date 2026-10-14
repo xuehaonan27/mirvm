@@ -21,7 +21,9 @@ use std::sync::{Arc, LazyLock, RwLock};
 use super::native_lifecycle::NativeLifecycle;
 
 pub(crate) use identity::isolate_required_libraries;
-pub(crate) use open::{open_for_lower, prepare_required_libraries};
+#[cfg(feature = "compiler")]
+pub(crate) use open::open_for_lower;
+pub(crate) use open::prepare_required_libraries;
 pub(crate) use wire::{
     commit_images, patch_entry_slots, patch_pthread_slots, run_finalizers, run_initializers,
 };

@@ -2,11 +2,14 @@
 //! each instantiation restores its own frozen domains and address tables.
 
 use crate::error::Error;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(any(feature = "compiler", test))]
+use serde::Serialize;
 
 /// Execution metadata stores only non-function metadata. A borrowed write form avoids copying the frozen
 /// region and index tables.
 #[derive(Serialize)]
+#[cfg(any(feature = "compiler", test))]
 pub(crate) struct ModuleMetaRef<'a> {
     function_names: &'a [Box<str>],
     exports: &'a std::collections::HashMap<Box<str>, crate::vm::ir::FuncId>,
@@ -27,6 +30,7 @@ pub(crate) struct ModuleMetaRef<'a> {
     entry: Option<crate::vm::ir::EntryPlan>,
 }
 
+#[cfg(any(feature = "compiler", test))]
 impl<'a> From<(&'a crate::vm::ir::Module, &'a crate::vm::instance::Instance)>
     for ModuleMetaRef<'a>
 {

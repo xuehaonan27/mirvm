@@ -24,6 +24,7 @@ struct Manifest {
 }
 
 #[derive(Serialize, Deserialize)]
+#[cfg(any(feature = "compiler", test))]
 struct Selection {
     freshness: String,
     generation: String,
@@ -112,6 +113,7 @@ fn snapshot_unchanged(before: &[Observation], after: &[Observation]) -> bool {
 }
 
 impl Generation {
+    #[cfg(any(feature = "compiler", test))]
     pub fn input(&self, path: &Path) -> Option<Input> {
         let relative = path.strip_prefix(&self.path).ok()?;
         self.manifest
@@ -133,6 +135,7 @@ impl Generation {
                 .is_ok()
     }
 
+    #[cfg(feature = "compiler")]
     pub fn provenance(&self, input: &Input) -> Option<FileStamp> {
         self.contains(input)
             .then(|| self.path.join(&input.member))
@@ -217,6 +220,7 @@ fn load(root: &Path, store_root: &Path, id: &str, recipe: Option<&str>) -> io::R
     Ok(generation)
 }
 
+#[cfg(any(feature = "compiler", test))]
 pub(super) fn selected(
     root: &Path,
     store_root: &Path,
@@ -258,6 +262,7 @@ pub(super) fn reopen(
 }
 
 /// Copy the producer's complete lib tree; no hard links retain a mutable source inode.
+#[cfg(any(feature = "compiler", test))]
 pub(super) fn publish(
     root: &Path,
     store_root: &Path,

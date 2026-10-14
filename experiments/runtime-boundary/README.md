@@ -97,13 +97,14 @@ Results and binary hashes remain outside git; conclusions belong to
 
 ## Integration limits
 
-The compiler-independent feature is an experimental build boundary. Base/dependency layers and program-delta preparation are compiler-only. Other unused producer/tool
-helpers still compile and produce dead-code warnings in that configuration; it does not yet meet the
-warnings-denied runtime-library gate. The default compiler build keeps its existing lint gate.
-`repo-quality` also runs `cargo test --release --no-default-features --features cranelift --lib`.
-This executes the runtime/native/telemetry/managed-input test inventory without compiler crates;
-only tests of compiler-owned sysroot production remain behind the compiler feature. The ordinary
-compiler test and lint gates remain in place. This library gate does not qualify CLI routing.
+The compiler-independent feature is an experimental build boundary. Base/dependency layers,
+program-delta preparation, dependency resolution/fetching and command reports are compiler-only.
+Runtime tests retain native fixture producers, archive encoders and managed-input publishers.
+Capture and its runtime checks remain available without compiler crates; command-report tests
+belong to the compiler build. Runtime instance layouts and serialized formats stay identical.
+`repo-quality` runs both all-target Clippy with warnings denied and release library tests under
+`--no-default-features --features cranelift`, alongside the ordinary compiler gates. These gates
+qualify the library boundary, not ordinary CLI routing.
 
 The probe requires an explicit argument recipe and a prepared sysroot. Ordinary project/script
 dispatch and build-script/proc-macro scheduling still need a production handoff contract, including

@@ -8,6 +8,7 @@
 //! longer part of this architecture either — it names the format as well as the instruction, and
 //! lives in `crate::os_arch::syscall_asm`.
 
+#[cfg(any(feature = "compiler", test))]
 pub mod asm_text;
 pub mod asmstub;
 pub mod intrinsics;

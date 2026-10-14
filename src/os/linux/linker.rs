@@ -18,6 +18,7 @@ pub const ASM_STUB: &[&str] = &["-nostdlib"];
 ///
 /// It borrows host symbols on purpose, and `-Bsymbolic` keeps a definition this image carries
 /// binding to itself rather than to a same-named host library.
+#[cfg(any(feature = "compiler", test))]
 pub const GLOBAL_ASM: &[&str] = &["-nostartfiles", "-Wl,-Bsymbolic"];
 
 /// How this linker is told to send each call in `calls` to mirvm's replacement for it, or `None`
@@ -29,6 +30,7 @@ pub const GLOBAL_ASM: &[&str] = &["-nostartfiles", "-Wl,-Bsymbolic"];
 ///
 /// This platform can always express it, which is why the answer here is never `None`; the other
 /// side of the ladder is where the same question has a negative answer.
+#[cfg(any(feature = "compiler", test))]
 pub fn interpose_args(calls: &[&str]) -> Option<Vec<String>> {
     Some(
         calls
@@ -52,6 +54,7 @@ pub fn bridge_entry_name(call: &str) -> String {
 /// one that is load-bearing rather than convenient: it makes an undefined reference outside
 /// [`NATIVE_ARCHIVE_SUFFIX`] a link error, which is what holds an archive's dependency closure to
 /// what the guest's own crate graph declares.
+#[cfg(any(feature = "compiler", test))]
 pub const NATIVE_ARCHIVE_PREFIX: &[&str] = &[
     "-shared",
     "-fPIC",
@@ -62,6 +65,7 @@ pub const NATIVE_ARCHIVE_PREFIX: &[&str] = &[
 
 /// The libraries a static archive may reference directly, which the guest's own standard library
 /// would have contributed to its final link. They become the image's `DT_NEEDED` entries.
+#[cfg(any(feature = "compiler", test))]
 pub const NATIVE_ARCHIVE_SUFFIX: &[&str] =
     &["-lm", "-ldl", "-lpthread", "-lrt", "-lutil", "-lgcc_s"];
 
@@ -71,6 +75,7 @@ pub const NATIVE_ARCHIVE_SUFFIX: &[&str] =
 /// The whole archive has to go in: the symbols mirvm resolves out of it are reached by name at run
 /// time, so nothing references them at link time. `--whole-archive` is a mode that has to be turned
 /// off again, which is why the answer is three arguments and carries its own end.
+#[cfg(any(feature = "compiler", test))]
 pub fn whole_archive(archive: &std::path::Path) -> Vec<std::ffi::OsString> {
     vec![
         "-Wl,--whole-archive".into(),
@@ -85,14 +90,18 @@ pub fn whole_archive(archive: &std::path::Path) -> Vec<std::ffi::OsString> {
 /// An object file: this linker routes the call by name at link time, so the entry only has to be
 /// one of the link's inputs. Nothing is recorded in it by path, so [`BRIDGE_INSTALL_NAME`] is
 /// `None`.
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_ARTIFACT: &[&str] = &["-x", "assembler", "-fPIC", "-c"];
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_ARTIFACT_EXTENSION: &str = "o";
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_INSTALL_NAME: Option<&str> = None;
 
 /// Whether a bridge entry has to be reachable from outside the object it is built into.
 ///
 /// Not here: `--wrap` renames the reference within the one link the entry is an input of, so the
 /// entry is reached by a name that exists only inside that link.
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_ENTRY_IS_EXPORTED: bool = false;
 
 /// Whether a bridge slot has to be reachable by name through the loader.
@@ -102,4 +111,5 @@ pub const BRIDGE_ENTRY_IS_EXPORTED: bool = false;
 /// is refused outright — measured, the link fails with `R_X86_64_PC32 ... can not be used when
 /// making a shared object`. The slots stay private and the engine reads them out of the image's own
 /// symbol table.
+#[cfg(any(feature = "compiler", test))]
 pub const BRIDGE_SLOT_IS_EXPORTED: bool = false;

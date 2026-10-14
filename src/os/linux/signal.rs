@@ -62,6 +62,7 @@ pub const SA_UNSUPPORTED: i32 = 0x0000_0400;
 
 /// The SEGV dump is installed and implemented by the pair: its handler reads the fault RIP and
 /// the fault address out of the architecture's own `ucontext_t`.
+#[cfg(feature = "compiler")]
 pub use crate::os_arch::signal::install_segv_dump;
 
 // Linux promises that these long-established flags survive rt_sigaction.

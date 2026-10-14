@@ -81,6 +81,7 @@ impl FuncTable {
 
     /// Layer ids already occupy consecutive ranges. Moving the owners preserves both those ids
     /// and any initialized decode cells; no function body needs to be read during the merge.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn append(&mut self, other: Self) {
         let offset = self.len();
         self.parts

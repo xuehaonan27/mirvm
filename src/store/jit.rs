@@ -18,10 +18,13 @@
 //! atomic publish. A key the family already holds is not written again, so republishing a batch is
 //! idempotent.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+#[cfg(any(feature = "compiler", test))]
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+#[cfg(any(feature = "compiler", test))]
 use super::frags::{Inventory, Liveness};
 
 /// Pack header magic. Distinct from the fragment pack's, so neither reader mistakes the other's file.
@@ -322,10 +325,12 @@ impl Index {
 
 /// Size the family by its own indexes, and score distinct entries against `live`: an entry is live
 /// while its fragment is, because only the manifests can say whether the code will be asked for again.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn inventory_marked(live: Option<&HashSet<[u8; 32]>>) -> Inventory {
     inventory_marked_in(&crate::store::JIT.dir(), live)
 }
 
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn inventory_marked_in(dir: &Path, live: Option<&HashSet<[u8; 32]>>) -> Inventory {
     let packs = super::index::scan(dir, PackIndex::load);
     let mut seen: HashSet<[u8; 32]> = HashSet::new();

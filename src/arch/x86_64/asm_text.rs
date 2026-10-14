@@ -8,6 +8,7 @@
 
 /// The architecture as rustc spells it in [`rustc_target::asm::InlineAsmArch`]'s `Debug`, for a
 /// refusal message that names what this build does support.
+#[cfg(feature = "compiler")]
 pub const NAME: &str = "x86_64";
 
 /// Intel syntax. Every body mirvm emits is written in it, which is why the AT&T form is the one
@@ -15,10 +16,12 @@ pub const NAME: &str = "x86_64";
 pub const DIRECTIVE_INTEL: &str = ".intel_syntax noprefix\n";
 
 /// AT&T syntax, for a body that switched itself.
+#[cfg(feature = "compiler")]
 pub const DIRECTIVE_ATT: &str = ".att_syntax\n";
 
 /// The syntax directive a site carries, preceded by a newline so it cannot continue whatever came
 /// before it. Each asm site is independent, so a site cannot contaminate the next one.
+#[cfg(feature = "compiler")]
 pub fn syntax_prefix(att: bool) -> String {
     format!("\n{}", if att { DIRECTIVE_ATT } else { DIRECTIVE_INTEL })
 }

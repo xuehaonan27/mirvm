@@ -79,6 +79,7 @@ pub(crate) fn refill_syscall_slot(handle: usize) {
 /// happens in the load phase, where OS interaction is allowed; the returned u64 table moves
 /// to the `Module` and the execution phase only reads and calls directly, preserving purity.
 /// An empty site set yields an empty table at zero cost.
+#[cfg(feature = "compiler")]
 pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     try_materialize(sites)
         .unwrap_or_else(|error| panic!("asm-stub materialization failed: {error}"))
@@ -219,6 +220,7 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, Error> 
 ///
 /// The object is read here rather than by a tool: the tool's name, its flags and the spelling it
 /// prints a symbol under are each the object format's, and this build writes two of those.
+#[cfg(any(feature = "compiler", test))]
 fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
     let symbols = crate::native::symbol::symtab::object_undefined_symbols(
         so.to_str()?,
@@ -236,6 +238,7 @@ fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
 /// from the LLVM world: wasmtime's fiber asm carries many `//` comments that make cc error
 /// out. They must be stripped before feeding GAS. Quoting is tracked, so `//` inside a
 /// `"`/`'` string survives.
+#[cfg(any(feature = "compiler", test))]
 fn strip_slash_comments(asm: &mut String) {
     let mut out = String::with_capacity(asm.len());
     for line in asm.lines() {
@@ -271,6 +274,7 @@ fn strip_slash_comments(asm: &mut String) {
 /// reference guest symbols, so `-nostdlib` is not usable; `-nostartfiles` keeps
 /// dynamic-linker resolution, and RTLD_GLOBAL resolves guest fns named by naked `sym`
 /// operands. Also used by the bin load phase to materialize dependency manifest text.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     // The image is usable only if the calls `crate::vm::interpose` lists can be redirected, so ask
     // the platform before building anything: one whose linker cannot express the redirection has
@@ -371,9 +375,42 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     Ok(so.display().to_string().into())
 }
 
+#[cfg(test)]
+mod portable_tests {
+    use super::assemble;
+    use crate::native::artifact::asmtext::{Region, Visibility, Vocabulary};
+
+    #[test]
+    fn owned_global_assembly_preserves_symbol_bytes() {
+        let format = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+        let name = "mirvm_owned_assembly_probe";
+        let mut source = String::new();
+        format.open(&mut source, Region::Text { name });
+        source.push_str(".balign 8\n");
+        format.define_fn(&mut source, name, Visibility::Exported);
+        // The symbol contains data; no architecture-specific instruction is executed.
+        source.push_str(".quad 0x0123456789abcdef // an LLVM assembler comment\n");
+        format.end_fn(&mut source, name);
+        format.close(&mut source);
+        let path = std::ffi::CString::new(assemble(&source).unwrap().as_bytes()).unwrap();
+        let handle = crate::os::dll::open_with_flags(
+            &path,
+            crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
+        )
+        .unwrap();
+        // dlsym accepts the C name; the assembler's leading underscore is format-specific.
+        let symbol = std::ffi::CString::new(name).unwrap();
+        let address = crate::os::dll::sym(handle, &symbol);
+        assert_ne!(address, 0);
+        let value = unsafe { (address as *const u64).read_unaligned() };
+        unsafe { crate::os::dll::close(handle) };
+        assert_eq!(value, 0x0123456789abcdef);
+    }
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
-    use super::{materialize, try_materialize};
+    use super::try_materialize;
     use crate::vm::ir;
 
     #[test]
@@ -395,7 +432,7 @@ mirvm_asm_0:
 "#
             .to_owned(),
         };
-        let addrs = materialize(&[site]);
+        let addrs = try_materialize(&[site]).unwrap();
         let mut value = 0u64;
         let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
         unsafe { stub((&mut value as *mut u64).cast()) };
@@ -464,7 +501,7 @@ mirvm_asm_sc:
 "#
             .to_owned(),
         };
-        let addrs = materialize(&[site]);
+        let addrs = try_materialize(&[site]).unwrap();
         let mut pair = [0u64; 2];
         let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
         unsafe { stub((&mut pair as *mut u64).cast()) };

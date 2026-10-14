@@ -81,6 +81,7 @@ pub fn canonicalize_from_kernel_stub(
 
 /// Darwin's `__darwin_arm_exception_state64`, whose `__far` holds the fault address.
 #[repr(C)]
+#[cfg(any(feature = "compiler", test))]
 struct ExceptionState64 {
     far: u64,
     esr: u32,
@@ -89,6 +90,7 @@ struct ExceptionState64 {
 
 /// Darwin's `__darwin_arm_thread_state64`, whose `__pc` holds the faulting instruction.
 #[repr(C)]
+#[cfg(any(feature = "compiler", test))]
 struct ThreadState64 {
     x: [u64; 29],
     fp: u64,
@@ -101,6 +103,7 @@ struct ThreadState64 {
 
 /// Darwin's `__darwin_mcontext64`, which a `ucontext_t` points at.
 #[repr(C)]
+#[cfg(any(feature = "compiler", test))]
 struct Mcontext64 {
     es: ExceptionState64,
     ss: ThreadState64,
@@ -108,6 +111,7 @@ struct Mcontext64 {
 
 /// Darwin's `__darwin_sigaltstack`.
 #[repr(C)]
+#[cfg(any(feature = "compiler", test))]
 struct Sigaltstack {
     sp: *mut libc::c_void,
     size: usize,
@@ -118,6 +122,7 @@ struct Sigaltstack {
 /// Darwin's `ucontext_t`, which is what the kernel passes a handler and which therefore cannot be
 /// made opaque. Only the fields up to `uc_mcontext` are named, because only those are read.
 #[repr(C)]
+#[cfg(any(feature = "compiler", test))]
 struct Ucontext {
     onstack: i32,
     sigmask: u32,
@@ -134,6 +139,7 @@ struct Ucontext {
 /// from `/proc/self/maps`. This platform has neither that file nor a `vm_region` binding in `libc`,
 /// and this port does not declare one for a troubleshooting hook, so the two addresses are what the
 /// dump gives.
+#[cfg(feature = "compiler")]
 pub fn install_segv_dump() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -144,6 +150,7 @@ pub fn install_segv_dump() {
     }
 }
 
+#[cfg(feature = "compiler")]
 unsafe extern "C" fn segv_dump_handler(
     _sig: i32,
     _info: *mut libc::siginfo_t,

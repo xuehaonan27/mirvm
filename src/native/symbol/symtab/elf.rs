@@ -7,10 +7,12 @@
 
 use std::collections::HashMap;
 
-use super::{Error, Export};
-use crate::native::object::elf::{
-    self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
-};
+use super::Error;
+#[cfg(any(feature = "compiler", test))]
+use super::Export;
+use crate::native::object::elf::{self, SHN_RESERVED, SHN_UNDEF};
+#[cfg(any(feature = "compiler", test))]
+use crate::native::object::elf::{SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK};
 use crate::utils::bytes::{read_u16, read_u32, read_u64};
 
 /// One `.symtab`/`.dynsym` entry, resolved against its string table.
@@ -23,6 +25,7 @@ struct Symbol<'a> {
     name_offset: u32,
     value: u64,
     section_index: u16,
+    #[cfg(any(feature = "compiler", test))]
     binding: u8,
 }
 
@@ -41,6 +44,7 @@ fn symbol_at<'a>(
         .ok()?
         .checked_add(index.checked_mul(usize::try_from(table.entsize).ok()?)?)?;
     let name_offset = read_u32(bytes, base + elf::sym::NAME)?;
+    #[cfg(any(feature = "compiler", test))]
     let binding = bytes.get(base + elf::sym::INFO).copied()? >> 4;
     let section_index = read_u16(bytes, base + elf::sym::SHNDX)?;
     let value = read_u64(bytes, base + elf::sym::VALUE)?;
@@ -58,6 +62,7 @@ fn symbol_at<'a>(
         name_offset,
         value,
         section_index,
+        #[cfg(any(feature = "compiler", test))]
         binding,
     })
 }
@@ -110,6 +115,7 @@ pub(super) fn symbol_table_values(
 
 /// SHN_UNDEF enumeration over a single ELF64 LE byte slice (GLOBAL/WEAK bindings; the same
 /// structural walk as symbol_table_values, but selecting shndx == 0 with no filtering).
+#[cfg(any(feature = "compiler", test))]
 pub(super) fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
     let bad = || Error::malformed("not the expected ELF64 LE (or corrupted)");
     let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
@@ -145,6 +151,7 @@ pub(super) fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, Error
 }
 
 /// The dynamic table's defined entries: `.dynsym`, which is the surface other images bind to.
+#[cfg(any(feature = "compiler", test))]
 pub(super) fn elf_exports(bytes: &[u8], path: &str) -> Result<Vec<Export>, Error> {
     let bad = || {
         Error::malformed(format!(

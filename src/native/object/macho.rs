@@ -31,6 +31,7 @@ pub const LC_SYMTAB: u32 = 0x02;
 pub const N_SECT: u8 = 0x0e;
 pub const N_EXT: u8 = 0x01;
 /// `n_desc`'s bit for a weak definition.
+#[cfg(any(feature = "compiler", test))]
 pub const N_WEAK_DEF: u16 = 0x0080;
 /// The low byte of `section_64.flags`, which is the section's type. The two types a pointer array
 /// of functions can have, the type a modern ld64 gives the initializer list instead of one of
@@ -202,6 +203,7 @@ fn fixed_name(bytes: &[u8], at: usize) -> Option<String> {
 
 /// Whether `bytes` is a 64-bit Mach-O image at all, which is what a caller holding a member of an
 /// archive asks before reading symbols out of it.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn is_image(bytes: &[u8]) -> bool {
     read_u32(bytes, 0) == Some(MH_MAGIC_64)
 }

@@ -13,6 +13,7 @@
 /// Stub bytes: `movabs rax, target; jmp rax` (48 B8 <imm64> FF E0), 12B long.
 /// (`STUB_STRIDE = 16` is this 12B rounded up; the constant lives in
 /// `vm/codearena`.)
+#[cfg(feature = "compiler")]
 pub fn emit_stub_bytes(target: u64) -> [u8; 12] {
     let mut b = [0u8; 12];
     b[0] = 0x48;
@@ -52,6 +53,7 @@ pub fn int3() {
 /// The register the bridge entry for `call` loads its engine into: the register the replacement's
 /// trailing `owner` parameter arrives in, which the System V argument order puts after the call's
 /// own arguments.
+#[cfg(any(feature = "compiler", test))]
 pub fn bridge_owner_register(call: &str) -> Option<&'static str> {
     match call {
         "pthread_create" => Some("r8"),

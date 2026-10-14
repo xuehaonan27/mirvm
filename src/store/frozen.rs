@@ -47,6 +47,7 @@ pub(crate) fn split(region: &[u8], session: &mut Session) -> Vec<[u8; 32]> {
 
 impl System {
     /// The process's own store.
+    #[cfg(feature = "compiler")]
     pub(crate) fn open() -> System {
         Self::in_dir(crate::store::FROZEN.dir())
     }
@@ -116,6 +117,7 @@ impl System {
     /// The lock a publisher holds across the chunk pack and the manifest that names it. A filesystem
     /// that cannot lock publishes unlocked, as in the fragment store: the lock protects a share, not
     /// correctness.
+    #[cfg(feature = "compiler")]
     pub(crate) fn publish_lock(&self) -> Option<frags::Lock> {
         match frags::Lock::shared(&self.dir) {
             Ok(lock) => Some(lock),
@@ -131,6 +133,7 @@ impl System {
     }
 
     /// The exclusive lock of a mark-and-sweep pass.
+    #[cfg(feature = "compiler")]
     pub(crate) fn sweep_lock(&self) -> std::io::Result<frags::Lock> {
         frags::Lock::exclusive(&self.dir)
     }

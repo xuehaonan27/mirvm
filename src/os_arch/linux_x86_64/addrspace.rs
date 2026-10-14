@@ -30,12 +30,17 @@ pub const IMAGE_SPLINE_COUNT: usize = 1300;
 // ---- Three code-region families (P1 entry stubs: fn-ptr values made executable; isomorphic to but disjoint from the three frozen regions) ----
 
 /// Fixed base of the delta code region.
+#[cfg(any(feature = "compiler", test))]
 pub const DELTA_CODE_ADDR: usize = 0x6C00_0000_0000;
 /// Fixed base of the base code region.
+#[cfg(any(feature = "compiler", test))]
 pub const BASE_CODE_ADDR: usize = 0x6D00_0000_0000;
 /// Dependency image code-region spline (k uses the same assignment order as the frozen spline).
+#[cfg(any(feature = "compiler", test))]
 pub const IMAGE_CODE_SPLINE: usize = 0x6E00_0000_0000;
+#[cfg(any(feature = "compiler", test))]
 pub const IMAGE_CODE_STEP: usize = 1 << 34;
+#[cfg(any(feature = "compiler", test))]
 pub const IMAGE_CODE_COUNT: usize = 1300;
 
 /// The shadow instruction-pointer base a frame falls back to when no symbol image names it.

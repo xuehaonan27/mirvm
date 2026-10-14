@@ -90,6 +90,7 @@ impl<'a> ParsedPackage<'a> {
     }
 }
 
+#[cfg(any(feature = "compiler", test))]
 pub(super) fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, Error> {
     let bid = crate::options::build::BUILD_ID.as_bytes();
     let bid_len =

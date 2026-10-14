@@ -67,6 +67,7 @@ pub const STB_GLOBAL: u8 = 1;
 pub const STB_WEAK: u8 = 2;
 /// A binding whose definitions the C++ ABI asks the loader to merge into one. Two images defining
 /// one such name is not a conflict, which is why a caller that rejects collisions has to know it.
+#[cfg(any(feature = "compiler", test))]
 pub const STB_GNU_UNIQUE: u8 = 10;
 
 /// `st_info >> 4`: the binding of a symbol.
@@ -245,6 +246,7 @@ pub struct Section {
 ///
 /// `None` when that table or an entry's name offset is unreadable, which is what a caller deciding
 /// something from the names needs to know rather than an empty list.
+#[cfg(any(feature = "compiler", test))]
 pub fn section_names(bytes: &[u8], header: &FileHeader) -> Option<Vec<String>> {
     let table = section_at(bytes, header, usize::from(header.shstrndx))?;
     let start = usize::try_from(table.offset).ok()?;

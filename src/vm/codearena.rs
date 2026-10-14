@@ -12,6 +12,7 @@
 
 /// Spacing between stubs, which is the architecture's: the stub bytes plus whatever padding keeps
 /// slot starts aligned.
+#[cfg(feature = "compiler")]
 pub const STUB_STRIDE: u64 = crate::arch::asmstub::STUB_STRIDE;
 
 /// Code-region capacity (virtually reserved; one stub entry per instance, 64 MiB >> any real workload).
@@ -20,6 +21,7 @@ pub(crate) const CODE_CAP: usize = 64 << 20;
 
 /// Code-region base values, spline parameters, and whitelist criteria are centralized in
 /// `crate::os_arch::addrspace` (this pair's fixed-address layout).
+#[cfg(feature = "compiler")]
 use crate::os_arch::addrspace::{
     BASE_CODE_ADDR, DELTA_CODE_ADDR, image_code_addr, is_valid_code_home,
 };
@@ -29,6 +31,13 @@ pub struct StubArena {
     base: *mut u8,
     used: usize,
     at_fixed_base: bool,
+    #[cfg_attr(
+        not(feature = "compiler"),
+        expect(
+            dead_code,
+            reason = "Compiler reservation metadata retains the same Instance layout in both builds."
+        )
+    )]
     home: usize,
 }
 
@@ -44,6 +53,7 @@ impl Default for StubArena {
     }
 }
 
+#[cfg(feature = "compiler")]
 impl StubArena {
     /// Materialize at a fixed base (shared site-selection rule for lower cold path and startup rebuild):
     /// first try this region's fixed base (cacheability prerequisite); if occupied fall back to a
@@ -140,10 +150,6 @@ impl StubArena {
             .expect("StubArena: mprotect RX failed");
     }
 
-    pub fn at_fixed_base(&self) -> bool {
-        self.at_fixed_base
-    }
-
     pub fn home(&self) -> usize {
         self.home
     }
@@ -153,6 +159,13 @@ impl StubArena {
     /// cache is refused by the same rule as the frozen regions.
     pub fn is_mapped(&self) -> bool {
         !self.base.is_null()
+    }
+}
+
+#[cfg(any(feature = "compiler", test))]
+impl StubArena {
+    pub fn at_fixed_base(&self) -> bool {
+        self.at_fixed_base
     }
 }
 

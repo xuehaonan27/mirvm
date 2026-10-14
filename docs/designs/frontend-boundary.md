@@ -216,9 +216,11 @@ on the small probes, without establishing representative-workload or ordinary-CL
 Native archive materialization separates byte validation/linking from compiler metadata discovery
 and Rust-symbol recovery. The latter supplies a retry callback only after a failed link; the common
 materializer and native lifecycle fixtures compile without rustc. Sysroot producer tests remain
-compiler-only while managed-input validation runs in both configurations. The runtime library has
-its own release-test gate. Unused producer/tool helpers still prevent a clean no-compiler lint gate;
-the narrow runner probe does not cover project orchestration or the complete lifecycle/capture contract.
+compiler-only while managed-input validation runs in both configurations. Dependency resolution,
+fetching, artifact producers and command reports follow the compiler feature; runtime tests retain
+the fixture producers they exercise. Runtime instance layouts and serialized formats remain common
+to both builds. The runtime library has its own warnings-denied lint and release-test gates. The
+narrow runner probe does not cover project orchestration or the complete lifecycle/capture contract.
 
 A compiler worker's output cannot retain its process's helper pointers, native handles or `tcx`
 values. Use the existing owned identities, relocation recipes and per-instance restoration rules.
@@ -228,8 +230,8 @@ an explicit artifact identity: current `--vm-call` is an execution choice, not c
 
 ## 6. Bounded experiments and acceptance
 
-1. **Runtime isolation:** close the compiler-independent lint/test boundary and connect ordinary
-   project/script dispatch to owned execution products. Select miss routing against in-process
+1. **Runtime isolation:** connect ordinary project/script dispatch to compiler-independent execution
+   of owned products. Select miss routing against in-process
    preparation: child startup, publication and revalidation can outweigh the hit-path saving.
    Preserve working directory/environment, compiler diagnostics that prevent publication, capture,
    signals and close. Measure representative package/image hits and misses, including transfer and

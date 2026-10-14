@@ -71,10 +71,12 @@ fn pack_path(dir: &Path, bytes: &[u8]) -> PathBuf {
 /// manifest pointing at nothing. A sweep holds it exclusive across its mark and its sweep for the same
 /// reason in the other direction. `flock` releases it when the process dies, so a crash cannot wedge
 /// the family.
+#[cfg(feature = "compiler")]
 pub(crate) struct Lock {
     file: std::fs::File,
 }
 
+#[cfg(feature = "compiler")]
 impl Lock {
     pub(crate) fn shared(dir: &Path) -> std::io::Result<Lock> {
         Lock::take(dir, false)
@@ -101,6 +103,7 @@ impl Lock {
     }
 }
 
+#[cfg(feature = "compiler")]
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = crate::os::fs::unlock(std::os::fd::AsRawFd::as_raw_fd(&self.file));
@@ -113,6 +116,7 @@ impl Drop for Lock {
 /// sweep cannot miss a manifest that is being written, and a fragment a sweep takes is a miss the cold
 /// path rebuilds, never a wrong value. So a failure is reported and the publish goes on unlocked — the
 /// sweep itself, which can lose a share, does not proceed without it.
+#[cfg(feature = "compiler")]
 pub(crate) fn publish_lock() -> Option<Lock> {
     match Lock::shared(&crate::store::FRAGS.dir()) {
         Ok(lock) => Some(lock),
@@ -154,6 +158,7 @@ impl Session {
 
     /// Publish everything the family does not already hold as one pack. Publishing nothing writes no
     /// file: an empty pack is pure overhead in every later index scan.
+    #[cfg(feature = "compiler")]
     pub(crate) fn publish(self) -> std::io::Result<Published> {
         self.publish_in(&crate::store::FRAGS.dir())
     }
@@ -321,6 +326,7 @@ pub(crate) struct Index {
 
 impl Index {
     /// Load the index of every readable pack in the family.
+    #[cfg(feature = "compiler")]
     pub(crate) fn load() -> Index {
         Self::load_in(&crate::store::FRAGS.dir())
     }

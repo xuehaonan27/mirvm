@@ -13,6 +13,7 @@
 pub(crate) const PLAIN_CODE_PINS_CTX: bool = false;
 
 pub mod addrspace;
+#[cfg(any(feature = "compiler", test))]
 pub mod bridge;
 pub mod reloc;
 pub mod signal;

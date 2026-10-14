@@ -13,11 +13,13 @@ use super::super::instance::Instance;
 use super::super::ir::Module;
 use super::super::native_lifecycle::{executable_ranges, materialize};
 use super::NativeImage;
+#[cfg(feature = "compiler")]
 use super::identity::copy_unique;
 
 /// Lowering needs symbols from self-produced objects, but native constructors
 /// belong to Engine startup, not compilation. Load a private copy with its
 /// lifecycle deferred and intentionally keep that mapping for the process.
+#[cfg(feature = "compiler")]
 pub(crate) fn open_for_lower(path: &Path) -> Result<NativeImage, crate::error::Error> {
     let dir = crate::store::LOWER_NATIVE.dir();
     std::fs::create_dir_all(&dir).map_err(|e| {

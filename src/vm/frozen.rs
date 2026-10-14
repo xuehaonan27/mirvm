@@ -54,6 +54,7 @@ impl FrozenSnapshot {
     /// The snapshot as the `(home, bytes)` pair a stored form carries. `link_base` is dropped because
     /// it is always `home` (see [`Self::from_home_and_bytes`]); what a store needs to keep is the
     /// domain, and the bytes that are laid out in it.
+    #[cfg(feature = "compiler")]
     pub(crate) fn into_home_and_bytes(self) -> (usize, Vec<u8>) {
         (self.home, self.bytes)
     }

@@ -18,6 +18,13 @@ use std::collections::hash_map::Entry;
 #[derive(Debug, thiserror::Error, serde::Serialize)]
 pub(crate) enum Error {
     #[error("{detail}")]
+    #[cfg_attr(
+        not(feature = "compiler"),
+        expect(
+            dead_code,
+            reason = "Only compiler metadata discovery reports a missing archive."
+        )
+    )]
     Missing { detail: String },
 
     #[error("{detail}")]

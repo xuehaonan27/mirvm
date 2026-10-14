@@ -24,7 +24,9 @@
 
 #[cfg(feature = "compiler")]
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+#[cfg(any(feature = "compiler", test))]
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(feature = "compiler")]
 use crate::cargoless::driver::compile_plan;
@@ -42,6 +44,7 @@ pub(crate) mod managed;
 static GENERATION: std::sync::OnceLock<managed::Generation> = std::sync::OnceLock::new();
 static SELECTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(feature = "compiler")]
 pub(crate) fn managed_input(path: &Path) -> Option<managed::Input> {
     GENERATION.get()?.input(path)
 }
@@ -53,6 +56,7 @@ pub(crate) fn managed_inputs_current(inputs: &[managed::Input]) -> bool {
         })
 }
 
+#[cfg(feature = "compiler")]
 pub(crate) fn managed_provenance(
     input: &managed::Input,
 ) -> Option<crate::utils::content::FileStamp> {
@@ -185,8 +189,11 @@ crate::diag_codes! {
 /// `build.rs` bakes in the sysroot this binary was built against, and every consumer trusts only
 /// that one: a `rustc` on `PATH` may belong to another toolchain, and a proc-macro dylib's compiler
 /// version must match the interpreter session's exactly.
+#[cfg(feature = "compiler")]
 pub(crate) mod toolchain {
-    use std::path::{Path, PathBuf};
+    #[cfg(feature = "compiler")]
+    use std::path::Path;
+    use std::path::PathBuf;
 
     /// The pinned toolchain's root.
     pub(crate) fn root() -> &'static Path {
@@ -215,6 +222,7 @@ pub(crate) mod toolchain {
 }
 
 /// Location of the stamp file (the content key) inside the sysroot.
+#[cfg(any(feature = "compiler", test))]
 fn stamp_file(sysroot_dir: &Path) -> PathBuf {
     sysroot_dir
         .join("lib/rustlib")
@@ -229,6 +237,7 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// dependency fingerprint — has to name the same one: a base image lowered from one std and merged
 /// with a delta compiled against another puts two copies of the language runtime in a single module,
 /// which is exactly the shape `verify` refuses as two main panic boundaries.
+#[cfg(feature = "compiler")]
 pub(crate) fn effective_dir() -> PathBuf {
     GENERATION
         .get()
@@ -297,6 +306,7 @@ pub fn ensure_sysroot() -> Result<PathBuf, Error> {
 
 /// Stamp value of the sysroot in effect (reused in the base-image key); `None` when it is not
 /// built, or was not built by mirvm and so carries no stamp.
+#[cfg(feature = "compiler")]
 pub(crate) fn current_stamp_value() -> Option<String> {
     if let Some(generation) = GENERATION.get() {
         return Some(crate::utils::content::digest_hex(&generation.id));

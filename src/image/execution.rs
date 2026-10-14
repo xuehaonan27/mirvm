@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::depinfo::InputManifest;
 use crate::utils::content::FileStamp;
 use crate::vm::archive::{Image, VerifiedArtifact, bytes::Bytes, functions, meta};
+#[cfg(any(feature = "compiler", test))]
 use crate::vm::{instance::Instance, ir::Module};
 
 #[derive(Serialize, Deserialize)]
@@ -84,6 +85,7 @@ fn load_bytes(bytes: Vec<u8>, args: &[String]) -> Option<VerifiedArtifact> {
     Some(artifact)
 }
 
+#[cfg(feature = "compiler")]
 pub(crate) fn store(
     args: &[String],
     inputs: InputManifest,
@@ -104,6 +106,7 @@ pub(crate) fn store(
         .map_err(|error| crate::fail!(Image, format!("cannot publish execution image: {error}")))
 }
 
+#[cfg(any(feature = "compiler", test))]
 fn encode(
     args: &[String],
     inputs: InputManifest,

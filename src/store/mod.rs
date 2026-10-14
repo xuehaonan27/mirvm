@@ -28,12 +28,16 @@
 //! `mirvm cache purge`.
 
 pub(crate) mod entry;
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod frags;
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod frozen;
 mod index;
 pub(crate) mod jit;
+#[cfg(any(feature = "compiler", test))]
 pub(crate) mod report;
 
+#[cfg(any(feature = "compiler", test))]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +58,7 @@ pub(crate) enum Class {
 
 impl Class {
     /// Every class, in the order `status` prints them.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) const ALL: [Class; 4] = [Class::Cache, Class::Data, Class::Build, Class::Run];
 
     /// Directory name under the store root, and the heading `status` groups by.
@@ -67,6 +72,7 @@ impl Class {
     }
 
     /// The lifetime contract, printed by `status` so the classification is not folklore.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn contract(self) -> &'static str {
         match self {
             Class::Cache => "derived; safe to delete at any time",
@@ -79,6 +85,7 @@ impl Class {
 
 /// How the entries inside a family are named and keyed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg(any(feature = "compiler", test))]
 pub(crate) enum Shape {
     /// One artifact: the directory and everything in it is published and removed as a unit.
     Unit,
@@ -96,6 +103,7 @@ pub(crate) enum Shape {
 
 /// The family flag of `mirvm cache purge` that takes a whole family, as declared in the register.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg(any(feature = "compiler", test))]
 pub(crate) enum FamilyFlag {
     Base,
     Deps,
@@ -114,9 +122,11 @@ pub(crate) struct Family {
     /// Directory name inside the class, with `{host}` standing for the target triple a sysroot was
     /// built for.
     dir_name: &'static str,
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) shape: Shape,
     /// The `--flag` that takes this whole family; `None` for a family reached only through its
     /// class (`--all` / `--data`).
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) flag: Option<FamilyFlag>,
 }
 
@@ -144,6 +154,7 @@ impl Family {
 
 /// Applies one register shape. An unknown spelling is a compile error, so the register cannot grow a
 /// shape the rest of the module does not understand.
+#[cfg(any(feature = "compiler", test))]
 macro_rules! shape_of {
     (unit) => {
         Shape::Unit
@@ -160,6 +171,7 @@ macro_rules! shape_of {
 }
 
 /// The optional `flag(..)` of a register line.
+#[cfg(any(feature = "compiler", test))]
 macro_rules! flag_of {
     () => {
         None
@@ -172,12 +184,14 @@ macro_rules! flag_of {
 /// The extension every per-crate unit manifest carries. Spelled here, beside the family that owns the
 /// directory, because the store compiles without the image layer that writes those manifests (the TSan
 /// purity fence builds both), and `image::units` re-exports this name rather than owning it.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) const UNIT_EXT: &str = "unit";
 
 /// What the current-generation manifests name: the fragments in `cache/frags` and the frozen chunks
 /// in `cache/frozen`. One walk fills both, because one manifest names both, and `image::collect` is
 /// what fills it: the store only needs the marks to size a family's live and dead halves.
 #[derive(Default)]
+#[cfg(any(feature = "compiler", test))]
 pub(crate) struct Live {
     pub(crate) fragments: HashSet<[u8; 32]>,
     pub(crate) chunks: HashSet<[u8; 32]>,
@@ -185,40 +199,48 @@ pub(crate) struct Live {
 
 /// Declares the family register, one family per line:
 ///
-/// `Class CONST "dir" shape[(ext)] [flag(Flag)];`
+/// `[attributes] Class CONST "dir" shape[(ext)] [flag(Flag)];`
 ///
 /// The line declares a [`Family`] const the writers name (`store::CONST.dir()`) and puts it in
 /// [`FAMILIES`], which `status` and `purge` walk. The comment above a line is the family's
 /// ownership, and it opens with the `owners:` clause the `store naming` check reads: the module(s)
 /// allowed to name `store::CONST` — its writer, plus a reader with a reason to relocate the path —
 /// followed by the key or contract that makes deleting the family safe. `{host}` in a directory name
-/// is resolved by [`Family::path`].
+/// is resolved by [`Family::path`]. Optional attributes select a producer's build boundary; the
+/// compiler and its tests retain the complete inventory.
 macro_rules! families {
-    ( $( $class:ident $entry:ident $dir:literal $shape:ident $(($ext:expr))? $( flag($flag:ident) )? ; )* ) => {
+    ( $( $(#[$attr:meta])* $class:ident $entry:ident $dir:literal $shape:ident $(($ext:expr))? $( flag($flag:ident) )? ; )* ) => {
         $(
+            $(#[$attr])*
             #[doc = concat!("`", $dir, "`: one family of the store, declared by the register below.")]
             pub(crate) const $entry: Family = Family {
                 class: Class::$class,
                 dir_name: $dir,
+                #[cfg(any(feature = "compiler", test))]
                 shape: shape_of!($shape $(($ext))?),
+                #[cfg(any(feature = "compiler", test))]
                 flag: flag_of!($($flag)?),
             };
         )*
 
         /// The register: every family in the store, in the order `status` prints them.
+        #[cfg(any(feature = "compiler", test))]
         pub(crate) const FAMILIES: &[Family] = &[ $( $entry ),* ];
     };
 }
 
 families! {
     // owners: image::base — the MIR-rich std base; keyed by build id + sysroot stamp, `build_id` first.
+    #[cfg(any(feature = "compiler", test))]
     Cache BASE            "base"            generation("img") flag(Base);
     // owners: image::deps, image::collect — the lowered registry dependency closure; keyed by base key
     // + `--extern` stamps.
+    #[cfg(any(feature = "compiler", test))]
     Cache DEPS            "deps"            generation("img") flag(Deps);
     // owners: image::program, image::collect — one program's post-mono engine IR; keyed by rustc args
     // + dep-info, `build_id` first. The entry is a fragment manifest behind a header, so collection
     // marks the bodies it names.
+    #[cfg(any(feature = "compiler", test))]
     Cache IR              "ir"              generation("bin") flag(Ir);
     // owners: image::execution — independently owned, bound execution images; removing one only
     // costs reconstruction from the sharing manifests. Cleared with the program IR family.
@@ -226,11 +248,13 @@ families! {
     // owners: store::frags, image::collect — the shared canonical function bodies every manifest
     // references by content address; a pack is reachable only through the manifests that name its
     // fragments.
+    #[cfg(any(feature = "compiler", test))]
     Cache FRAGS           "frags"           pack flag(Frags);
     // owners: store::frozen, image::collect — one manifest's frozen region, cut into fixed-size
     // chunks and addressed by their own content, so two revisions of a layer share the chunks they
     // did not change. Reachable only through the manifests that name its chunks, and packed in the
     // fragment store's own format.
+    #[cfg(any(feature = "compiler", test))]
     Cache FROZEN          "frozen"          pack flag(Frozen);
     // owners: store::jit, vm::jit::compiler — one compiled symbol's code per `(fragment, jit-key)`,
     // reachable only through the fragment id it was compiled from. Packs like the fragment store, and
@@ -240,17 +264,21 @@ families! {
     // manifest digest so a grown unit adds a manifest instead of overwriting the one a running program
     // pinned. Generational like the closure manifest its format matches: a manifest another build
     // wrote is prunable.
+    #[cfg(any(feature = "compiler", test))]
     Cache UNITS           "units"           generation(UNIT_EXT)      flag(Units);
     // owners: lower::generic::products — unbound generic templates and negative export probes;
     // keyed by defining crate metadata, target, semantic profile and build, independent of consumers.
+    #[cfg(any(feature = "compiler", test))]
     Cache GENERIC_TEMPLATES "generic-templates" generation("bin") flag(Units);
     // owners: native::artifact::assembly — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // owners: native::artifact::assembly, pack — materialized `global_asm!`/naked-fn objects; keyed by the
     // final text. `pack` names the family to rewrite those paths into a package.
+    #[cfg(any(feature = "compiler", test))]
     Cache GLOBAL_ASM      "global-asm"      keyed;
     // owners: native::artifact::archive — a PIC `.a` converted into a dlopen-able `.so`; keyed by
     // archive + cc identity.
+    #[cfg(any(feature = "compiler", test))]
     Cache NATIVE_ARCHIVES "native-archives" keyed;
     // owners: pack — native libraries carried inside a `.mirvm`; keyed by their content hash.
     Cache PACKAGE_NATIVE  "package-native"  keyed;
@@ -258,12 +286,15 @@ families! {
     // keyed by its IR arguments. The compile worker writes the order under the owner's path.
     Cache PACKAGE_HEAT    "package-heat"    keyed;
     // owners: cargoless::registry — crate and git sources, read through to `~/.cargo`; fetched, not derived.
+    #[cfg(any(feature = "compiler", test))]
     Data  REGISTRY        "registry"        unit;
     // owners: sysroot — the MIR-rich std; keyed by the toolchain stat + build recipe.
     Data  SYSROOT         "sysroot-{host}"  unit;
     // owners: cli::frontmatter — materialized frontmatter projects; keyed by script path.
+    #[cfg(any(feature = "compiler", test))]
     Build SCRIPTS         "scripts"         unit flag(Scripts);
     // owners: sysroot — `build_sysroot` staging; reused across rebuilds, so `--data` keeps it.
+    #[cfg(any(feature = "compiler", test))]
     Build SYSROOT_BUILD   "sysroot-build"   unit;
     // owners: options, cli::frontmatter, cargoless::audit, cargoless::schedule, sysroot — the shared
     // target root of every track; rebuilt from the sources.
@@ -271,6 +302,7 @@ families! {
     // owners: vm::native_instance — per-Engine copies of required native libraries (glibc keys by path).
     Run   RUNTIME_NATIVE  "runtime-native"  unit;
     // owners: vm::native_instance — private copies of self-produced objects while lowering opens them.
+    #[cfg(any(feature = "compiler", test))]
     Run   LOWER_NATIVE    "lower-native"    unit;
 }
 /// The staging name for `target`.
@@ -353,12 +385,14 @@ pub(crate) fn input_lease(root: &Path, exclusive: bool) -> std::io::Result<Input
     input_lock(root, ".managed-inputs.lock", exclusive)
 }
 
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn input_writer(root: &Path) -> std::io::Result<InputLease> {
     input_lock(root, ".managed-publish.lock", true)
 }
 
 /// Whether a generational entry belongs to this build.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(any(feature = "compiler", test))]
 enum Staleness {
     Current,
     Stale,
@@ -367,6 +401,7 @@ enum Staleness {
 }
 
 /// Classify one entry of a generational family.
+#[cfg(any(feature = "compiler", test))]
 fn classify(path: &Path) -> Staleness {
     if is_orphan(path) {
         return Staleness::Garbage;
@@ -382,6 +417,7 @@ fn classify(path: &Path) -> Staleness {
 ///
 /// Only `ext` entries and dot-prefixed orphans are classified; anything else (a build log and other
 /// byproducts, the `src/` directory the base-image build writes) is left alone and unreported.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn split_generational(
     dir: &Path,
     ext: &str,
@@ -405,6 +441,7 @@ pub(crate) fn split_generational(
 }
 
 /// Whether a path is one of the dot-prefixed orphans a failed publish leaves behind.
+#[cfg(any(feature = "compiler", test))]
 fn is_orphan(path: &Path) -> bool {
     path.file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with('.'))
@@ -415,6 +452,7 @@ fn is_orphan(path: &Path) -> bool {
 /// Zero-decode peek: postcard writes a `String` as a varint length followed by UTF-8, and a full
 /// decode would restore the entry's frozen region and map memory. 32 bytes are enough — a build id
 /// is always 16 lowercase hex digits (`{:016x}`).
+#[cfg(any(feature = "compiler", test))]
 fn entry_build_id(path: &Path) -> Option<String> {
     use std::io::Read;
     let mut buf = [0u8; 32];
@@ -428,6 +466,7 @@ fn entry_build_id(path: &Path) -> Option<String> {
 
 /// postcard varint (1.x stable scheme: ≤250 single byte; 0xFB=u16 / 0xFC=u32 / 0xFD=u64 /
 /// 0xFE=u128 little-endian follows). Returns (value, bytes consumed).
+#[cfg(any(feature = "compiler", test))]
 fn varint(bytes: &[u8]) -> Option<(u128, usize)> {
     let (&tag, rest) = bytes.split_first()?;
     Some(match tag {

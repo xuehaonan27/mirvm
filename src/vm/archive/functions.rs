@@ -1,13 +1,18 @@
 //! One aligned, immutable function archive. Structural validation runs before any borrowed view
 //! is exposed; verification and demand decoding subsequently use the same owned bytes.
 
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::Deserialize;
+#[cfg(any(feature = "compiler", test))]
+use rkyv::{Archive, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use crate::error::Error;
-use crate::vm::ir::{ArchivedFuncBody, FuncBody, FuncTable, GenericTemplate, SharedBody};
+use crate::vm::ir::{ArchivedFuncBody, FuncBody, GenericTemplate, SharedBody};
+
+#[cfg(any(feature = "compiler", test))]
+use crate::vm::ir::FuncTable;
 
 pub(crate) struct Functions {
     bytes: Arc<super::bytes::Bytes>,
@@ -147,12 +152,14 @@ impl Functions {
 
 /// Copy immutable chunks and encode only owned bodies. The chunk table stores byte lengths;
 /// ids inside each chunk retain their absolute positions in the concatenated function table.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn encode(funcs: &FuncTable) -> Result<rkyv::AlignedVec, Error> {
     enum ChunkBytes<'a> {
         Borrowed(&'a [u8]),
         Owned(rkyv::AlignedVec),
     }
     impl ChunkBytes<'_> {
+        #[cfg(any(feature = "compiler", test))]
         fn bytes(&self) -> &[u8] {
             match self {
                 Self::Borrowed(bytes) => bytes,
@@ -202,6 +209,7 @@ pub(crate) fn encode(funcs: &FuncTable) -> Result<rkyv::AlignedVec, Error> {
 }
 
 /// Serialize borrowed bodies directly into the Vec archive layout, without cloning the IR.
+#[cfg(any(feature = "compiler", test))]
 fn encode_owned(funcs: &[FuncBody]) -> Result<rkyv::AlignedVec, Error> {
     struct Borrowed<'a>(&'a [FuncBody]);
 

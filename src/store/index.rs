@@ -76,6 +76,7 @@ fn paths(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Inventory and collection read the authoritative indexes, including packs no lookup touches.
+#[cfg(any(feature = "compiler", test))]
 pub(super) fn scan<T>(dir: &Path, mut read: impl FnMut(&Path) -> Option<T>) -> Vec<(PathBuf, T)> {
     paths(dir)
         .into_iter()

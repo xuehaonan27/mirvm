@@ -103,6 +103,7 @@ impl InputManifest {
     }
 
     /// A distributed package records file provenance without depending on the producer's store.
+    #[cfg(feature = "compiler")]
     pub(crate) fn provenance_files(&self) -> Option<Vec<FileStamp>> {
         let mut files = self.files.clone();
         for input in &self.managed {

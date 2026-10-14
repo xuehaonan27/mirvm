@@ -285,8 +285,7 @@ probe changes cfg, target and compiler commit independently and checks build-ide
 compiler/runtime features retain the same identity, and failed queries fail the build. The independent
 runtime runner executes the generic package's normal and fork cases with native stdout agreement.
 Release builds, all-target/all-feature Clippy for the compiler build, formatting and repository
-boundaries pass. The no-compiler release build still reports existing unused producer-code warnings;
-its lint boundary remains open. No full runtime suite was run for this timing comparison. The
+boundaries pass. No full runtime suite was run for this timing comparison. The
 [preparation harness](../experiments/preparation/README.md) owns reproduction.
 
 ### Frontend research
@@ -418,11 +417,11 @@ flag. Native stdout and exit status agree.
 
 Native archive materialization now has a compiler-independent byte/link layer and a compiler-only
 metadata/symbol-recovery layer. Runtime unit tests use the same native fixture producer, preserving
-native interposition and lifecycle coverage. The release runtime inventory has 376 passing checks
-and one existing ignored check, established by a full batch and focused reruns after failures were
-fixed. The final managed-input check passes with the eight-check sysroot subset. Compiler-build
-validation passes 33 native checks, ten sysroot checks and the trace boundary check. `repo-quality`
-includes the release runtime library tests in addition to the compiler build's existing gates.
+native interposition and lifecycle coverage. The release runtime inventory passes 375 checks with
+one existing ignored check in one batch. Command-report tests belong to the compiler build; a
+portable assembly fixture verifies generated symbol bytes and comment handling on both supported
+hosts. Compiler-build validation also covers native, sysroot and trace boundaries. `repo-quality`
+includes strict all-target runtime Clippy and release runtime library tests alongside the compiler gates.
 
 A C-archive/Rust-callback fixture forces the real compiler symbol-recovery path in reference and
 candidate binaries. Both packages match native output, and emitted trampoline assembly and its
@@ -431,6 +430,9 @@ runtime. The existing package embedding fixture, linked to the no-compiler libra
 instance creation, constructors/finalizers, native and assembly callbacks, explicit close, stale
 callback rejection and instance-address isolation. Compiler/runtime build identities agree and the
 runtime executable's dynamic dependencies contain neither rustc nor LLVM.
+With JIT caching enabled, a compiler-built runner writes 610 entries for the native fixture; the
+independent runtime and then the compiler-built runner each reuse all 610 with zero misses and
+native-matching output. This checks cache sharing across the feature boundary as well as fresh JIT execution.
 
 The release checks use one captured native-handler address across codegen units and distinct restorer
 code, avoiding function-pointer duplication/merging assumptions. The trace ABI check observes the
@@ -441,9 +443,15 @@ directory inode identities and file revisions; delayed directory timestamps cann
 an unchanged snapshot. Receipt hits still compare full metadata and content checks remain mandatory
 on a mismatch.
 
-Release builds and all-target/all-feature Clippy with warnings denied pass for the compiler build.
-The compiler-independent library still emits unused-producer/tool warnings and does not yet meet a
-warnings-denied lint gate. Ordinary project scheduling, compile/guest environment
+Both compiler and compiler-independent builds pass all-target Clippy with warnings denied.
+The runtime feature excludes dependency resolution/fetching, command reports and unused artifact
+producers; tests retain the producers needed by native, archive and managed-input fixtures. The
+Linux runtime's normal dependency graph has 72 packages rather than 109, excluding the root package:
+seven direct compiler-only dependencies remove 37 packages from this graph, including HTTP/TLS,
+compression and dependency-solving libraries. Build/dev dependencies are outside that count. This
+establishes a smaller build dependency surface, not a measured startup improvement. Runtime instance
+layouts, serialized formats and emitted assembly remain shared across feature configurations.
+Ordinary project scheduling, compile/guest environment
 transitions, full lifecycle/capture qualification and representative workload measurements remain
 open in [frontend-boundary.md](designs/frontend-boundary.md). Default CLI routing is unchanged.
 

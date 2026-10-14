@@ -67,6 +67,7 @@ impl Error {
 
 use std::collections::HashMap;
 
+#[cfg(any(feature = "compiler", test))]
 use crate::native::object::ar;
 use crate::native::object::elf::{SHT_DYNSYM, SHT_SYMTAB};
 
@@ -114,6 +115,7 @@ pub fn hidden_symtab_values(
 /// (skipping the ar symbol table and long-name table members), read each ELF64 member's
 /// `.symtab`, and collect the names of GLOBAL/WEAK symbols with `SHN_UNDEF`. This parses bytes
 /// (the same structural walk as `symbol_table_values`) and never parses tool text output.
+#[cfg(any(feature = "compiler", test))]
 pub fn archive_undefined_symbols(
     archive_path: &str,
     format: crate::native::object::ObjectFormat,
@@ -137,6 +139,7 @@ pub fn archive_undefined_symbols(
 ///
 /// The format is a parameter for the same reason [`object_undefined_symbols`]'s is: it is the
 /// platform's, because the toolchain that produced the archive is what decided it.
+#[cfg(any(feature = "compiler", test))]
 fn archive_undefined_symbols_in(
     bytes: &[u8],
     format: crate::native::object::ObjectFormat,
@@ -173,6 +176,7 @@ fn archive_undefined_symbols_in(
 /// Which names matter is the caller's question — it compares them against the symbols the guest
 /// itself defines — so this only answers what the object says. The format is a parameter because
 /// it is the platform's: the linker that produced the object is what decided it.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn object_undefined_symbols(
     path: &str,
     format: crate::native::object::ObjectFormat,
@@ -192,6 +196,7 @@ pub(crate) fn object_undefined_symbols(
 /// Weakness is what decides whether two images defining one name is a conflict: two strong
 /// definitions leave the choice to load order, while one strong definition wins outright, which is
 /// the resolution native static linking would have made.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) struct Export {
     pub(crate) name: Box<str>,
     pub(crate) weak: bool,
@@ -201,6 +206,7 @@ pub(crate) struct Export {
 ///
 /// Only the offered ones. A symbol the image keeps to itself cannot collide with another image's,
 /// because resolution order puts the image's own definition first whatever else the process holds.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn object_exports(
     path: &str,
     format: crate::native::object::ObjectFormat,

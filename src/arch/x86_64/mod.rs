@@ -3,6 +3,7 @@
 //! What a caller outside `src/arch/` may name is declared in `super`; the items here are this
 //! architecture's answer, plus the instruction implementations `super` names directly.
 
+#[cfg(any(feature = "compiler", test))]
 pub mod asm_text;
 pub mod asmstub;
 pub mod intrinsics;

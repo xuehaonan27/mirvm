@@ -16,12 +16,14 @@
 //! Two spellings deliberately stay with the call site: `.balign` and `.quad` mean the same thing to
 //! both assemblers, and the order the statements come in is what the materializer is for.
 
+#[cfg(any(feature = "compiler", test))]
 use std::fmt::Write as _;
 
 use crate::native::object::ObjectFormat;
 
 /// Whether a symbol an image defines is reachable from the other images the process loads.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg(any(feature = "compiler", test))]
 pub(crate) enum Visibility {
     /// Named in the image's own dynamic symbol table, so another image can bind to it.
     Exported,
@@ -30,6 +32,7 @@ pub(crate) enum Visibility {
 }
 
 /// A region of the image that emitted statements are placed in, and that they return out of.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) enum Region<'a> {
     /// Executable code. `name` is the symbol the region holds, which a format that gives every
     /// function a section of its own reads as the section's name and a format that does not
@@ -55,6 +58,7 @@ impl Vocabulary {
     /// The spelling is not cosmetic: a `sym` operand and a symbol this image defines are matched
     /// against the names in rustc's own objects, so a reference spelled the format's way and a
     /// definition spelled Rust's way do not meet.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn symbol(&self, name: &str) -> String {
         match self.format {
             ObjectFormat::Elf => name.to_string(),
@@ -63,6 +67,7 @@ impl Vocabulary {
     }
 
     /// Begin `region`, remembering the region it interrupts.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn open(&self, out: &mut String, region: Region<'_>) {
         match (self.format, region) {
             (ObjectFormat::Elf, Region::Text { name }) => {
@@ -81,11 +86,13 @@ impl Vocabulary {
     }
 
     /// Return to the region [`Self::open`] interrupted.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn close(&self, out: &mut String) {
         out.push_str(".popsection\n");
     }
 
     /// Declare `name` a function this image defines, and begin its body.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn define_fn(&self, out: &mut String, name: &str, visibility: Visibility) {
         let name = self.symbol(name);
         let _ = writeln!(out, ".globl {name}");
@@ -105,6 +112,7 @@ impl Vocabulary {
     }
 
     /// End the function `name`, which [`Self::define_fn`] began.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn end_fn(&self, out: &mut String, name: &str) {
         if self.format == ObjectFormat::Elf {
             let _ = writeln!(out, ".size {name}, . - {name}");
@@ -124,6 +132,7 @@ impl Vocabulary {
     }
 
     /// Declare `name` an 8-byte object of this image, zero, and emit its label.
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn define_slot(&self, out: &mut String, name: &str, visibility: Visibility) {
         let name = self.symbol(name);
         let _ = writeln!(out, ".globl {name}");

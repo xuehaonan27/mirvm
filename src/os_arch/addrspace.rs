@@ -39,6 +39,7 @@ pub(crate) fn is_valid_home(addr: usize) -> bool {
 }
 
 /// Code-region base for the k-th dependency image.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn image_code_addr(k: usize) -> usize {
     assert!(
         k < IMAGE_CODE_COUNT,
@@ -49,6 +50,7 @@ pub(crate) fn image_code_addr(k: usize) -> usize {
 
 /// The dependency-image spline slot a frozen-region base occupies. The base and delta regions sit
 /// below the spline and are no layer's slot, so they are `None` rather than slot 0.
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn image_slot(addr: usize) -> Option<usize> {
     addr.checked_sub(IMAGE_SPLINE_BASE)
         .filter(|offset| offset.is_multiple_of(IMAGE_SPLINE_STEP))
@@ -59,6 +61,7 @@ pub(crate) fn image_slot(addr: usize) -> Option<usize> {
 /// Frozen-region base -> this module's code-region base (same-k invariant: delta↔delta,
 /// base↔base, image_spline(k)↔image_code(k)). Non-whitelisted frozen base => None
 /// (engine invariant violation).
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn code_home_for_frozen(home: usize) -> Option<usize> {
     match home {
         DELTA_FIXED_ADDR => Some(DELTA_CODE_ADDR),
@@ -68,6 +71,7 @@ pub(crate) fn code_home_for_frozen(home: usize) -> Option<usize> {
 }
 
 /// Valid code-region whitelist (double-checked during serde recipe replay and load defense; forged snapshot guard).
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn is_valid_code_home(addr: usize) -> bool {
     addr == DELTA_CODE_ADDR
         || addr == BASE_CODE_ADDR

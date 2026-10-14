@@ -11,6 +11,7 @@
 pub const STUB_STRIDE: u64 = 16;
 
 /// Bytes [`emit_stub_bytes`] produces: `ldr x16, #8; br x16; .quad target`.
+#[cfg(any(feature = "compiler", test))]
 const STUB_BYTES: usize = 16;
 
 /// Stub bytes: `ldr x16, #8; br x16` followed by the target as a literal.
@@ -18,6 +19,7 @@ const STUB_BYTES: usize = 16;
 /// The literal load is PC-relative, so the stub is position-independent and needs no relocation
 /// once it is placed: the assembler encodes the offset to the quad that follows, which is why this
 /// is a byte pattern rather than an instruction sequence with a patch site.
+#[cfg(any(feature = "compiler", test))]
 pub fn emit_stub_bytes(target: u64) -> [u8; STUB_BYTES] {
     /// `ldr x16, #8`: load the 64-bit literal eight bytes on from this instruction.
     const LDR_X16_PC8: u32 = 0x5800_0050;
@@ -65,6 +67,7 @@ pub fn int3() {
 /// The register the bridge entry for `call` loads its engine into: the register the replacement's
 /// trailing `owner` parameter arrives in, which the procedure call standard puts after the call's
 /// own arguments in `x0..x7`.
+#[cfg(any(feature = "compiler", test))]
 pub fn bridge_owner_register(call: &str) -> Option<&'static str> {
     match call {
         "pthread_create" => Some("x4"),

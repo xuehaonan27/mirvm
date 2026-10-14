@@ -39,6 +39,7 @@ pub(crate) mod native_instance;
 pub(crate) mod native_lifecycle;
 pub(crate) mod semantics;
 pub(crate) mod signal;
+#[cfg(feature = "compiler")]
 pub(crate) mod stats;
 pub(crate) mod thunks;
 pub(crate) mod unwind;

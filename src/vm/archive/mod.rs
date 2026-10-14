@@ -103,6 +103,7 @@ pub(crate) struct VerifiedArtifact {
 }
 
 impl VerifiedArtifact {
+    #[cfg(feature = "compiler")]
     pub(crate) fn verify(module: Module, instance: Instance) -> Result<Self, Error> {
         crate::vm::verify::module(&module, &instance)?;
         Ok(Self { module, instance })

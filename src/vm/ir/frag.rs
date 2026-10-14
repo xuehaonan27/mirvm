@@ -95,11 +95,13 @@ pub fn encode_canonical(body: &FuncBody) -> Result<Vec<u8>, crate::error::Error>
     Ok(bytes)
 }
 
+#[cfg(feature = "compiler")]
 pub(crate) struct Stored {
     pub descriptor: Vec<u8>,
     pub template: Option<Vec<u8>>,
 }
 
+#[cfg(feature = "compiler")]
 impl Stored {
     pub(crate) fn fragments(&self) -> impl Iterator<Item = &[u8]> {
         std::iter::once(self.descriptor.as_slice()).chain(self.template.as_deref())
@@ -108,6 +110,7 @@ impl Stored {
 
 /// Split a canonical instance into independently shared storage products. The descriptor's hash
 /// includes its template id, so replacing shared instructions also changes the instance identity.
+#[cfg(feature = "compiler")]
 pub(crate) fn stored_canonical(mut body: FuncBody) -> Result<Stored, crate::error::Error> {
     let template_id = body
         .shared
@@ -162,6 +165,7 @@ pub(crate) fn encode_template(template: &GenericTemplate) -> Result<Vec<u8>, cra
     Ok(bytes)
 }
 
+#[cfg(any(feature = "compiler", test))]
 pub(crate) fn decode_template(bytes: &[u8]) -> Result<GenericTemplate, crate::error::Error> {
     let Some(bytes) = bytes.strip_prefix(&[ENCODING_VERSION, b'T']) else {
         return Err(crate::fail!(

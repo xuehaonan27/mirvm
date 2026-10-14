@@ -47,7 +47,9 @@ pub(super) struct Reloc {
     pub(super) entry: Box<str>,
 }
 
-pub(super) use crate::vm::archive::meta::{ModuleMeta, ModuleMetaRef};
+pub(super) use crate::vm::archive::meta::ModuleMeta;
+#[cfg(any(feature = "compiler", test))]
+pub(super) use crate::vm::archive::meta::ModuleMetaRef;
 
 /// The target this build runs on, spelled as [`Meta::target`] records it: the reader compares
 /// against it and the writer stores it, so the two spellings are one fact.
@@ -71,6 +73,7 @@ pub(super) fn check_lib_hash(lib: &NativeLibEntry) -> Result<(), Error> {
     )
 }
 
+#[cfg(any(feature = "compiler", test))]
 pub(super) fn postcard_bytes<T: Serialize>(v: &T) -> Result<Vec<u8>, Error> {
     postcard::to_stdvec(v).map_err(|e| Error::build(format!("cannot format the package: {e}")))
 }

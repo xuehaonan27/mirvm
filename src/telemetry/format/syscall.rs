@@ -8,6 +8,13 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SyscallSemantics {
+    #[cfg_attr(
+        not(any(feature = "compiler", test)),
+        expect(
+            dead_code,
+            reason = "The capture encoder retains both wire semantics; current producers use libc."
+        )
+    )]
     Raw,
     Libc,
 }
@@ -20,6 +27,7 @@ impl SyscallSemantics {
         }
     }
 
+    #[cfg(any(feature = "compiler", test))]
     fn from_control(control: Control, expected_kind: u16) -> Result<Self, WireError> {
         if control.kind != expected_kind
             || control.version != 0
@@ -66,6 +74,7 @@ impl SyscallEnter {
         out
     }
 
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, SYSCALL_ENTER_BYTES, "SyscallEnter")?;
         let control = Control::decode(bytes)?;
@@ -126,6 +135,7 @@ impl SyscallExit {
         }
     }
 
+    #[cfg(any(feature = "compiler", test))]
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, WireError> {
         require_exact_len(bytes, SYSCALL_EXIT_BYTES, "SyscallExit")?;
         let control = Control::decode(bytes)?;
