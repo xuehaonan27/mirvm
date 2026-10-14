@@ -37,6 +37,54 @@ pub(crate) struct Regions {
     ledger: bool,
 }
 
+#[derive(Hash, PartialEq, Eq)]
+enum TemplateKey {
+    Content([u8; 32]),
+    Address(usize),
+}
+
+fn template_groups(funcs: &FuncTable, local_identity: bool) -> Vec<Vec<u32>> {
+    let mut groups: HashMap<TemplateKey, Vec<u32>> = HashMap::new();
+    let mut index = 0u32;
+    for part in funcs.parts() {
+        match part {
+            FuncPart::Owned(bodies) => {
+                for body in bodies {
+                    if let Some(shared) = &body.shared {
+                        let key = if local_identity {
+                            TemplateKey::Address(
+                                std::ptr::from_ref(shared.template.as_ref()) as usize
+                            )
+                        } else {
+                            TemplateKey::Content(shared.template.identity())
+                        };
+                        groups.entry(key).or_default().push(index);
+                    }
+                    index += 1;
+                }
+            }
+            FuncPart::Archived(archive) => {
+                for body in archive.bodies() {
+                    if let Some(shared) = body.shared.as_ref() {
+                        let key = if local_identity {
+                            TemplateKey::Address(
+                                std::ptr::from_ref(shared.template.as_ref()) as usize
+                            )
+                        } else {
+                            TemplateKey::Content(shared.template.identity())
+                        };
+                        groups.entry(key).or_default().push(index);
+                    }
+                    index += 1;
+                }
+            }
+        }
+    }
+    let mut groups: Vec<_> = groups.into_values().filter(|ids| ids.len() > 1).collect();
+    groups.sort_unstable_by_key(|ids| ids[0]);
+    groups
+}
+
 impl Regions {
     pub(crate) fn prepare(module: &mut Module, domain: CodeDomain) -> Self {
         if !crate::options::shared_regions() || !crate::options::jit() {
@@ -69,34 +117,10 @@ impl Regions {
             ledger: crate::options::jit_ledger(),
             ..Self::default()
         };
-        // Archive owners keep these addresses stable for the Engine's lifetime. No descriptor is
-        // decoded and no bytecode is hashed here. Different archive copies remain separate groups.
-        let mut groups: HashMap<usize, Vec<u32>> = HashMap::new();
-        let mut index = 0u32;
-        for part in module.funcs.parts() {
-            match part {
-                FuncPart::Owned(bodies) => {
-                    for body in bodies {
-                        if let Some(shared) = &body.shared {
-                            let key = std::ptr::from_ref(shared.template.as_ref()) as usize;
-                            groups.entry(key).or_default().push(index);
-                        }
-                        index += 1;
-                    }
-                }
-                FuncPart::Archived(archive) => {
-                    for body in archive.bodies() {
-                        if let Some(shared) = body.shared.as_ref() {
-                            let key = std::ptr::from_ref(shared.template.as_ref()) as usize;
-                            groups.entry(key).or_default().push(index);
-                        }
-                        index += 1;
-                    }
-                }
-            }
-        }
-        let mut groups: Vec<_> = groups.into_values().filter(|ids| ids.len() > 1).collect();
-        groups.sort_unstable_by_key(|ids| ids[0]);
+        let groups = template_groups(
+            &module.funcs,
+            crate::options::shared_region_local_identity(),
+        );
         let mut headers = Vec::with_capacity(groups.len() + 1);
         for ids in groups {
             let target = u32::try_from(count + headers.len()).unwrap();
@@ -679,5 +703,123 @@ fn translate(
         frame_size: tr.size,
         blocks,
         ..header(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::archive::{bytes::Bytes, functions};
+    use std::sync::Arc;
+
+    fn split_module() -> Module {
+        let mut module = Module::default();
+        for part in 0..2 {
+            let mut bodies = Vec::new();
+            for value in [11, 29] {
+                let mut body = test_generic_body(value);
+                let shared = body.shared.as_mut().unwrap();
+                let mut code = GenericInstructions::clone(&shared.template);
+                code.blocks[0].term = Terminator::Call {
+                    callee: 0,
+                    args: vec![Operand::Slot(slot(8))],
+                    ret: RetDest::Scalar(ScalarPlace::Slot(slot(8))),
+                    target: 1,
+                    unwind: UnwindAction::Continue,
+                    role: CallRole::Normal,
+                };
+                code.blocks.push(Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Return,
+                });
+                let mut call = code.blocks[0].term.clone();
+                let Terminator::Call { callee, .. } = &mut call else {
+                    unreachable!()
+                };
+                *callee = 4 + part;
+                shared.calls.push(call);
+                shared.template = Arc::new(GenericTemplate::new(code).unwrap());
+                bodies.push(body);
+            }
+            bodies[1].shared.as_mut().unwrap().template =
+                bodies[0].shared.as_ref().unwrap().template.clone();
+            let encoded = functions::encode(&bodies.into()).unwrap();
+            let len = encoded.len();
+            let archive = functions::Functions::load(Bytes::new(encoded.to_vec()), 0..len).unwrap();
+            module
+                .funcs
+                .append(FuncTable::from_archive(Arc::new(archive)));
+        }
+        assert_eq!(module.funcs.decoded_count(), 0);
+        assert_eq!(
+            template_groups(&module.funcs, true),
+            [vec![0, 1], vec![2, 3]]
+        );
+        assert_eq!(template_groups(&module.funcs, false), [vec![0, 1, 2, 3]]);
+        assert_eq!(module.funcs.decoded_count(), 0);
+        let helpers: Vec<_> = [100, 1000]
+            .into_iter()
+            .map(|value| FuncBody {
+                frame_size: 16,
+                frame_align: 8,
+                params: vec![ParamAbi::Scalar(slot(0))],
+                ret: RetAbi::Scalar(slot(8)),
+                caller_loc_off: None,
+                name: format!("helper{value}").into(),
+                shared: None,
+                blocks: vec![Block {
+                    stmts: vec![Stmt::Assign {
+                        dst: ScalarPlace::Slot(slot(8)),
+                        rv: Rvalue::IntBin {
+                            op: IntBinOp::Add,
+                            signed: false,
+                            a: Operand::Slot(slot(0)),
+                            b: Operand::Imm {
+                                bits: value,
+                                width: Width::W64,
+                            },
+                        },
+                    }],
+                    term: Terminator::Return,
+                }],
+            })
+            .collect();
+        module.funcs.append(helpers.into());
+        for id in 0..4 {
+            module.exports.insert(format!("export{id}").into(), id);
+        }
+        module.ensure_function_names();
+        module
+    }
+
+    #[test]
+    fn cross_archive_identity_preserves_bindings() {
+        // The only pointers are dictionary loads initialized by each interpreter activation.
+        let engine = unsafe { crate::vm::Engine::from_module_unchecked(split_module()) }.unwrap();
+        for _ in 0..8 {
+            for (id, expected) in [118, 136, 1018, 1036].into_iter().enumerate() {
+                let result =
+                    unsafe { crate::vm::interp::run_export(&engine, &format!("export{id}"), &[7]) }
+                        .unwrap();
+                assert_eq!(result.into_returned().unwrap().lo, expected);
+            }
+        }
+        let state = &engine.shared().shared_regions;
+        if crate::options::shared_regions() {
+            let count = if crate::options::shared_region_local_identity() {
+                2
+            } else {
+                1
+            };
+            assert_eq!(state.representatives.len(), count);
+            if crate::options::jit_sync() && crate::options::jit_threshold() == 1 {
+                assert_eq!(state.translated.load(Ordering::Relaxed), count as u64);
+                for &target in state.targets.iter().flatten() {
+                    let entry = engine.shared().jit.slots[target as usize].load(Ordering::Acquire);
+                    assert_ne!(entry, 0);
+                    assert_ne!(entry, FAIL_SENTINEL);
+                }
+            }
+        }
     }
 }

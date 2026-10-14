@@ -1323,12 +1323,13 @@ mod tests {
             role: CallRole::Normal,
         };
         let shared = body.shared.as_mut().unwrap();
-        let blocks = &mut Arc::make_mut(&mut shared.template).blocks;
-        blocks[0].term = call.clone();
-        blocks.push(Block {
+        let mut code = GenericInstructions::clone(&shared.template);
+        code.blocks[0].term = call.clone();
+        code.blocks.push(Block {
             stmts: Vec::new(),
             term: Terminator::Return,
         });
+        shared.template = Arc::new(GenericTemplate::new(code).unwrap());
         shared.calls.push(call);
         if let Terminator::Call { callee, .. } = &mut shared.calls[0] {
             *callee = unit.funcs.0 + 2;

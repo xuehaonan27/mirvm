@@ -227,7 +227,7 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   owner; prove relocation into a fresh installation and std reuse after cache-only purging. A local
   base cache alone does not meet the distribution contract. Release form remains miri-style first,
   self-contained tarball later; kit naming is unscheduled (MDK/mirvm toolkit; MRsDK is rejected).
-- **D4** `UNSCHEDULED`: public format freeze. `fmt_ver` is 7 and merely separates generations
+- **D4** `UNSCHEDULED`: public format freeze. `fmt_ver` is 9 and merely separates generations
   (`src/pack/format.rs`). Review compatibility windows, capability bits, migration tooling and
   corruption/signature policy before making an external compatibility promise.
 - **D6** `UNSCHEDULED`: the residual cross-project sharing work. Machine-wide sharing of lowered
@@ -254,10 +254,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     the selected engineering roadmap: validate the experimental work budget against latency,
     including sampling overhead/bias and deferred-admission cost. Measure frame setup and removable
     shared execution/call work to select profitable template groups, bypass tiny/call-only bodies
-    where appropriate, and price concrete promotion. Resolve archive-local template identity and
-    qualify scalar SSA's synchronization, register pressure and code-size costs before product
-    integration. Require whole-program payback in addition to reduced compiler spending. Extend
-    remaining aggregate/projection and range/array-subslice coverage
+    where appropriate, and price concrete promotion. Qualify admission after content-identity
+    grouping, including former singletons entering the shared tier, and scalar SSA's synchronization,
+    register pressure and code-size costs before product integration. Require whole-program payback
+    in addition to reduced compiler spending. Extend remaining aggregate/projection and range/array-subslice coverage
     from corpus evidence; attribute repeated template verification/serialization and metadata work
     in CPU profiles. Require real workload cold/warm measurements,
     unchanged bound-image reuse and specialization payback before default enablement. Preserve

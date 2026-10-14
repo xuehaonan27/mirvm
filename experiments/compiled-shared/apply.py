@@ -32,6 +32,7 @@ for option, description in [
     ("shared_region_profile", "Sample interpreted and compiled own-body work without changing admission"),
     ("shared_region_policy", "Admit shared and concrete transitions using execution credit"),
     ("shared_region_ssa", "Keep nonaliasing shared scalar locals in SSA between frame boundaries"),
+    ("shared_region_local_identity", "Use template addresses as the control for content-identity grouping"),
 ]:
     replace(options, '    /// Print the dedup probe:',
             f'    /// {description} (experiment only).\n'

@@ -137,12 +137,24 @@ Before fork, the existing preparation boundary settles archive decode and concre
 slots, including currently unentered shared instances. This intentionally pays their concrete
 emission cost at fork so the child cannot inherit an initializer owned by a vanished thread.
 
-Function archives share template objects within each immutable chunk. Borrowed validation checks
-the template's dictionary arity and accesses, admitted instruction vocabulary, concrete local
-storage, call ordinals and bound adapters before any runtime decode. Archive decode publishes each
-template once; immutable instructions may be shared by Engines, while their concrete publication
-slots remain separate. Shared instructions carry no external relocation: concrete call adapters own
-FuncIds and caller-location addresses.
+A template's identity is the BLAKE3 of its versioned template fragment: the fragment encoding
+version and template tag followed by its dictionary slot, binding count and instruction array.
+Construction computes the identity before publishing immutable instructions. Concrete dictionary
+values, frame layout, ABI, names and bound call targets belong to each instance and do not enter
+this identity. Changing template semantics requires changing the fragment encoding version; normal
+build and product generation checks still apply. This identity names reusable instructions, never
+a guest function address or its concrete entry.
+
+Function archives retain the 32-byte identity alongside each template object. Their enclosing
+product's integrity and generation checks cover those bytes; the loader consumes trusted executable
+products under the existing native-address safety contract. Borrowed validation still checks the
+template's dictionary arity and accesses, admitted vocabulary, concrete local storage, call ordinals
+and bound adapters before runtime decode. Grouping reads the stored identity without decoding or
+rehashing instructions. Within a loaded function archive, including concatenated chunks, demand
+decode publishes one template object per identity. Separate archives can retain distinct decoded
+objects while a compiled group shares their content identity. Concrete publication slots remain
+per instance. Shared instructions carry no external relocation: concrete adapters own FuncIds and
+caller-location addresses.
 
 Unit, dependency and program manifests store templates as separate content-addressed fragments.
 A descriptor fragment hashes its template id together with the concrete binding representation;
@@ -193,7 +205,7 @@ instance diversity and keeps interpreted/shared work credit separate. After shar
 concrete admission uses observed shared execution rather than earlier interpretation. A
 sampling-only control retains fixed admission to expose measurement cost. These mechanisms budget
 past worker cost; they do not estimate the future work a transition removes. Frame setup is outside
-the current sample and template identity remains archive-local. Optional scalar SSA in the
+the current sample. Optional scalar SSA in the
 frame-entry experiment retains nonaliasing values across blocks and synchronizes the interpreter
 frame at call/cleanup/return boundaries. It preserves dynamic dictionaries and the concrete entry
 ABI; its code-size, synchronization and compilation costs remain part of the measured tier decision.

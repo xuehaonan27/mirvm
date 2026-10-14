@@ -347,7 +347,7 @@ disabled. The generic artifact is prepared with sharing enabled and executed wit
 flag. Native stdout and exit status agree.
 
 Release builds and all-target/all-feature Clippy with warnings denied pass. The compiler-independent
-library still emits 295 unused-producer/tool warnings; its test inventory does not compile because
+library still emits unused-producer/tool warnings; its test inventory does not compile because
 native archive fixture builders and sysroot producer tests depend on the compiler feature. This is
 not a clean standalone lint/test gate. Ordinary project scheduling, compile/guest environment
 transitions, full lifecycle/capture qualification and representative workload measurements remain
@@ -540,8 +540,49 @@ was run for this change; OSR remains deferred.
 objects. It reserves private ABI headers from borrowed template identities and translates groups
 only when the compile worker needs them. Call bridges reuse the interpreter's direct-call
 implementation; concrete promotion publishes the original ABI for subsequent calls. Active frames
-retain their body and code. Template identity is archive-local; persisted JIT code and trace are
-refused, and there is no OSR. Product source and default options are unchanged by this experiment.
+retain their body and code. Production archives retain immutable template content IDs; the
+experiment groups those IDs across archive copies without eager decoding or payload hashing.
+Persisted shared JIT code and trace are refused, and there is no OSR. The compiled shared tier
+remains an experiment with no production option or default enablement.
+
+Identity qualification compares content IDs with address grouping in the same release binary and
+prepared images. One hundred samples cover five workloads, fixed nomination and work policy, with
+five alternating rounds per mode. Every sample hits its image and agrees with native; persistent
+JIT caching is disabled, OS caches and heat orders are retained, and builds/lints/profiles do not
+overlap timing. Complete / engine medians are:
+
+| Workload | Address, fixed | Content, fixed | Address, policy | Content, policy |
+|---|---:|---:|---:|---:|
+| Many instances | 84.9 / 41.4 ms | 91.4 / 42.1 ms | 82.0 / 42.5 ms | 89.8 / 44.2 ms |
+| Hot loop | 78.4 / 39.0 ms | 76.4 / 37.7 ms | 75.6 / 35.9 ms | 73.1 / 35.1 ms |
+| Tiny calls | 62.7 / 18.6 ms | 136.2 / 21.0 ms | 70.7 / 20.7 ms | 62.7 / 19.1 ms |
+| serde JSON | 120.0 / 24.6 ms | 119.2 / 25.4 ms | 119.9 / 29.1 ms | 121.4 / 28.3 ms |
+| flate2, 2 KiB | 222.7 / 139.6 ms | 219.4 / 136.0 ms | 213.1 / 125.5 ms | 212.9 / 128.4 ms |
+
+Content grouping removes duplicate compilation but has no established whole-program latency win.
+Separate flate ledgers show fixed-nomination shared compilation falling from 24 to 20 templates
+and 10,021 to 9,377 code bytes. Merging also changes admission: linked flate groups fall from 278
+to 234 while admitted descriptors grow from 2,096 to 2,439, including former singletons. With work
+policy, shared compilation grows from 11 to 18 and concrete compilation inside those groups falls
+from 24 to 19. Serde changes from no shared compilations to three under fixed nomination. Group
+preparation in these separate ledgers costs 0.19–0.61 ms. All valid timing outliers remain, including
+a 1,122.1 ms tiny-call run; engine time does not explain those startup stalls.
+
+Focused checks preserve fragment encoding/identity, reject invalid descriptors, and keep
+concatenated archive decoding lazy while publishing one decoded template per content ID. A
+forced-compilation fixture with different dictionaries and call targets in two independent archives
+uses one shared entry instead of two: 421 versus 842 code bytes with frame memory, or 469 versus
+938 with SSA. Results remain instance-specific in all four configurations. Eight native-matching
+contract runs cover memory/SSA, normal/fork and image/package execution. A compiler-independent
+runner also passes the package's normal and fork invocations with forced SSA; its dynamic linkage
+contains neither rustc nor LLVM. Eleven generic checks, thirteen package checks, ten experimental
+unit checks, four forced identity configurations, both builds' all-target/all-feature Clippy and
+repository boundary checks pass. No full runtime suite was run.
+
+Separate flate CPU captures contain 375 address-grouping and 428 content-grouping samples. The
+remaining CPU work includes interpreter statements, block dispatch, guest calls/frame setup and
+Cranelift. Their cycle-weighted flame graphs are diagnostic captures, not paired latency samples
+or a precise attribution of small differences.
 
 Optional scalar SSA retains nonaliasing values across compiled blocks. Address escapes, overlapping
 or inconsistent-width accesses retain memory semantics. Entry, call adapters, cleanup and interpreter
@@ -563,7 +604,8 @@ checks cover escaping addresses, mixed/overlapping byte accesses, pointer derefe
 adapter reads/writes, cleanup and opaque-return synchronization. These are bounded checks, not the
 full lifecycle/signal/trace gate.
 
-The current matrix contains 243 native-matching samples: nine workloads and five modes in five
+The scalar SSA qualification matrix isolates SSA with address-based groups; it does not establish
+payback for SSA combined with content grouping. It contains 243 native-matching samples: nine workloads and five modes in five
 alternating rounds, plus three forced-compilation pairs on many/hot/tiny inputs. Modes share one
 release executable and one prepared bound image per input. Every timed process must hit its image;
 persistent JIT caching is disabled and OS caches/heat orders are retained. Ledgers and CPU profiles
@@ -644,7 +686,7 @@ What is refused or not yet claimed — not what is planned.
   two-machine-word exports must be trusted, `Shared` is not public, and no safe typed export bindings
   are generated. Third-party callbacks have no universal revocation, so published closure/JIT/MC/native
   code lives to process end.
-- **Distribution**: `.mirvm` is at unstable format v7 with direct archive verification and demand
+- **Distribution**: `.mirvm` is at unstable format v9 with direct archive verification and demand
   body decoding. Cross-build_id/target compatibility, fat artifacts and format freeze are unfinished. No daemon, REPL, checked mode, resource governance or real sandbox.
 - **Cargo config**: Git source replacement, patches targeting a Git URL, and parts of the Cargo config
   surface such as `paths`/`HOST_RUSTFLAGS` are not implemented.

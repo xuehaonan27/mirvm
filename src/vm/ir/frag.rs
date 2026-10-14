@@ -109,20 +109,23 @@ impl Stored {
 /// Split a canonical instance into independently shared storage products. The descriptor's hash
 /// includes its template id, so replacing shared instructions also changes the instance identity.
 pub(crate) fn stored_canonical(mut body: FuncBody) -> Result<Stored, crate::error::Error> {
+    let template_id = body
+        .shared
+        .as_ref()
+        .map(|shared| shared.template.identity());
     let template = body
         .shared
         .as_mut()
         .map(|shared| {
             let bytes = encode_template(&shared.template)?;
-            shared.template = std::sync::Arc::new(GenericTemplate {
+            shared.template = std::sync::Arc::new(GenericTemplate::new(GenericInstructions {
                 dictionary: 0,
                 binding_count: 0,
                 blocks: Vec::new(),
-            });
+            })?);
             Ok::<_, crate::error::Error>(bytes)
         })
         .transpose()?;
-    let template_id = template.as_ref().map(|bytes| id_of(bytes));
     let mut descriptor = postcard::to_stdvec(&template_id)
         .map_err(|error| crate::fail!(Engine, error.to_string()))?;
     descriptor.extend(encode_canonical(&body)?);

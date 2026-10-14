@@ -31,13 +31,13 @@ dispatcher. Addressable storage is excluded from promotion, so arbitrary callee/
 writes cannot alias a retained SSA value. Analysis and synchronization code are produced only when
 the worker translates a demanded template.
 
-Each Engine scans borrowed archive tags and template addresses to reserve internal ABI headers.
+Each Engine scans borrowed archive tags and stored template content IDs to reserve internal ABI headers.
 It admits only groups with at least two descriptors; singletons keep direct specialization. This
-scan neither decodes instance descriptors nor hashes/translates bytecode. Template identity is the
-owned or archived object's address, scoped to its immutable owner; structurally equal templates in
-different archive copies can occupy separate groups. At the first compile request the worker
-decodes one representative, translates and verifies its template, and builds the actual guarded
-entry. Unused groups incur no translation. There is no additional lazy cell or lock to settle at
+scan neither decodes instance descriptors nor hashes/translates bytecode. Equal templates in separate
+archive copies use one group, while each activation retains its own dictionary, ABI and call bindings.
+`MIRVM_SHARED_REGION_LOCAL_IDENTITY=1` provides an address-based grouping control in the same binary.
+At the first compile request the worker decodes one representative, translates and verifies its
+template, and builds the actual guarded entry. Unused groups incur no translation. There is no additional lazy cell or lock to settle at
 fork. The private placeholders cannot be reached through guest function addresses or guest calls.
 
 The original guest PLT retains the concrete ABI. Shared entry counts and interpreted backedges
@@ -52,6 +52,7 @@ no OSR. The candidate modes isolate separate decisions:
 | Above plus `MIRVM_SHARED_REGION_SPECIALIZE=1` | Hot instances can publish concrete ABI entries for subsequent calls. |
 | All three plus `MIRVM_SHARED_REGION_PROFILE=1` | Sample interpreted/shared own-body work while retaining fixed admission. |
 | All three plus `MIRVM_SHARED_REGION_POLICY=1` | Gate shared/concrete compilation using executed diversity and work credit. |
+| Any shared mode plus `MIRVM_SHARED_REGION_LOCAL_IDENTITY=1` | Group by template address to measure the effect of cross-archive identity. |
 | Any shared mode plus `MIRVM_SHARED_REGION_SSA=1` | Promote nonaliasing scalars across blocks with frame synchronization at adapter/interpreter boundaries. |
 
 The call bridge extracts the interpreter's direct-call arm into one function used by both paths.
@@ -175,10 +176,28 @@ python3 "$experiment_dir/source/experiments/compiled-shared/ssa_compare.py" \
     /path/to/reference-results /path/to/reference-controls "$experiment_dir/ssa-comparison"
 ```
 
-`ssa_compare.py` checks synchronous SSA and asynchronous SSA policy execution, each with separate
-normal/fork invocations. Nine workloads compare direct specialization, shared memory, shared SSA,
+`ssa_compare.py` holds address grouping fixed to isolate scalar promotion. It checks synchronous
+SSA and asynchronous SSA policy execution, each with separate normal/fork invocations. Nine workloads compare direct specialization, shared memory, shared SSA,
 policy with memory and policy with SSA in five alternating rounds. A further three paired rounds
 force compilation on many/hot/tiny inputs, separating shared code from policy decisions that might
 bypass it. All 243 samples must hit their bound images and agree with native output. Ledgers report
 promoted scalar slots, actual shared code bytes, translations and call bridges. No build, lint or
 profile work should overlap timing. CPU profiles are separate from this matrix.
+
+To isolate cross-archive template identity in the same binary:
+
+```sh
+python3 "$experiment_dir/source/experiments/compiled-shared/identity_compare.py" \
+    "$experiment_dir/target/release/mirvm" "$(rustup which rustc)" \
+    /path/to/reference-results /path/to/reference-controls "$experiment_dir/identity-comparison"
+```
+
+`identity_compare.py` checks image/package execution with memory and SSA, each in normal and fork
+invocations. Its 100-sample matrix compares address/content grouping under fixed nomination and
+work policy over many/hot/tiny, serde and flate inputs. It holds scalar promotion off during timing.
+Separate ledgers report admitted instances, groups, actual compilations, code bytes and preparation
+cost. Content grouping may admit former singletons or change executed diversity; fewer groups do
+not necessarily mean fewer compilations or better latency. The focused
+`shared_regions::tests::cross_archive_identity_preserves_bindings` test can run with synchronous
+threshold-one compilation in all four memory/SSA and address/content configurations. Boolean flags
+are enabled by presence; omit the local-identity or SSA variable for its disabled control.

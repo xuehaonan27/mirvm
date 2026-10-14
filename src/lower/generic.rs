@@ -512,11 +512,14 @@ impl<'tcx> Exporter<'tcx> {
                     blocks: Vec::new(),
                     name: tcx.def_path_str(instance.def_id()).into(),
                 },
-                instructions: std::sync::Arc::new(GenericTemplate {
-                    dictionary,
-                    binding_count: u32::try_from(cx.bindings.len()).ok()?,
-                    blocks,
-                }),
+                instructions: std::sync::Arc::new(
+                    GenericTemplate::new(GenericInstructions {
+                        dictionary,
+                        binding_count: u32::try_from(cx.bindings.len()).ok()?,
+                        blocks,
+                    })
+                    .ok()?,
+                ),
                 bindings: cx.bindings,
                 locals: cx.local_bindings,
                 calls: cx.call_abis,

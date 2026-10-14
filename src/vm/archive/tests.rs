@@ -109,9 +109,10 @@ fn generic_shared_archives_reject_invalid_descriptors_without_specializing() {
     for bad in 0..7 {
         let mut body = test_generic_body(11);
         let shared = body.shared.as_mut().unwrap();
+        let mut code = GenericInstructions::clone(&shared.template);
         match bad {
             0 => shared.values.clear(),
-            1 => Arc::make_mut(&mut shared.template).dictionary = body.frame_size,
+            1 => code.dictionary = body.frame_size,
             2 => shared.locals.push(FrameLocal {
                 pointer: Slot {
                     off: 0,
@@ -123,7 +124,7 @@ fn generic_shared_archives_reject_invalid_descriptors_without_specializing() {
             }),
             3 => shared.calls.push(Terminator::Return),
             4 => {
-                Arc::make_mut(&mut shared.template).blocks[0].term = Terminator::Call {
+                code.blocks[0].term = Terminator::Call {
                     callee: 7,
                     args: Vec::new(),
                     ret: RetDest::Ignore,
@@ -132,29 +133,26 @@ fn generic_shared_archives_reject_invalid_descriptors_without_specializing() {
                     role: CallRole::Normal,
                 }
             }
-            5 => Arc::make_mut(&mut shared.template).blocks[0]
-                .stmts
-                .push(Stmt::Assign {
-                    dst: ScalarPlace::Slot(Slot {
-                        off: 16,
-                        width: Width::W64,
-                    }),
-                    rv: Rvalue::Use(Operand::Imm {
-                        bits: 0,
-                        width: Width::W64,
-                    }),
+            5 => code.blocks[0].stmts.push(Stmt::Assign {
+                dst: ScalarPlace::Slot(Slot {
+                    off: 16,
+                    width: Width::W64,
                 }),
-            6 => Arc::make_mut(&mut shared.template).blocks[0]
-                .stmts
-                .push(Stmt::Assign {
-                    dst: ScalarPlace::Slot(Slot {
-                        off: 8,
-                        width: Width::W64,
-                    }),
-                    rv: Rvalue::TlsRef(0),
+                rv: Rvalue::Use(Operand::Imm {
+                    bits: 0,
+                    width: Width::W64,
                 }),
+            }),
+            6 => code.blocks[0].stmts.push(Stmt::Assign {
+                dst: ScalarPlace::Slot(Slot {
+                    off: 8,
+                    width: Width::W64,
+                }),
+                rv: Rvalue::TlsRef(0),
+            }),
             _ => unreachable!(),
         }
+        shared.template = Arc::new(GenericTemplate::new(code).unwrap());
         let mut module = Module {
             funcs: vec![body].into(),
             ..Module::default()

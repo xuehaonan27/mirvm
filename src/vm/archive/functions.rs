@@ -12,7 +12,7 @@ use crate::vm::ir::{ArchivedFuncBody, FuncBody, FuncTable, GenericTemplate, Shar
 pub(crate) struct Functions {
     bytes: Arc<super::bytes::Bytes>,
     chunks: Vec<Chunk>,
-    templates: HashMap<usize, OnceLock<Arc<GenericTemplate>>>,
+    templates: HashMap<[u8; 32], OnceLock<Arc<GenericTemplate>>>,
 }
 
 struct Chunk {
@@ -84,14 +84,11 @@ impl Functions {
             chunks,
             templates: HashMap::new(),
         };
-        let templates: Vec<_> = result
+        result.templates = result
             .bodies()
             .filter_map(|body| body.shared.as_ref())
-            .map(|shared| std::ptr::from_ref(shared.template.as_ref()) as usize)
+            .map(|shared| (shared.template.identity(), OnceLock::new()))
             .collect();
-        for key in templates {
-            result.templates.entry(key).or_default();
-        }
         Ok(result)
     }
 
@@ -134,7 +131,7 @@ impl Functions {
             name: owned(&body.name),
             blocks: owned(&body.blocks),
             shared: body.shared.as_ref().map(|shared| {
-                let key = std::ptr::from_ref(shared.template.as_ref()) as usize;
+                let key = shared.template.identity();
                 let template =
                     self.templates[&key].get_or_init(|| Arc::new(owned(shared.template.as_ref())));
                 Box::new(SharedBody {
@@ -241,6 +238,32 @@ mod tests {
             super::super::bytes::Bytes::new(bytes.to_vec()),
             0..bytes.len(),
         )
+    }
+
+    #[test]
+    fn generic_identity_unifies_independent_chunks_without_eager_decode() {
+        use crate::vm::ir::test_generic_body;
+        let mut funcs = FuncTable::default();
+        for value in [11, 29] {
+            let bytes = encode(&vec![test_generic_body(value)].into()).unwrap();
+            funcs.append(FuncTable::from_archive(Arc::new(load(&bytes).unwrap())));
+        }
+        assert_eq!(funcs.decoded_count(), 0);
+        let bytes = encode(&funcs).unwrap();
+        assert_eq!(funcs.decoded_count(), 0);
+        let combined = load(&bytes).unwrap();
+        let a = combined.body(0).shared.as_ref().unwrap();
+        let b = combined.body(1).shared.as_ref().unwrap();
+        assert!(!std::ptr::eq(a.template.as_ref(), b.template.as_ref()));
+        assert_eq!(a.template.identity(), b.template.identity());
+        assert_eq!(combined.templates.len(), 1);
+        assert!(combined.templates.values().all(|cell| cell.get().is_none()));
+        let first = combined.decode(0).shared.unwrap();
+        let second = combined.decode(1).shared.unwrap();
+        assert!(Arc::ptr_eq(&first.template, &second.template));
+        assert_eq!(first.values, [11]);
+        assert_eq!(second.values, [29]);
+        assert_eq!(first.template.identity(), a.template.identity());
     }
 
     #[test]

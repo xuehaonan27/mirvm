@@ -21,7 +21,7 @@ probe = Path(__file__).with_name("policy_workload.rs").resolve()
 assert hashlib.sha256(source.read_bytes()).hexdigest() == json.loads((previous / "protocol.json").read_text())["input_sha256"]
 env = {k: v for k, v in os.environ.items() if not k.startswith("MIRVM_")}
 env.update(MIRVM_HOME=str(previous / "home"), MIRVM_OFFLINE="1", MIRVM_TIMING="1",
-           MIRVM_GENERIC_TEMPLATES="1", MIRVM_NO_JIT_CACHE="1")
+           MIRVM_GENERIC_TEMPLATES="1", MIRVM_NO_JIT_CACHE="1", MIRVM_SHARED_REGION_LOCAL_IDENTITY="1")
 invoke = Runner(root, env)
 memory = dict(MIRVM_SHARED_REGIONS="1", MIRVM_SHARED_REGION_CALLS="1")
 ssa = dict(memory, MIRVM_SHARED_REGION_SSA="1")
@@ -69,7 +69,8 @@ for case in ("many", "hot", "tiny"):
     input_sha256={case: hashlib.sha256(path.read_bytes()).hexdigest() for case, path, _, _ in cases},
     scope="Five alternating rounds over nine workloads and five modes, plus three forced shared-code "
           "pairs on many/hot/tiny. All modes share one binary and prepared image per input. "
-          "Fresh-process bound-image hits, native stdout agreement, retained OS caches and heat orders, "
+          "Address grouping held fixed. Fresh-process bound-image hits, native stdout agreement, "
+          "retained OS caches and heat orders, "
           "no persistent JIT cache. Ledgers are separate; complete time includes compilation and shutdown. "
           "Synthetic first stdout follows a completed batch; flate prints input information first."
 ), indent=2) + "\n")

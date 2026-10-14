@@ -220,14 +220,17 @@ mod tests {
             })
             .collect::<Vec<_>>();
         stmts.extend(extra);
-        Scalars::collect(&GenericTemplate {
-            dictionary: 0,
-            binding_count: 0,
-            blocks: vec![Block {
-                stmts,
-                term: Terminator::Return,
-            }],
-        })
+        Scalars::collect(
+            &GenericTemplate::new(GenericInstructions {
+                dictionary: 0,
+                binding_count: 0,
+                blocks: vec![Block {
+                    stmts,
+                    term: Terminator::Return,
+                }],
+            })
+            .unwrap(),
+        )
     }
 
     #[test]

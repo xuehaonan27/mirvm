@@ -462,7 +462,10 @@ mod tests {
         template.bindings[0] = Binding::Const(1, Width::W64);
         assert!(template.validate(0, 1, 2).is_none());
         template.bindings[0] = Binding::Const(0, Width::W64);
-        std::sync::Arc::make_mut(&mut template.instructions).blocks[0].term = Terminator::Goto(99);
+        let mut code = crate::vm::ir::GenericInstructions::clone(&template.instructions);
+        code.blocks[0].term = Terminator::Goto(99);
+        template.instructions =
+            std::sync::Arc::new(crate::vm::ir::GenericTemplate::new(code).unwrap());
         assert!(template.validate(0, 1, 2).is_none());
     }
 

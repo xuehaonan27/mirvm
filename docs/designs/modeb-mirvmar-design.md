@@ -46,7 +46,7 @@ cache. Each violation is a rejection:
 
 ### 2.1 Goals and non-goals
 
-Goals: a single-file package format v8; `mirvm pack` from a Cargo project or script; `mirvm run
+Goals: a single-file package format v9; `mirvm pack` from a Cargo project or script; `mirvm run
 x.mirvm` to validate, load and execute; and three-dimensional acceptance — pack plus run must be
 byte-identical to a direct `mirvm run` on three loads, while refusal probes must be loud.
 
@@ -59,7 +59,7 @@ materializes it and then dlopens it; and L3 JIT machine-code caching, which is u
 
 ```text
 offset 0   magic        8B   "MIRVMAR\0"
-           fmt_ver      u32  = 7
+           fmt_ver      u32  = 9
            build_id     u32 length + UTF-8 (MIRVM_BUILD_ID, exact match)
            section_cnt  u32
 sections   tag u32 | off u64 | len u64 | BLAKE3-128 (content checksum)
@@ -91,10 +91,12 @@ An unknown tag is skipped for forward compatibility; a missing required tag is a
   and build-id checks restrict compatibility. The loader retains an immutable aligned allocation
   and structurally validates every chunk with a maximum subtree depth of 128. The section and
   whole-file digests protect the complete representation. A function stores concrete blocks or a
-  shared template reference and instance descriptor. Templates can be shared within a chunk; no
-  shared pointer may cross its boundary. Semantic validation checks the template and bindings
-  without specializing them. Concrete publication remains per Engine. Address expressions and foreign signatures
-  use archive-only indirection; runtime IR and shared fragments retain their inline fields.
+  shared template reference and instance descriptor. Each template stores its 32-byte content ID
+  under the [generic identity contract](runtime-generics-design.md#3-execution-and-publication).
+  Templates can be shared within a chunk; no shared pointer may cross its boundary. Semantic
+  validation checks the template and bindings without specializing them. Concrete publication
+  remains per Engine. Address expressions and foreign signatures use archive-only indirection;
+  runtime IR and shared fragments retain their inline fields.
 
 ### 2.3 pack flow
 
@@ -249,7 +251,7 @@ permanent `wait_closed` stall, at the cost of a permanent process-level address 
 constructors run, an instantiation failure is reclaimable; after that, escaped addresses never are.
 
 **Not frozen.** Cross-version bytecode requires an exact `build_id` today, and external format freezing
-awaits its own review; `fmt_ver` only separates generations. A v7 package does not occupy the
+awaits its own review; `fmt_ver` only separates generations. A v9 package does not occupy the
 artifact's fixed base at run time — every Engine uses its own anonymous mapping. A multi-target fat
 artifact is only a reserved section-table tag, to be judged after the freeze review.
 

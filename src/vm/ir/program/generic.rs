@@ -23,6 +23,16 @@ pub struct SharedBody {
     pub calls: Vec<Terminator>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[archive(check_bytes)]
+#[serde(transparent)]
+pub struct GenericTemplate {
+    #[serde(skip)]
+    identity: [u8; 32],
+    code: GenericInstructions,
+}
+
+/// Template content before its immutable content identity is assigned.
 #[derive(
     Clone,
     Debug,
@@ -33,10 +43,57 @@ pub struct SharedBody {
     rkyv::Deserialize,
 )]
 #[archive(check_bytes)]
-pub struct GenericTemplate {
+pub struct GenericInstructions {
     pub dictionary: u32,
     pub binding_count: u32,
     pub blocks: Vec<Block>,
+}
+
+impl GenericTemplate {
+    pub fn new(code: GenericInstructions) -> Result<Self, crate::error::Error> {
+        let mut template = Self {
+            identity: [0; 32],
+            code,
+        };
+        template.identity =
+            crate::vm::ir::frag::id_of(&crate::vm::ir::frag::encode_template(&template)?);
+        Ok(template)
+    }
+
+    /// Content identity of the versioned template fragment. Bindings and concrete ABIs are separate.
+    pub fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+}
+
+impl std::ops::Deref for GenericTemplate {
+    type Target = GenericInstructions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.code
+    }
+}
+
+impl std::ops::Deref for ArchivedGenericTemplate {
+    type Target = ArchivedGenericInstructions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.code
+    }
+}
+
+impl ArchivedGenericTemplate {
+    /// Read the identity covered by the enclosing product's integrity and generation checks.
+    pub fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for GenericTemplate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let code = serde::Deserialize::deserialize(deserializer)?;
+        Self::new(code).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(
@@ -181,31 +238,72 @@ pub(crate) fn test_generic_body(value: u64) -> FuncBody {
         name: format!("generic{value}").into(),
         blocks: Vec::new(),
         shared: Some(Box::new(SharedBody {
-            template: Arc::new(GenericTemplate {
-                dictionary: 16,
-                binding_count: 1,
-                blocks: vec![Block {
-                    stmts: vec![Stmt::Assign {
-                        dst: ScalarPlace::Slot(slot(8)),
-                        rv: Rvalue::IntBin {
-                            op: IntBinOp::Add,
-                            signed: false,
-                            a: Operand::Slot(slot(0)),
-                            b: Operand::Mem {
-                                expr: PlaceExpr {
-                                    base: PlaceBase::Local(16),
-                                    steps: vec![PlaceStep::Deref, PlaceStep::Offset(0)].into(),
+            template: Arc::new(
+                GenericTemplate::new(GenericInstructions {
+                    dictionary: 16,
+                    binding_count: 1,
+                    blocks: vec![Block {
+                        stmts: vec![Stmt::Assign {
+                            dst: ScalarPlace::Slot(slot(8)),
+                            rv: Rvalue::IntBin {
+                                op: IntBinOp::Add,
+                                signed: false,
+                                a: Operand::Slot(slot(0)),
+                                b: Operand::Mem {
+                                    expr: PlaceExpr {
+                                        base: PlaceBase::Local(16),
+                                        steps: vec![PlaceStep::Deref, PlaceStep::Offset(0)].into(),
+                                    },
+                                    width: Width::W64,
                                 },
-                                width: Width::W64,
                             },
-                        },
+                        }],
+                        term: Terminator::Return,
                     }],
-                    term: Terminator::Return,
-                }],
-            }),
+                })
+                .unwrap(),
+            ),
             values: vec![value],
             locals: Vec::new(),
             calls: Vec::new(),
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_template_identity_preserves_fragment_encoding_and_tracks_content() {
+        let body = test_generic_body(11);
+        let template = &body.shared.as_ref().unwrap().template;
+        let code = GenericInstructions::clone(template);
+        let old_payload = postcard::to_stdvec(&code).unwrap();
+        assert_eq!(postcard::to_stdvec(template).unwrap(), old_payload);
+        let mut fragment = vec![frag::ENCODING_VERSION, b'T'];
+        fragment.extend(old_payload);
+        assert_eq!(frag::encode_template(template).unwrap(), fragment);
+        assert_eq!(template.identity(), frag::id_of(&fragment));
+        let decoded = frag::decode_template(&fragment).unwrap();
+        assert_eq!(decoded.identity(), template.identity());
+        let other = test_generic_body(29);
+        assert_eq!(
+            other.shared.unwrap().template.identity(),
+            template.identity()
+        );
+        for field in 0..3 {
+            let mut changed = code.clone();
+            match field {
+                0 => changed.dictionary += 8,
+                1 => changed.binding_count += 1,
+                2 => changed.blocks[0].term = Terminator::Unreachable,
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                GenericTemplate::new(changed).unwrap().identity(),
+                template.identity()
+            );
+        }
     }
 }
