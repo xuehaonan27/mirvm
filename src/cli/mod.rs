@@ -56,6 +56,17 @@ crate::diag_codes! {
 
 static COMPILER_SESSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Prepare an exact compiler argument vector through the normal diagnostics and publication path.
+/// Intended for a compiler worker whose runtime consumer lives in a separate process.
+pub fn prepare_runtime_image(args: Vec<String>) -> ExitCode {
+    if let Err(error) = validate_parallel_frontend_arg() {
+        return crate::error::Error::from(error).report();
+    }
+    crate::diag::enter(crate::diag::Component::Prepare);
+    set_prepare_only();
+    run_driver(args, Vec::new(), false, None, false, false, None)
+}
+
 pub(crate) fn compiler_session_guard() -> std::sync::MutexGuard<'static, ()> {
     COMPILER_SESSION
         .lock()

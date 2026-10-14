@@ -357,7 +357,8 @@ impl ImageStack {
         delta.tls = tls;
         sites.append(&mut delta.asm_sites);
         delta.asm_sites = sites;
-        delta_instance.asm_stub_addrs = crate::lower::asm::materialize(&delta.asm_sites);
+        delta_instance.asm_stub_addrs =
+            crate::native::artifact::assembly::materialize(&delta.asm_sites);
         // entry: delta is authoritative
         delta_instance.image_frozens = frozens;
         delta_instance.rebuild_load_map();

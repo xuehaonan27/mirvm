@@ -241,8 +241,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   - Explain the prepared-base setup regression with separate measurements of canonical-symbol
     lookup and first-program native materialization; a cold-build gain does not establish a gain
     when the base is already present.
-  - Prove a real package/bound-image runner can avoid loading compiler libraries. Measure cache hits
-    and compiler-worker misses, including transfer and diagnostics, before selecting a process split.
+  - Close the compiler-independent runtime's lint/test boundary and connect ordinary project/script
+    dispatch to it. Select miss routing against in-process preparation, including child startup,
+    image publication and revalidation. Preserve child cwd/environment, diagnostic-bearing sessions,
+    capture and lifecycle contracts; qualify hit/miss latency on representative workloads before
+    default routing.
   - Record the reasons functions enter the guest closure and evaluate smaller/lazy products while
     retaining runtime roots, indirect targets, pointer identity and deterministic ownership.
   - Extend semantic-query profiles to edited macro/trait/generic-heavy crates before choosing a

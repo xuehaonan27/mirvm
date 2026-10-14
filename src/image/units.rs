@@ -420,7 +420,7 @@ fn load_one(
         }
         return None;
     }
-    instance.asm_stub_addrs = crate::lower::asm::materialize(&f.module.asm_sites);
+    instance.asm_stub_addrs = crate::native::artifact::assembly::materialize(&f.module.asm_sites);
     if !entry::native_libs_present(&f.module) {
         return None;
     }
@@ -441,6 +441,7 @@ fn load_one(
 /// Persist one home as its unit's manifest: the fragments it references, then the manifest itself,
 /// then prune the unit's older digests. A layer the store cannot hold stays in memory for this run
 /// and is simply not cached.
+#[cfg(feature = "compiler")]
 pub(crate) fn store(
     index: u32,
     stack: &super::ImageStack,

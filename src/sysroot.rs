@@ -22,13 +22,19 @@
 //! Dependency artifacts use `-Zno-codegen` (metadata-only): mirvm consumes only MIR, so
 //! object code is pure waste.
 
+#[cfg(feature = "compiler")]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "compiler")]
 use crate::cargoless::driver::compile_plan;
+#[cfg(feature = "compiler")]
 use crate::cargoless::manifest::{OptLevel, PackageManifest, ProfileFlags};
+#[cfg(feature = "compiler")]
 use crate::cargoless::schedule::Layout;
+#[cfg(feature = "compiler")]
 use crate::cargoless::vendor::VendorDir;
+#[cfg(feature = "compiler")]
 use crate::cargoless::{buildrs, resolve};
 
 pub(crate) mod managed;
@@ -51,6 +57,21 @@ pub(crate) fn managed_provenance(
     input: &managed::Input,
 ) -> Option<crate::utils::content::FileStamp> {
     GENERATION.get()?.provenance(input)
+}
+
+/// Cargo drivers receive the concrete compiler path in their arguments, including when the
+/// producer selected it in another process. Register that selection before loading images.
+pub(crate) fn pin_args(args: &[String]) -> Result<(), crate::sysroot::Error> {
+    if let Some(path) = args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--sysroot=").or_else(|| {
+            (arg == "--sysroot")
+                .then(|| args.get(index + 1).map(String::as_str))
+                .flatten()
+        })
+    }) {
+        crate::sysroot::select_path(path.into())?;
+    }
+    Ok(())
 }
 
 /// Reopen a producer-selected generation in a child. Ordinary external paths stay external.
@@ -225,6 +246,7 @@ pub(crate) fn effective_dir() -> PathBuf {
 ///
 /// Only the home's own sysroot is built here. A sysroot chosen with `--sysroot`/`MIRVM_SYSROOT` is
 /// the caller's to provide, and mirvm neither writes into it nor replaces it.
+#[cfg(feature = "compiler")]
 pub fn ensure_sysroot() -> Result<PathBuf, Error> {
     if let Some(chosen) = crate::options::sysroot() {
         return select_path(chosen);
@@ -288,6 +310,7 @@ pub(crate) fn current_stamp_value() -> Option<String> {
 ///
 /// Hand-editing a rust-src leaf is outside the sentinel's protected surface. Removing the
 /// sysroot family forces reconstruction. An unreadable compiler or sentinel yields `None`.
+#[cfg(feature = "compiler")]
 fn stamp_value() -> Option<String> {
     let mut key = rustc_stat()?;
     key.push('\n');
@@ -298,6 +321,7 @@ fn stamp_value() -> Option<String> {
 }
 
 /// Semantic build flags, independent of the producer's filesystem metadata.
+#[cfg(feature = "compiler")]
 fn build_recipe() -> String {
     let p = sysroot_profile();
     let mut key = format!(
@@ -312,6 +336,7 @@ fn build_recipe() -> String {
 }
 
 /// rustc binary stat string (len + mtime_ns; `None` when absent).
+#[cfg(feature = "compiler")]
 fn rustc_stat() -> Option<String> {
     let md = std::fs::metadata(toolchain::rustc()).ok()?;
     if !md.is_file() {
@@ -329,6 +354,7 @@ fn rustc_stat() -> Option<String> {
 /// The sysroot build recipe (matches the distribution std: debug-assertions off,
 /// overflow-checks on). Full MIR comes from `-Zalways-encode-mir` in dep_rustc_args, not
 /// here.
+#[cfg(feature = "compiler")]
 fn sysroot_profile() -> ProfileFlags {
     ProfileFlags {
         debug_assertions: false,
@@ -345,6 +371,7 @@ fn sysroot_profile() -> ProfileFlags {
 /// sources rather than from anything a user wrote: measured, the vendored `std` carries an
 /// `#[expect]` its own build does not fulfil, so an uncapped build prints a warning in the middle
 /// of whatever command was running, once per cold sysroot, about code the user never sees.
+#[cfg(feature = "compiler")]
 fn sysroot_rustflags() -> Vec<String> {
     vec![
         "-Zforce-unstable-if-unmarked".to_string(),
@@ -363,6 +390,7 @@ fn sysroot_rustflags() -> Vec<String> {
 /// `None` when the sentinel cannot be read: the sysroot is then rebuilt, which fails loudly on the
 /// rust-src check. There is no separate report for an unreadable sentinel because nothing acts on
 /// one — the only two answers are "this content key" and "cannot say".
+#[cfg(feature = "compiler")]
 fn library_sentinel() -> Option<String> {
     let root = toolchain::std_source();
     let mut rows: Vec<String> = Vec::new();
@@ -390,6 +418,7 @@ fn library_sentinel() -> Option<String> {
 /// a stamp of the compiling toolchain (BUILD_ID + rustc binary len+mtime_ns). A toolchain
 /// swap changes the fingerprint and correctly invalidates the host-side staging cache that
 /// is otherwise reused across rebuilds.
+#[cfg(feature = "compiler")]
 fn toolchain_stamp() -> String {
     match rustc_stat() {
         Some(stat) => format!("{}\n{}", crate::options::build::BUILD_ID, stat),
@@ -400,6 +429,7 @@ fn toolchain_stamp() -> String {
 }
 
 /// The four `[patch.crates-io]` entries (as in library/Cargo.toml): registry name -> local path.
+#[cfg(feature = "compiler")]
 fn workspace_overrides(library: &Path) -> BTreeMap<String, PathBuf> {
     [
         "rustc-std-workspace-core",
@@ -423,6 +453,7 @@ fn workspace_overrides(library: &Path) -> BTreeMap<String, PathBuf> {
 ///   the root would make the pseudo-root missing from the lock a loud failure, and the
 ///   toolchain directory is not writable, so the pseudo-root is materialized in our own
 ///   staging.)
+#[cfg(feature = "compiler")]
 fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(root_dir)?;
     let toml = format!(
@@ -451,6 +482,7 @@ fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> Result<(), Error>
 
 /// Do not rewrite identical content (stable mtimes are a precondition for fingerprints and
 /// incremental builds).
+#[cfg(feature = "compiler")]
 fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     if std::fs::read(path).ok().is_none_or(|old| old != bytes) {
         std::fs::write(path, bytes)?;
@@ -461,6 +493,7 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// Full rebuild: pseudo-root -> resolve (supplied by VendorDir) -> compile_plan (using the
 /// toolchain as the compile base) -> write the stamp into tmp -> publish with an atomic
 /// rename.
+#[cfg(feature = "compiler")]
 fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
     let target = crate::options::build::HOST;
     let library = toolchain::std_source();

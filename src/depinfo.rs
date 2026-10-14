@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 
+#[cfg(feature = "compiler")]
 use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,7 @@ pub(crate) struct InputManifest {
 impl InputManifest {
     /// Collect from a live compiler session; `None` when any input cannot be stamped (missing or
     /// unusual), because a product with an incomplete manifest is worse than none.
+    #[cfg(feature = "compiler")]
     pub(crate) fn collect(tcx: TyCtxt<'_>) -> Option<Self> {
         let sess = tcx.sess;
         let mut paths: Vec<String> = sess

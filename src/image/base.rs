@@ -263,6 +263,7 @@ fn lookup(args: &[String], timing: &mut Timing) -> Option<crate::image::BaseImag
 
 /// Reuse the freshly lowered mapping and archive without another compiler or disk read. Publication
 /// is best effort: a complete in-memory layer can still execute when the cache directory is unwritable.
+#[cfg(feature = "compiler")]
 pub(crate) fn build_in_session(
     tcx: rustc_middle::ty::TyCtxt<'_>,
     args: &[String],
@@ -321,6 +322,7 @@ pub fn ensure(args: &[String], timing: &mut Timing) -> crate::image::ImageStack 
 /// Serialize and publish one base image: the publishability rules, the byte-determinism extraction
 /// (HashMaps into sorted Vecs, the derived address table dropped) and the store write. Called by the
 /// isolated builder with a fresh lowering product; the error text is what the caller reports.
+#[cfg(feature = "compiler")]
 pub(crate) fn store(
     out: &Path,
     mut module: ir::Module,
@@ -347,6 +349,7 @@ pub(crate) fn store(
     })
 }
 
+#[cfg(feature = "compiler")]
 fn encode(
     module: &mut ir::Module,
     instance: &crate::vm::instance::Instance,

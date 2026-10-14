@@ -58,7 +58,8 @@ fn load_bytes(bytes: Vec<u8>, args: &[String]) -> Option<VerifiedArtifact> {
         (data_len - remaining.len()).checked_next_multiple_of(rkyv::AlignedVec::ALIGNMENT)?;
     let functions = functions::Functions::load(bytes, start..data_len).ok()?;
     let mut artifact = Image::load_once(meta, functions).ok()?;
-    let addresses = crate::lower::asm::try_materialize(&artifact.module().asm_sites).ok()?;
+    let addresses =
+        crate::native::artifact::assembly::try_materialize(&artifact.module().asm_sites).ok()?;
     artifact.set_asm_addrs(addresses).ok()?;
     Some(artifact)
 }

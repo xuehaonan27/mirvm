@@ -594,8 +594,9 @@ pub(super) fn run_main(
                 )
             })?;
         // warm second half mirrors run_driver hot path (empty image stack: asm recipes idempotently rematerialized)
-        let addresses = crate::lower::asm::try_materialize(&artifact.module().asm_sites)
-            .map_err(crate::pack::Error::from)?;
+        let addresses =
+            crate::native::artifact::assembly::try_materialize(&artifact.module().asm_sites)
+                .map_err(crate::pack::Error::from)?;
         artifact.set_asm_addrs(addresses)?;
         if crate::cli::prepare_only() {
             return Ok(ExitCode::SUCCESS);

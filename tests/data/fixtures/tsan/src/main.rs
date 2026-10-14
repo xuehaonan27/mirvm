@@ -39,27 +39,27 @@
 
 #[path = "../../../../../src/arch/mod.rs"]
 mod arch; // arch layer (interp's x86 touch points go through crate::arch::)
-#[path = "../../../../../src/os/mod.rs"]
-mod os; // os layer (engine touch points go through crate::os:: primitives)
-#[path = "../../../../../src/os_arch/mod.rs"]
-mod os_arch; // the one (os, arch) pair this build is for: kernel ABI as the CPU encodes it
-mod product_adapters; // stub for the one rustc-dependent leaf the engine still needs
-pub(crate) use product_adapters::lower;
-#[path = "../../../../../src/utils/mod.rs"]
-mod utils; // content hash, pure Rust (source-shared)
 #[path = "../../../../../src/diag/mod.rs"]
 mod diag; // the diagnostic vocabulary the engine emits through: std only, so it stays shareable
 #[path = "../../../../../src/error.rs"]
 mod error; // the failure root every layer returns through: std + diag only, source-shared
+#[path = "../../../../../src/lower/error.rs"]
+mod lower; // shared diagnostic vocabulary for native materialization
+#[path = "../../../../../src/os/mod.rs"]
+mod os; // os layer (engine touch points go through crate::os:: primitives)
+#[path = "../../../../../src/os_arch/mod.rs"]
+mod os_arch; // the one (os, arch) pair this build is for: kernel ABI as the CPU encodes it
 #[path = "../../../../../src/out.rs"]
 mod out; // the writer the engine's report paths name for product stdout: std only, source-shared
-mod product_errors; // the product error modules `src/error.rs` converts from, stubbed here
+mod product_errors;
+#[path = "../../../../../src/utils/mod.rs"]
+mod utils; // content hash, pure Rust (source-shared) // the product error modules `src/error.rs` converts from, stubbed here
 pub(crate) use product_errors::{cargo_shim, cli, image, pack, sysroot};
 mod native; // native layer: the symbol reader and the byte layouts are pure Rust (see native/mod.rs)
-#[path = "../../../../../src/store/mod.rs"]
-mod store; // the family register the engine reads its scratch dirs from (pure Rust, source-shared)
 #[path = "../../../../../src/options.rs"]
 mod options; // the MIRVM_* register the engine reads its knobs through (pure Rust, source-shared)
+#[path = "../../../../../src/store/mod.rs"]
+mod store; // the family register the engine reads its scratch dirs from (pure Rust, source-shared)
 mod telemetry; // capture/format source-shared (name fixed: src/vm says crate::telemetry)
 #[path = "../../../../../src/vm/mod.rs"]
 mod vm; // the execution phase under test

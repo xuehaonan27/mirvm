@@ -293,9 +293,57 @@ failed publication, compiler errors and profile compatibility. Focused unit, rel
 package and capture probes cover the affected ownership paths. No full test tier or sanitizer gate
 is claimed for this change.
 
-The release executable still directly depends on `librustc_driver`, including when no compiler
-session is needed. A complete compiler-independent runtime remains unproven. Remaining experiments
-and compatibility requirements are in [frontend-boundary.md](designs/frontend-boundary.md).
+### Runtime boundary prototype
+
+The default CLI links `librustc_driver`. Building the library without its default `compiler` feature
+and with `cranelift` produces a real artifact runner with no rustc/LLVM dependency. Both its dynamic
+dependency list and mappings captured during guest execution confirm the absence. It uses the
+ordinary package/bound-image readers, input validation, assembly materialization, JIT and shared
+guest stack/exit implementation. The compiler-linked reference runner uses the same protocol and
+source/build identity. The ordinary `mirvm run` command is a third control.
+
+On a miss the independent runner starts a compiler worker, which uses the normal prepare driver,
+finishes diagnostics and publishes the existing bound-image format. The parent reopens and
+validates that image before guest entry. Source edits rebuild; a compile error produces no guest
+stdout. A missing or invalid artifact cannot be treated as successful worker output. The protocol
+currently requires complete compiler arguments and a prepared sysroot, rather than ordinary
+project/script dispatch. Reproduction is in the
+[experiment README](../experiments/runtime-boundary/README.md).
+
+The final matrix contains 90 native-matching fresh-process measurements: two workloads, three paths,
+three executables and five alternating rounds. OS caches remain populated and persistent JIT caching
+is disabled. Hits cannot launch a worker; misses remove only that probe's bound image, retaining std,
+dependency and program products. Packages are identical across runners. Complete-time medians are:
+
+| Workload/path | Ordinary CLI | Compiler-linked runner | Independent runtime |
+|---|---:|---:|---:|
+| Minimal output, image hit | 43.3 ms | 43.4 ms | 38.3 ms |
+| Minimal output, package | 37.2 ms | 39.4 ms | 33.3 ms |
+| Minimal output, image miss | 111.8 ms | 132.1 ms | 119.1 ms |
+| Recursive fib(32), image hit | 79.7 ms | 107.9 ms | 81.1 ms |
+| Recursive fib(32), package | 54.9 ms | 55.4 ms | 48.8 ms |
+| Recursive fib(32), image miss | 109.6 ms | 157.5 ms | 163.7 ms |
+
+These results support a cheaper minimal/package startup path, not a universal speedup. The fib
+image hit does not beat the ordinary CLI, and worker misses lose to in-process preparation. Fib
+image-hit ranges are 67.2–96.9 / 86.7–123.1 / 63.0–90.6 ms in table order; this matrix does not
+isolate the reference runner's execution/publication variation. Minimal-output misses include
+325.9 ms and 321.7 ms whole-process outliers, retained in the data. This fib program runs through
+`main`; it is not the repository's `--vm-call fib(32)` timing gate. The runner files are both about
+10 MB; omitting compiler linkage does not establish a smaller runner executable or an RSS saving.
+
+Seven separate strict-JIT contract invocations cover inline assembly, syscall rewriting, global
+assembly calling guest code, generic templates with native callbacks/concurrency and separate fork,
+and main return/panic classification. The generic artifact is prepared with sharing enabled and
+executed without the exporter flag. Native stdout/exit agree. Release builds, all-target/all-feature
+Clippy with warnings denied, four focused materializer unit checks and all repository source-boundary
+checks pass. The source-shared TSan fixture builds with its current generic IR fields and serde
+features; no TSan execution or full runtime test tier is claimed.
+
+The compiler-independent configuration still emits unused-producer/tool warnings and has not closed
+its own lint/unit inventory. Ordinary project scheduling, miss routing, working directory/environment
+handoff, diagnostic-bearing sessions and full lifecycle/capture qualification remain open in
+[frontend-boundary.md](designs/frontend-boundary.md). The normal CLI's default routing is unchanged.
 
 ### Runtime generics evaluation
 

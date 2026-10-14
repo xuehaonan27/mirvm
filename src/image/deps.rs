@@ -212,7 +212,7 @@ pub fn try_load(
         return None;
     }
     // asm stubs are materialized from the module's recipes on every load, including this one.
-    instance.asm_stub_addrs = crate::lower::asm::materialize(&f.module.asm_sites);
+    instance.asm_stub_addrs = crate::native::artifact::assembly::materialize(&f.module.asm_sites);
     // A removed required .so is a miss that falls back to the cold-path self-heal (same contract as
     // the L2 cache)
     if !entry::native_libs_present(&f.module) {
@@ -238,6 +238,7 @@ pub fn try_load(
 /// unavailable pre-key simply leaves no file for this run, so later runs do full lowering and self-heal;
 /// the returned stack-layer key degrades to a process-unique placeholder, which makes the L2 key chain
 /// invalid across runs rather than a false hit.
+#[cfg(feature = "compiler")]
 pub fn store_and_wrap(
     rustc_args: &[String],
     base_key: &str,

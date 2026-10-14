@@ -17,7 +17,7 @@ libffi = "5.1.1"
 libmimalloc-sys = "0.1.49"
 # Every type in ir.rs carries a serde derive (the L2 cache); the harness compiles
 # src/vm source-for-source via #[path], so its dependency surface must keep up.
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 # The shared error vocabulary (src/diag is std-only, but every typed error enum derives thiserror,
 # and the harness compiles src/os and src/vm source-for-source).

@@ -39,7 +39,8 @@ Relevant ownership boundaries:
 
 | Owner | Current responsibility |
 |---|---|
-| `src/cli/driver.rs` | Early bound-image lookup, layer preparation, rustc callback, program publication, compiler finalization, Engine entry |
+| `src/cli/driver.rs` | Early bound-image lookup, layer preparation, rustc callback, program publication and compiler finalization |
+| `src/runtime/`, `src/native/artifact/assembly.rs` | Compiler-independent product execution, guest stack/exit handling and materialization of owned assembly recipes |
 | `src/cli/base_image.rs`, `src/image/base.rs` | Canonical std construction in the user session, isolated preparation, persistent base validation |
 | `src/cli/cargo.rs`, `src/cargoless/schedule/args.rs` | Target dependency metadata with MIR, host build scripts/proc-macros, required mono diagnostics and assembly extraction |
 | `src/lower/collect.rs`, `src/lower/mod.rs` | Native codegen's mono seeds plus MIRVM's guest worklist closure, runtime roots, frozen data and image placement |
@@ -102,7 +103,7 @@ compiler teardown without changing guest event semantics.
 |---|---|---|---|
 | Prebuilt base plus cheaper/lazier base consumption | Std lowering on first program; repeated owned-IR reconstruction | Compatible build/profile variants, installed-artifact lifetime, immutable ownership and address identity | Immutable consumption implemented; release delivery pending |
 | Single-session miss path with reusable std products | Separate empty-main compiler session, intermediate base write/read and duplicated query work | Deterministic std ownership, custom allocator/profile differences, publication and cross-program reuse | Implemented; compare complete cache states |
-| Runtime executable/library separated from compiler dependency | Loading rustc/LLVM on cache/package hits | Compiler-worker startup and artifact transfer on misses; extraction of mixed modules | First runtime-boundary experiment |
+| Runtime executable/library separated from compiler dependency | Loading rustc/LLVM on cache/package hits | Compiler-worker startup and artifact transfer on misses; extraction of mixed modules | Real runner prototype; ordinary CLI routing remains open |
 | Persistent generic semantic IR, specialized by MIRVM | Some repeated rustc metadata decoding and semantic-query work | New generic type/substitution/layout/const/vtable machinery and versioned dependencies | Larger research project; require evidence from edited real crates |
 | Custom rustc backend/plugin | A different artifact-emission integration point | Most frontend and semantic-query work remains; driver dependency may still load LLVM | Useful integration choice, not a demonstrated latency fix |
 | Independent frontend or source interpreter | Rustc implementation costs which the replacement actually avoids | Rust semantics, diagnostics, macros, const evaluation, type layout, ABI and std compatibility | Feasible scope must be stated; no current full-compatibility speedup demonstrated |
@@ -201,12 +202,15 @@ and input-dependency collection. The runtime side owns artifact validation, nati
 per-Engine state, execution and JIT. Diagnostics must complete before guest entry, and unsuccessful
 or diagnostic-bearing compilations must keep the current publication rules.
 
-This boundary is partly present but not a Cargo/link boundary. `src/lib.rs` links rustc crates;
-`depinfo.rs` combines input collection with compiler-independent validation; `pack/write.rs` consumes
-`TyCtxt`; native archive handling mixes compiler queries with loading; runtime code reaches assembly
-helpers under `lower`. The existing TSan fixture compiles shared engine sources without rustc-private
-dependencies, but stubs product leaves and excludes JIT: it supports feasibility, not a complete
-standalone-runtime proof.
+The `compiler` Cargo feature separates rustc linkage and session-dependent producers from the
+library's runtime. It remains enabled by default and is required by the ordinary CLI. Input
+validation and assembly materialization are available without it. The
+[runtime-boundary probe](../../experiments/runtime-boundary/README.md) executes real packages and
+bound images with Cranelift, and its executing process maps contain neither rustc nor LLVM. A
+compiler worker prepares a missing image through the ordinary driver before the runtime revalidates
+it. These are concrete build and artifact boundaries, not a selected ordinary-CLI process policy.
+Unused producer/tool helpers and the no-compiler test inventory still need separation. The narrow
+probe does not cover project orchestration or the complete lifecycle/capture contract.
 
 A compiler worker's output cannot retain its process's helper pointers, native handles or `tcx`
 values. Use the existing owned identities, relocation recipes and per-instance restoration rules.
@@ -216,9 +220,12 @@ an explicit artifact identity: current `--vm-call` is an execution choice, not c
 
 ## 6. Bounded experiments and acceptance
 
-1. **Runtime isolation:** build a minimal real artifact runner with no `librustc_driver`/LLVM dynamic
-   dependency. Prove this through its dependency list and mappings; measure package and bound-image
-   hits. Measure compiler-worker misses too, including startup, diagnostics and transfer cost.
+1. **Runtime isolation:** close the compiler-independent lint/test boundary and connect ordinary
+   project/script dispatch to owned execution products. Select miss routing against in-process
+   preparation: child startup, publication and revalidation can outweigh the hit-path saving.
+   Preserve working directory/environment, compiler diagnostics that prevent publication, capture,
+   signals and close. Measure representative package/image hits and misses, including transfer and
+   whole-process costs; retain the dependency-list and executing-process mapping checks.
 2. **Reachability and reuse:** record why functions enter the closure (mono seed, runtime root,
    direct call, function pointer, constant or vtable). Use those edges to assess smaller/lazy
    artifacts. Hot-path execution coverage alone cannot justify dropping cold panic/drop paths.

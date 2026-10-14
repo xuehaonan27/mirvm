@@ -54,6 +54,7 @@ fn handler_sig() -> ForeignSig {
 /// one scalar param, no caller location) is what `resolve_signal_handler` accepts.
 fn handler_module() -> Module {
     let handler = FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,

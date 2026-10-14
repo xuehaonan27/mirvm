@@ -244,9 +244,9 @@ families! {
     // owners: lower::generic::products — unbound generic templates and negative export probes;
     // keyed by defining crate metadata, target, semantic profile and build, independent of consumers.
     Cache GENERIC_TEMPLATES "generic-templates" generation("bin") flag(Units);
-    // owners: lower::asm — materialized per-site asm stubs; keyed by the generated assembly's content.
+    // owners: native::artifact::assembly — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
-    // owners: lower::global_asm, pack — materialized `global_asm!`/naked-fn objects; keyed by the
+    // owners: native::artifact::assembly, pack — materialized `global_asm!`/naked-fn objects; keyed by the
     // final text. `pack` names the family to rewrite those paths into a package.
     Cache GLOBAL_ASM      "global-asm"      keyed;
     // owners: native::artifact::archive — a PIC `.a` converted into a dlopen-able `.so`; keyed by

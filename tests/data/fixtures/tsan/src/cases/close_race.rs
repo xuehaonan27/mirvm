@@ -41,6 +41,7 @@ fn probe_module() -> Module {
         width: Width::W64,
     };
     let body = FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Scalar(ret),

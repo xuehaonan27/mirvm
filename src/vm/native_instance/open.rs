@@ -96,7 +96,7 @@ fn open_deferred(
         }
     }
     let mut handle_guard = HandleGuard(Some(handle));
-    crate::lower::asm::refill_syscall_slot(handle);
+    crate::native::artifact::assembly::refill_syscall_slot(handle);
     let bias = crate::os::dll::load_bias(handle, &cpath).ok_or_else(|| {
         crate::fail!(
             Engine,

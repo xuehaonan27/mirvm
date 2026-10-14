@@ -1,7 +1,9 @@
-//! The one artifact this harness can carry.
-//!
-//! The real module also holds the archive converter, whose rustc session is what keeps it out of
-//! this build, and the bridge artifact, which needs a `cc` and a loaded image.
+//! Compiler-independent assembly and bridge materialization, source-shared with the runtime.
 
 #[path = "../../../../../../src/native/artifact/asmtext.rs"]
 pub(crate) mod asmtext;
+
+#[path = "../../../../../../src/native/artifact/assembly.rs"]
+pub(crate) mod assembly;
+#[path = "../../../../../../src/native/artifact/bridge.rs"]
+pub(crate) mod bridge;

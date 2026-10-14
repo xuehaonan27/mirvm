@@ -27,6 +27,7 @@ mod meta;
 mod read;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "compiler")]
 mod write;
 
 use std::path::Path;
@@ -36,6 +37,7 @@ use meta::{McEntry, NativeLibEntry};
 // The three free functions the CLI reaches as `crate::pack::…`, the paths its branch criteria and
 // pack step already name them by.
 pub(crate) use read::{is_package, load_package};
+#[cfg(feature = "compiler")]
 pub(crate) use write::write_package;
 
 /// Why a `.mirvm` package could not be produced or consumed.
@@ -168,7 +170,8 @@ impl Package {
     /// the host process. The caller must trust those package inputs and ABI declarations.
     pub unsafe fn instantiate(&self) -> Result<crate::vm::Engine, Error> {
         let mut artifact = self.loaded.instantiate()?;
-        let addresses = crate::lower::asm::try_materialize(&artifact.module().asm_sites)?;
+        let addresses =
+            crate::native::artifact::assembly::try_materialize(&artifact.module().asm_sites)?;
         artifact
             .set_asm_addrs(addresses)
             .map_err(|error| Error::reject(error.to_string()))?;

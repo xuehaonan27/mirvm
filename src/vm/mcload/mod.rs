@@ -330,7 +330,7 @@ target_value:
     fn global_asm_signal_call_uses_the_owned_runtime_bridge() {
         const OWNER: u64 = 0x1020_3040_5060_7080;
         const HANDLER: usize = 0x1234_5678;
-        let path = crate::lower::global_asm::assemble(
+        let path = crate::native::artifact::assembly::assemble(
             r#"
 .intel_syntax noprefix
 .text

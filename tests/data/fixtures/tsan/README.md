@@ -36,7 +36,6 @@ compile half as a "purity gate" step for exactly that reason.
 ```
 tests/data/fixtures/tsan/
   src/main.rs            crate root: the shared-source adapters, then cases::run_all()
-  src/product_adapters.rs  stubs for the rustc-dependent leaves src/vm references
   src/telemetry.rs       adapter: keeps the name `telemetry` so src/vm's crate::telemetry resolves
   src/cases/mod.rs       the case registry (ids + run order) and the verdict printer
   src/cases/*.rs         one file per area of the engine
@@ -48,8 +47,9 @@ Crate-root modules named `arch`, `diag`, `native`, `options`, `os`, `os_arch`, `
 `utils`, `vm` are **not** a style choice: `src/vm` is compiled verbatim and refers to exactly those
 paths.
 `crate::telemetry` is the source-shared adapter, `crate::diag` is the std-only diagnostic
-vocabulary, `crate::native` carries only the pure-Rust symbol reader and byte layouts, and the rustc-dependent
-leaves (`lower`, and with them `sysroot`) are stubbed in `src/product_adapters.rs`.
+vocabulary, and `crate::native` carries the pure-Rust symbol reader, byte layouts and assembly
+materialization. Lowering's diagnostic vocabulary is source-shared; compiler-only error conversions
+remain outside this harness.
 
 ## Cases
 
@@ -116,7 +116,7 @@ make case C=tsan     # the gate; runtime.semantics calls it too
 ```
 
 Formatting: this crate is outside the root workspace, so `cargo fmt` at the repository root
-does not cover it. `rustfmt --edition 2024 tests/data/fixtures/tsan/src/cases/*.rs tests/data/fixtures/tsan/src/product_adapters.rs`
+does not cover it. `rustfmt --edition 2024 tests/data/fixtures/tsan/src/cases/*.rs`
 works; `tests/data/fixtures/tsan/src/main.rs` and `tests/data/fixtures/tsan/src/telemetry.rs` must be checked with
 `--config skip_children=true`, because rustfmt cannot resolve the module tree behind the
 `#[path]` includes (it looks for the children of `capture.rs` in the wrong directory).

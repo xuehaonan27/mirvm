@@ -31,6 +31,7 @@ fn build_module() -> Module {
         width: Width::W64,
     };
     let mk = |stmts: Vec<Stmt>, name: &str| FuncBody {
+        shared: None,
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Scalar(ret_slot),

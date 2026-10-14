@@ -127,7 +127,7 @@ pub fn lookup(
     // the cold path self-heals. Materialized .so files (native archive / global_asm) that were
     // removed are a miss for the same reason.
     let mut instance = crate::store::entry::revive(&mut f.module, below)?;
-    instance.asm_stub_addrs = crate::lower::asm::materialize(&f.module.asm_sites);
+    instance.asm_stub_addrs = crate::native::artifact::assembly::materialize(&f.module.asm_sites);
     if !crate::store::entry::native_libs_present(&f.module) {
         return None;
     }

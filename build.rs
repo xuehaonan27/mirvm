@@ -58,6 +58,8 @@ fn main() {
 
     println!("cargo:rustc-env=MIRVM_DEFAULT_SYSROOT={sysroot}");
     println!("cargo:rustc-env=MIRVM_HOST={}", env::var("TARGET").unwrap());
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{sysroot}/lib");
+    if env::var_os("CARGO_FEATURE_COMPILER").is_some() {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{sysroot}/lib");
+    }
     println!("cargo:rerun-if-changed=build.rs");
 }
