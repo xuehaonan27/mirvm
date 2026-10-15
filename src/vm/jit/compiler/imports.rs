@@ -298,6 +298,7 @@ impl<'a> Compiler<'a> {
             domain,
             module,
             fbc: FunctionBuilderContext::new(),
+            context: None,
             c2i,
             call_main_catch,
             unreachable,

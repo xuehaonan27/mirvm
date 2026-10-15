@@ -22,6 +22,7 @@ pub(super) fn run_blocks(
 ) -> Exit {
     let module: &Module = unsafe { &(*ctx).shared.module };
     let instance: &Instance = unsafe { &(*ctx).shared.instance };
+    let blocks = body.code();
     let mut work = body
         .shared
         .as_ref()
@@ -34,7 +35,7 @@ pub(super) fn run_blocks(
     let mut iterations = 0u32;
     loop {
         let current = blk;
-        let block: &Block = &body.code()[blk];
+        let block: &Block = &blocks[blk];
         for stmt in &block.stmts {
             exec_stmt(ctx, base, stmt);
         }

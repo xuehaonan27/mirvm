@@ -50,9 +50,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   Current measurements belong to [current-status.md](current-status.md). The remaining work is
   profile-driven:
   - Execution profiles prioritize interpreter statement/block cost and JIT compile throughput.
-    On the focused flate2 input, statements and the block loop account for about 28% of user cycles
-    and the JIT worker for 34% on image hits. Establish net payback on this workload before claiming
-    a general execution improvement. Measure selective inlining,
+    On the focused flate2 input, statements and the block loop account for about 24% of user cycles,
+    operand evaluation for 10%, and the JIT worker for 35% on image hits. Reduce operand and dispatch
+    work while preserving the scalar/wide/SIMD semantics. Compiler scratch reuse reduces allocation
+    traffic but corpus compile-time savings remain small and inconsistent across control batches;
+    attribute remaining backend work and time to publication before changing compilation policy. Qualify gains beyond flate2,
+    including the small fib engine regression. Measure selective inlining,
     PLT dispatch, frame setup and compiled/interpreted transitions on call-heavy workloads. Account for
     code growth as well as latency; preserve pre-frame stack checking, every return safepoint,
     unwind metadata, plain/trace isolation and persisted JIT reload behavior. Use alternating

@@ -132,6 +132,12 @@ publishes fast/packed entries in the existing order. A batch is the natural unit
 prefetch (the package-heat precedent) can pre-link the learned hot set in the background at startup,
 turning warmup into one link wave instead of a compile wave.
 
+Each compiler owns one reusable Cranelift context, isolated by tier and code domain. Successful
+definitions extract code, relocations and unwind material before clearing and retaining the context;
+an early failure drops the in-use context. Clearing removes per-definition state while retaining
+scratch capacity. Worker shutdown releases that capacity independently of the published code's
+process-long lifetime. Scratch reuse must leave canonical artifact bytes unchanged.
+
 ### 2.6 Adaptive optimization tiers
 
 The optimization level is a jit-key dimension, not a global constant, and the policy is

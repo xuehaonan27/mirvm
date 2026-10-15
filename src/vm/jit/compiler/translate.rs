@@ -477,7 +477,7 @@ impl<'a> Compiler<'a> {
             .module
             .declare_function(&format!("g{func}"), Linkage::Local, &sig)
             .ok()?;
-        let mut cctx = self.module.make_context();
+        let mut cctx = self.take_context();
         cctx.func.signature = sig;
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
@@ -535,7 +535,7 @@ impl<'a> Compiler<'a> {
             None,
             &cctx,
         );
-        self.module.clear_context(&mut cctx);
+        self.recycle_context(cctx);
         Some((
             id,
             PendingJitSymbol {
@@ -580,7 +580,7 @@ impl<'a> Compiler<'a> {
             .module
             .declare_function(&format!("t{target}"), Linkage::Local, &sig)
             .unwrap();
-        let mut cctx = self.module.make_context();
+        let mut cctx = self.take_context();
         cctx.func.signature = sig;
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
@@ -638,7 +638,7 @@ impl<'a> Compiler<'a> {
             role: JitSymbolRole::C2i,
             size,
         };
-        self.module.clear_context(&mut cctx);
+        self.recycle_context(cctx);
         if self.module.finalize_definitions().is_err() {
             return None;
         }
@@ -662,7 +662,7 @@ impl<'a> Compiler<'a> {
             .module
             .declare_function(&format!("f{func}"), Linkage::Local, &sig)
             .unwrap();
-        let mut cctx = self.module.make_context();
+        let mut cctx = self.take_context();
         cctx.func.signature = sig;
         // The Translator sets `has_try_call` while building; it is read outside the
         // builder to decide whether an LSDA is needed.
@@ -826,7 +826,7 @@ impl<'a> Compiler<'a> {
             }
         }
         self.shared.jit.record_sites(self.domain, func, placed);
-        self.module.clear_context(&mut cctx);
+        self.recycle_context(cctx);
         Some((
             id,
             PendingJitSymbol {
@@ -865,7 +865,7 @@ impl<'a> Compiler<'a> {
             .module
             .declare_function(&format!("p{func}"), Linkage::Local, &sig)
             .unwrap();
-        let mut cctx = self.module.make_context();
+        let mut cctx = self.take_context();
         cctx.func.signature = sig;
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
@@ -942,7 +942,7 @@ impl<'a> Compiler<'a> {
             None,
             &cctx,
         );
-        self.module.clear_context(&mut cctx);
+        self.recycle_context(cctx);
         Some((
             id,
             PendingJitSymbol {

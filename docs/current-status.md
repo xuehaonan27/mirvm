@@ -236,73 +236,85 @@ and truncation rebuilds the retained prefix. Projection, restoration and reverse
 share that view. The [dependency-sharing design](designs/dep-sharing-design.md#2-contract) owns its
 collision, scope and invalidation rules. Cache formats and external-reference validation are unchanged.
 
-An unprofiled comparison uses 200 native-matching fresh processes: ten alternating rounds on five
-inputs for each of image hit and program miss, with compiler-independent CLI builds and independent
-prepared generations. Program misses bypass IR caching while retaining installed std and dependencies;
-they are not empty-installation runs. OS caches and heat orders remain; persistent JIT caching is
-disabled. Whole time brackets process creation through exit, excluding result-file setup/close/persistence.
-Builds, checks and CPU captures do not overlap timing; shared-host load is uncontrolled. Program-miss
-medians are reference / candidate; dependency load is included in frontend, not additional to it:
+The interpreter executes scalar `Assign(Use)` transfers directly in the block loop, using the same
+operand and place operations as other statements. The wide/SIMD dispatcher remains out of line,
+and the immutable body-code slice is selected once before the block loop. With JIT disabled, an
+instrumented census finds that transfers make up 58% of flate's statements; it is not a timing
+measurement.
+In Linux x86_64 release code the block loop grows by 172 bytes (1.9%), while the separate dispatcher
+remains 24,895 bytes. Compiler scratch reuse follows the lifetime contract in
+[the JIT design](designs/jit-code-cache-design.md#25-load-time-linking-and-publication).
 
-| Workload | Dependency load | Frontend | Complete process | Child CPU |
-|---|---:|---:|---:|---:|
-| Minimal output | — | 32.95 / 33.15 ms | 117.54 / 112.58 ms | 92.75 / 90.81 ms |
-| fib(32) through main | — | 34.50 / 36.00 ms | 142.39 / 323.78 ms | 106.16 / 109.81 ms |
-| Many generic instances | — | 40.45 / 43.45 ms | 234.50 / 238.48 ms | 211.95 / 216.35 ms |
-| serde JSON | 61.70 / 45.65 ms | 108.15 / 91.60 ms | 230.05 / 204.01 ms | 158.76 / 147.12 ms |
-| flate2, 2 KiB | 81.65 / 58.00 ms | 133.30 / 114.35 ms | 336.91 / 319.13 ms | 305.71 / 288.84 ms |
+An unprofiled comparison uses 100 native-matching fresh processes: ten alternating rounds on five
+inputs, comparing `af23936` with the interpreter/scratch changes. Both builds use the
+compiler-independent CLI and independent prepared generations. Bound images, installed std and
+dependencies, OS caches and heat orders remain; persistent JIT caching is disabled. These are fresh
+processes with prepared images, not empty-installation runs. Whole time brackets process creation
+through exit, excluding result-file setup/close/persistence. Builds, checks and CPU captures do not
+overlap timing; shared-host load is uncontrolled. Medians are reference / candidate:
 
-Dependency-load differences favor the candidate in 9/10 serde pairs and 8/10 flate pairs; child CPU
-falls in 10/10 and 9/10 pairs. Whole-process differences favor it in 8/10 serde pairs but only 4/10
-flate pairs: flate's lower independent median does not establish a consistent whole-run improvement.
-No benefit is established for dependency-free inputs. The extra reverse index lives for the stack's
-lifetime, including runs that do not need a manifest view; base-load medians remain within 0.4 ms.
-The fib miss wall-time regression is retained: both binaries exhibit intermittent non-CPU stalls,
-inside the engine and outside the driver ledger. The candidate's stalled runs skew its median;
-this does not identify their cause. A bounded diagnostic with six pipe-drained and eight syscall-traced
-runs per binary reproduces a 443 ms untraced baseline run, but none of the traced runs reproduces the
-long stall. Thread-join futex durations overlap work and cannot be summed or assigned as its cause.
+| Workload | Engine | Complete process | Child CPU |
+|---|---:|---:|---:|
+| Minimal output | 8.30 / 7.80 ms | 33.50 / 33.45 ms | 23.62 / 24.24 ms |
+| fib(32) through main | 21.05 / 21.50 ms | 46.33 / 48.55 ms | 36.72 / 37.51 ms |
+| Many generic instances | 115.70 / 110.60 ms | 142.97 / 141.61 ms | 136.34 / 129.79 ms |
+| serde JSON | 20.05 / 18.70 ms | 63.49 / 63.42 ms | 54.82 / 54.53 ms |
+| flate2, 2 KiB | 107.60 / 103.95 ms | 147.69 / 146.81 ms | 185.98 / 178.47 ms |
 
-Image hits bypass the changed compiler stack. Control medians remain mixed:
+Many-instance and flate engine times improve in 7/10 and 8/10 pairs; complete-process times improve
+in only 5/10 and 6/10. Serde engine time improves in 7/10, but complete-process time in only 5/10.
+Fib engine and complete-process medians regress by 0.45 ms and 2.21 ms, with improvements in only
+2/10 and 4/10 pairs. These results establish modest workload-specific engine savings, not a
+consistent complete-process gain. Forty additional invocations disable JIT to isolate interpreter
+work. Flate engine medians are 250.70 / 221.90 ms, complete-process medians 292.59 / 264.90 ms, with
+all ten pairs improving in both measures. Serde engine medians are 19.60 / 17.65 ms, while
+complete-process medians are 68.01 / 64.89 ms with only 5/10 pairs improving. Workload modes are
+separate controls, not additive phases.
 
-| Workload | Complete process | Engine |
-|---|---:|---:|
-| Minimal output | 34.14 / 35.62 ms | 8.10 / 8.15 ms |
-| fib(32) through main | 48.98 / 50.90 ms | 22.25 / 25.40 ms |
-| Many generic instances | 145.93 / 143.97 ms | 116.10 / 116.40 ms |
-| serde JSON | 74.95 / 70.82 ms | 23.70 / 22.35 ms |
-| flate2, 2 KiB | 153.79 / 156.57 ms | 109.65 / 107.60 ms |
-
-Separate program-miss CPU captures use twelve fresh processes per binary/workload, `cycles:u` at
+Separate image-hit CPU captures use twelve fresh processes per binary/workload, `cycles:u` at
 1999 Hz, DWARF stacks and PID-specific JIT maps. Reference / candidate captures contain
-4,707 / 4,600 serde samples and 8,984 / 8,701 flate samples, with no lost samples. All percentages are
-cycle-period weighted, not elapsed-time components. Repeated `Symbols::of` construction accounts for
-7.59% of reference serde cycles and 4.09% of flate cycles; that stack disappears from candidate captures.
-Incremental `Symbols::extend` costs 2.44% / 0.88%, including work formerly in image folding, so these
-figures are not direct before/after pairs. Inclusive unit loading falls from 20.00% to 10.56% for serde
-and 8.92% to 5.05% for flate. Total sampled cycles fall by 6.7% / 4.2%; captures diagnose work, not latency.
+6,686 / 5,727 flate samples and 2,592 / 2,302 serde samples, with no lost samples. All percentages
+are cycle-period weighted. Flate statement execution plus the block loop falls from 27.68% to
+24.43% of sampled cycles; their combined absolute cycles fall by 22.6%. The transfer path moves
+into the block loop, so the statement symbol alone would overstate the saving. Total sampled cycles
+fall by 12.3% on flate and 4.6% on serde. These captures diagnose work, not elapsed-time gains;
+background compilation can change which functions are interpreted during each run.
 
-Candidate program-miss thread shares identify the remaining work:
-
-| Workload | Compiler worker | rustc threads | Guest thread | JIT worker | Main CLI |
-|---|---:|---:|---:|---:|---:|
-| serde JSON | 41.02% | 38.23% | 10.85% | 4.33% | 5.22% |
-| flate2, 2 KiB | 16.87% | 16.59% | 41.81% | 23.83% | 0.73% |
-
-Minor threads account for the remainder. Image absorption still copies/hashes symbol tables
-(3.73% / 1.58% inclusive). serde retains compiler metadata decoding, allocation and verification work.
-On flate, statement execution and the block loop alone account for 19.76% of all miss cycles;
-operand evaluation adds 5.45%. Interpreter execution and JIT compile throughput remain the larger
-execution targets. Ordinary interpreted call admission uses thread-owned count batches;
+The flate candidate spends 55.97% of user cycles on the guest thread and 34.60% on the JIT worker.
+Operand evaluation alone retains 9.58% of total cycles. Serde instead spends 54.52% on the main CLI,
+29.92% on the guest and 12.30% on JIT. Interpreter dispatch/operands and JIT compile throughput
+remain execution targets; serde also retains hashing, archive verification and allocation costs.
+Ordinary interpreted call admission uses thread-owned count batches;
 [the JIT design](designs/jit-code-cache-design.md) owns its trigger and concurrency contract.
 
-Focused validation passes 32 image tests, including collision precedence, missing references,
-canonical rebinding and truncation. The dependency-sharing gate passes cross-program reuse,
-fully-lowered output equivalence and deterministic publication. An isolated corrupted upper unit
-is rejected after loading its prefix; fallback lowering matches native stdout and the next run
-loads the repaired stack. Full/compiler and lightweight CLI builds pass Linux warnings-denied
-all-target Clippy. Formatting and repository boundary checks pass. No full runtime suite was run.
-The [preparation harness](../experiments/preparation/README.md) owns reproduction and profiling tools.
+A separate allocator probe compiles 48 synthetic scalar functions with fresh or reused contexts.
+Reuse reduces allocation/reallocation calls from 49,492 to 44,217 and requested bytes from
+21,483,052 to 19,878,404. Counts exclude compiler construction and are collected separately from
+timing. Stable real-corpus compile-time payback is not established: five alternating strict
+synchronous pairs per input compile identical function counts and body-size multisets. Final ledger
+medians are 667.35 / 649.82 ms for serde (1,689 functions) and 967.59 / 940.63 ms for flate (2,128
+functions), with all five pairs improving. A separate control batch with the same compilation path
+is approximately flat (717.69 / 716.20 ms and 1,073.98 / 1,078.00 ms). The final batch's 2.6–2.8%
+saving is therefore provisional. This diagnostic forces threshold one; it is not the ordinary
+runtime policy. Compile intervals exclude worker shutdown and cache publication.
+
+Program-miss profiles retain image absorption's symbol-table copying/hashing, compiler metadata
+decoding/allocation and semantic verification. Intermittent long non-CPU waits remain in both
+reference and candidate processes, inside the engine and outside the driver ledger. Bounded syscall
+tracing did not reproduce the long stall; overlapping thread-join waits cannot identify its cause.
+The small-input program-miss regression remains unexplained and is tracked in D7; image-hit gains
+do not resolve it.
+
+Focused validation passes 41 interpreter/compiler/context unit tests, including canonical artifact
+byte equality after scratch reuse and trace/published-code contracts. Five native differential cases
+and the signal oracle pass in interpreter and strict-JIT modes (12 cases): catch/unwind, wide integers,
+wide floats, SIMD, volatile memory and signals. Sixteen entry-boundary invocations cover
+normal/panic, generic/fork, hit/miss and interpreter/JIT paths. Cold JIT publication, stored-entry prelinking and artifact reload
+match native output, including on the final shutdown-cleanup build. Linux full/compiler and
+lightweight CLI, plus macOS runtime/Cranelift, pass warnings-denied all-target Clippy; the final
+cleanup also passes Linux all-feature Clippy. Formatting and 14 repository boundary checks pass.
+No full runtime suite was run. The [preparation harness](../experiments/preparation/README.md) owns
+reproduction and profiling tools.
 
 Registry index lines decode their schema directly into resolver fields. Object-only visitors reject
 positional arrays; unusual shapes use the value parser to retain tolerant field rules and diagnostics.

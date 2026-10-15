@@ -40,7 +40,7 @@ impl<'a> Compiler<'a> {
             .module
             .declare_function("mirvm_trace_enter", Linkage::Local, &sig)
             .ok()?;
-        let mut cctx = self.module.make_context();
+        let mut cctx = self.take_context();
         cctx.func.signature = sig.clone();
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
@@ -102,7 +102,7 @@ impl<'a> Compiler<'a> {
             .filter(crate::vm::jit::unwind::is_registrable)?;
         let lsda = build_lsda(&collect_call_sites(&cctx));
         self.pending_unwind.push((id, ui, Some(lsda)));
-        self.module.clear_context(&mut cctx);
+        self.recycle_context(cctx);
         Some(id)
     }
 }

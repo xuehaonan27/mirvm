@@ -50,6 +50,9 @@ struct Compiler<'a> {
     domain: CodeDomain,
     module: JITModule,
     fbc: FunctionBuilderContext,
+    /// Cleared scratch storage retained between definitions. A failed definition drops its context
+    /// instead, so the next one starts fresh without retaining partial IR or analysis state.
+    context: Option<cranelift_codegen::Context>,
     /// `mirvm_c2i`: compiled code reaches an uncompiled guest function through it and
     /// lands back in the interpreter. `ctx` restoration is the boundary TLS attach,
     /// shared with the thunk factory and idempotent.
@@ -152,6 +155,19 @@ mod imports;
 mod symbols;
 mod trace;
 mod translate;
+
+impl Compiler<'_> {
+    fn take_context(&mut self) -> cranelift_codegen::Context {
+        self.context
+            .take()
+            .unwrap_or_else(|| self.module.make_context())
+    }
+
+    fn recycle_context(&mut self, mut context: cranelift_codegen::Context) {
+        self.module.clear_context(&mut context);
+        self.context = Some(context);
+    }
+}
 
 /// Start the compiler service (called by run_vm_engine after Shared is finalized;
 /// not started when --jit off).
@@ -354,6 +370,9 @@ pub(super) fn worker(
     if let (Some(work), Some(publishing)) = (&shared.jit.work, publishing) {
         work.report(publishing.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
     }
+    // Scratch belongs to the worker, not to the published code's process-long lifetime.
+    baseline.context = None;
+    optimized.context = None;
     // Published JIT code may still be live on a sleeping stack in the process-wide
     // thread pool. Teardown has to join the compile thread rather than race libc
     // cleanup, and it must not destruct the JITModules either, since that would unmap

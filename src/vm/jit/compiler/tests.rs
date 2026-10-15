@@ -723,13 +723,16 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
     }
 
     /// Compile one function of one program and hand back the entry it captured.
-    fn entry_of(funcs: Vec<ir::FuncBody>, which: u32) -> artifact::Entry {
+    fn entry_of(funcs: Vec<ir::FuncBody>, which: u32, warm_context: bool) -> artifact::Entry {
         let shared = Shared::new(ir::Module {
             funcs: funcs.into(),
             ..ir::Module::default()
         });
         let mut compiler = test_compiler(&shared, CodeDomain::Plain);
         compiler.reload = true;
+        if warm_context {
+            compiler.compile(1 - which);
+        }
         compiler.compile(which);
         let entry = compiler
             .last_entry
@@ -747,8 +750,18 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
     // The same fragment at function 0 with its callee at 1 and TLS slot 3, and at function 1 with its
     // callee at 0 and TLS slot 8; the frozen address differs too, because a program places its data
     // where it likes and numbers its thread-locals as it meets them.
-    let first = entry_of(vec![probe(0x6a00_0000_1000, 1, 3), callee(8)], 0);
-    let second = entry_of(vec![callee(1 << 20), probe(0x6a00_0000_9000, 0, 8)], 1);
+    let first = entry_of(vec![probe(0x6a00_0000_1000, 1, 3), callee(8)], 0, false);
+    let second = entry_of(
+        vec![callee(1 << 20), probe(0x6a00_0000_9000, 0, 8)],
+        1,
+        false,
+    );
+    let reused = entry_of(vec![probe(0x6a00_0000_1000, 1, 3), callee(8)], 0, true);
+    assert_eq!(
+        first.encode().unwrap(),
+        reused.encode().unwrap(),
+        "compilation scratch must not carry instructions or relocations between definitions"
+    );
 
     assert!(
         first.symbol(JitSymbolRole::FastBody).is_some(),

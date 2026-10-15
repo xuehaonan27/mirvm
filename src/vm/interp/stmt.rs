@@ -9,7 +9,22 @@ use crate::vm::semantics::memory::mem_write;
 use crate::vm::semantics::simd;
 use crate::vm::semantics::volatile::{mem_read_volatile, mem_write_volatile};
 
+/// Keep operand transfers in the block loop without entering the wide/SIMD statement dispatcher.
+#[inline]
 pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
+    if let Stmt::Assign {
+        dst,
+        rv: Rvalue::Use(op),
+    } = stmt
+    {
+        let value = eval_operand(ctx, base, op).0;
+        place_write(ctx, base, dst, value);
+    } else {
+        exec_complex_stmt(ctx, base, stmt);
+    }
+}
+
+fn exec_complex_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
     match stmt {
         Stmt::Assign { dst, rv } => {
             let v = eval_rvalue(ctx, base, rv);
