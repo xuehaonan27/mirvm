@@ -63,6 +63,13 @@ one level further down, to function granularity.
   canonical relocatable encoding (§3.3) whose id is BLAKE3-256 of its bytes. Two units that lower an
   identical body — adjacent versions of one crate, one crate under two feature sets, or two crates
   expanding the same macro — reference one fragment.
+- **The symbol view belongs to the loaded stack.** `ImageStack` owns forward lookups and reverse
+  manifest bindings for its retained prefix. A validated layer extends that view once; readers
+  borrow it for projection and restoration. Lower layers win name and reverse-binding collisions,
+  but reverse bindings also retain upper-layer ids hidden by a forward name collision. Truncating
+  the stack rebuilds both directions from the retained layers. The closure loader's base-only view
+  stays limited to the base. Missing references still reject a manifest, and a loaded unit must
+  project back to its stored records before joining the stack.
 - **Correctness never depends on version similarity.** Sharing is opportunistic byte-identity of
   canonical encodings, decided by hash equality alone. A body that differs in any way (layout change,
   MIR change, different callee arity) hashes differently and is stored separately; there is no

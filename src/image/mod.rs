@@ -105,11 +105,8 @@ impl BaseImage {
 #[cfg(feature = "compiler")]
 pub struct ImageStack {
     images: Vec<BaseImage>,
-    /// Union lookups (sym -> absolute id/address; image id domains are disjoint, so the union is unambiguous)
-    fn_by_sym: std::collections::HashMap<Box<str>, FuncId>,
-    entry_by_sym: std::collections::HashMap<Box<str>, u64>,
-    static_by_sym: std::collections::HashMap<Box<str>, u64>,
-    tls_by_sym: std::collections::HashMap<Box<str>, TlsId>,
+    /// Forward lookup and reverse manifest bindings for exactly the retained layer prefix.
+    symbols: manifest::Symbols,
     /// Delta id offset = the stack's cumulative counts
     total_fns: usize,
     total_tls: usize,
@@ -127,10 +124,7 @@ impl ImageStack {
     pub fn empty() -> Self {
         ImageStack {
             images: Vec::new(),
-            fn_by_sym: Default::default(),
-            entry_by_sym: Default::default(),
-            static_by_sym: Default::default(),
-            tls_by_sym: Default::default(),
+            symbols: manifest::Symbols::default(),
             total_fns: 0,
             total_tls: 0,
             total_asm: 0,
@@ -192,16 +186,19 @@ impl ImageStack {
         self.total_asm
     }
     pub fn fn_by_sym(&self) -> &std::collections::HashMap<Box<str>, FuncId> {
-        &self.fn_by_sym
+        &self.symbols.funcs
     }
     pub fn entry_by_sym(&self) -> &std::collections::HashMap<Box<str>, u64> {
-        &self.entry_by_sym
+        &self.symbols.entries
     }
     pub fn static_by_sym(&self) -> &std::collections::HashMap<Box<str>, u64> {
-        &self.static_by_sym
+        &self.symbols.statics
     }
     pub fn tls_by_sym(&self) -> &std::collections::HashMap<Box<str>, TlsId> {
-        &self.tls_by_sym
+        &self.symbols.tls
+    }
+    pub(crate) fn symbols(&self) -> &manifest::Symbols {
+        &self.symbols
     }
     pub fn key(&self) -> Option<&str> {
         self.key.as_deref()
@@ -265,18 +262,7 @@ impl ImageStack {
     /// layers win a name collision (`or_insert`), which is what makes the union unambiguous: image
     /// id domains are disjoint, so a repeated symbol can only come from a layer that already had it.
     fn fold_image(&mut self, img: &BaseImage) {
-        for (k, v) in &img.fn_by_sym {
-            self.fn_by_sym.entry(k.clone()).or_insert(*v);
-        }
-        for (k, v) in &img.entry_by_sym {
-            self.entry_by_sym.entry(k.clone()).or_insert(*v);
-        }
-        for (k, v) in &img.static_by_sym {
-            self.static_by_sym.entry(k.clone()).or_insert(*v);
-        }
-        for (k, v) in &img.tls_by_sym {
-            self.tls_by_sym.entry(k.clone()).or_insert(*v);
-        }
+        self.symbols.extend(img);
         self.entry_links.extend(img.entry_links());
         self.total_fns += img.module.funcs.len();
         self.total_tls += img.module.tls.len();

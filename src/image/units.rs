@@ -362,8 +362,8 @@ fn load_one(
     );
     // Bindings and the id-bearing tables resolve against the layers below this unit, and the whole
     // module is verified against the stack it is about to join.
-    let symbols = manifest::Symbols::of(stack.layers());
-    if let Err(error) = manifest::rehydrate_module(&mut f.module, &f.funcs, &unit_view, &symbols) {
+    let symbols = stack.symbols();
+    if let Err(error) = manifest::rehydrate_module(&mut f.module, &f.funcs, &unit_view, symbols) {
         reason(&error.to_string());
         return None;
     }
@@ -374,7 +374,7 @@ fn load_one(
     // bindings, and the manifest it produced would be plausible everywhere except at run time.
     {
         for (body, record) in f.module.funcs.iter().zip(&f.funcs) {
-            match manifest::project(body, &unit_view, &symbols) {
+            match manifest::project(body, &unit_view, symbols) {
                 Ok(projected) if projected.record == *record => {}
                 Ok(_) => {
                     reason("a body does not project back to its record");
@@ -387,7 +387,7 @@ fn load_one(
             }
         }
     }
-    let tls_by_sym = match f.tables.restore(&mut f.module, &unit_view, &symbols) {
+    let tls_by_sym = match f.tables.restore(&mut f.module, &unit_view, symbols) {
         Ok((_, tls)) => tls,
         Err(error) => {
             reason(&error.to_string());
@@ -525,10 +525,10 @@ pub(crate) fn store(
     };
     let frozen = (snapshot.home() as u64, snapshot.bytes().len() as u64);
     let unit_view = super::deps::unit_of(&stack.layer_ranges(), below.prefix, &bi.module, frozen);
-    let symbols = manifest::Symbols::of(stack.layers());
+    let symbols = stack.symbols();
     let mut session = crate::store::frags::Session::default();
     let mut chunks = crate::store::frags::Session::default();
-    let records = match manifest::project_module(&mut bi.module, &unit_view, &symbols, &mut session)
+    let records = match manifest::project_module(&mut bi.module, &unit_view, symbols, &mut session)
     {
         Ok(records) => records,
         Err(error) => {
@@ -555,7 +555,7 @@ pub(crate) fn store(
     // The module's id-bearing tables leave it in canonical form before serializing, and come back
     // right after so this session keeps running the layer it wrote.
     let tables =
-        match manifest::Tables::capture(&mut bi.module, &unit_view, &symbols, &bi.tls_by_sym) {
+        match manifest::Tables::capture(&mut bi.module, &unit_view, symbols, &bi.tls_by_sym) {
             Ok(tables) => tables,
             Err(error) => {
                 if crate::options::a2_debug() {
@@ -589,7 +589,7 @@ pub(crate) fn store(
         taken.put_back(&mut bi.module);
     }
     tables
-        .restore(&mut bi.module, &unit_view, &symbols)
+        .restore(&mut bi.module, &unit_view, symbols)
         .expect("captured tables resolve against the unchanged stack");
     let Ok(bytes) = encoded else {
         return super::deps::degraded(bi);

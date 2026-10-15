@@ -283,16 +283,16 @@ pub fn store_and_wrap(
         else {
             return degraded(bi);
         };
-        let symbols = manifest::Symbols::of(stack.layers());
+        let symbols = stack.symbols();
         // The bodies, the id-bearing tables and the frozen region leave the module so the manifest can
         // be serialized without them, and come back right after: this session keeps running the layer
         // it just wrote.
         let mut session = crate::store::frags::Session::default();
         let mut chunks = crate::store::frags::Session::default();
-        let projected = manifest::project_module(&mut bi.module, &unit, &symbols, &mut session)
+        let projected = manifest::project_module(&mut bi.module, &unit, symbols, &mut session)
             .and_then(|records| {
                 let tables =
-                    manifest::Tables::capture(&mut bi.module, &unit, &symbols, &bi.tls_by_sym)?;
+                    manifest::Tables::capture(&mut bi.module, &unit, symbols, &bi.tls_by_sym)?;
                 Ok((records, tables))
             });
         if let Err(error) = &projected
@@ -335,7 +335,7 @@ pub fn store_and_wrap(
             };
             let encoded = manifest::encode(&file);
             tables
-                .restore(&mut bi.module, &unit, &symbols)
+                .restore(&mut bi.module, &unit, symbols)
                 .expect("captured tables resolve against the unchanged stack");
             encoded
         });

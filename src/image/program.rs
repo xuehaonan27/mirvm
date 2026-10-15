@@ -131,10 +131,10 @@ pub fn lookup(
         .as_ref()
         .map(|snapshot| (snapshot.home() as u64, snapshot.bytes().len() as u64))?;
     let unit = crate::image::deps::unit_of(&[], below.prefix, &f.module, frozen);
-    let symbols = manifest::Symbols::of(stack.layers());
+    let symbols = stack.symbols();
     // A missing fragment or an unresolvable symbol is a miss, never a partial module.
-    manifest::rehydrate_module(&mut f.module, &f.funcs, &unit, &symbols).ok()?;
-    f.tables.restore(&mut f.module, &unit, &symbols).ok()?;
+    manifest::rehydrate_module(&mut f.module, &f.funcs, &unit, symbols).ok()?;
+    f.tables.restore(&mut f.module, &unit, symbols).ok()?;
     // Correct shape does not guarantee index and frame range safety, so a bad cache is a miss that
     // the cold path self-heals. Materialized .so files (native archive / global_asm) that were
     // removed are a miss for the same reason.
@@ -224,11 +224,11 @@ pub fn store(
     // The segments mirror the closure layer's exactly, because the delta *is* the closure above the
     // base in this track.
     let unit = crate::image::deps::unit_of(&[], below.prefix, module, frozen);
-    let symbols = manifest::Symbols::of(stack.layers());
+    let symbols = stack.symbols();
     let mut session = crate::store::frags::Session::default();
     let projected =
-        manifest::project_module(module, &unit, &symbols, &mut session).and_then(|records| {
-            let tables = manifest::Tables::capture(module, &unit, &symbols, &HashMap::new())?;
+        manifest::project_module(module, &unit, symbols, &mut session).and_then(|records| {
+            let tables = manifest::Tables::capture(module, &unit, symbols, &HashMap::new())?;
             Ok((records, tables))
         });
     let (records, tables) = projected
@@ -264,7 +264,7 @@ pub fn store(
         taken.put_back(module);
     }
     tables
-        .restore(module, &unit, &symbols)
+        .restore(module, &unit, symbols)
         .expect("captured tables resolve against the unchanged stack");
     let manifest_bytes = encoded
         .map_err(|error| crate::fail!(Image, format!("cannot encode program manifest: {error}")))?;

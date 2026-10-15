@@ -51,9 +51,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   profile-driven:
   - Execution profiles prioritize interpreter statement/block cost and JIT compile throughput.
     On the focused flate2 input, statements and the block loop account for about 28% of user cycles
-    and the compiler worker for 34%. Call-admission batching removes most of its atomic-counter
-    hotspot, but flate's unprofiled comparison still regresses slightly; establish net payback on
-    this workload before claiming a general execution improvement. Measure selective inlining,
+    and the JIT worker for 34% on image hits. Establish net payback on this workload before claiming
+    a general execution improvement. Measure selective inlining,
     PLT dispatch, frame setup and compiled/interpreted transitions on call-heavy workloads. Account for
     code growth as well as latency; preserve pre-frame stack checking, every return safepoint,
     unwind metadata, plain/trace isolation and persisted JIT reload behavior. Use alternating
@@ -63,10 +62,9 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     variable I/O latency on a bound-image miss; bound discovery to requested content without weakening recovery.
   - Frontend/base preparation is owned by D7; it may change the compiler/runtime boundary rather
     than only tuning the current rustc invocation.
-    Program-miss profiles identify repeated symbol-index construction in
-    `image::units::try_load → manifest::Symbols::of`, image folding and absorption. Reuse the
-    immutable input stack's symbol view without weakening external-reference validation; qualify
-    the saving separately from rustc query time and bound-image hits.
+    Program-miss profiles retain image absorption's symbol-map copying/hashing, compiler metadata
+    decoding/allocation and semantic verification. Qualify further savings separately from rustc
+    query time and bound-image hits, preserving external-reference validation.
   - Bound archives still include thousands of std functions that a small request does not execute.
     Investigate a smaller reachable image while preserving indirect-call targets, immutable ownership
     and complete validation. Reusable packages retain the full file allocation alongside decoded
@@ -266,8 +264,9 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     register pressure and code-size costs before product integration. Require whole-program payback
     in addition to reduced compiler spending. Extend remaining aggregate/projection and range/array-subslice coverage
     from corpus evidence; reduce remaining repeated template verification/serialization and archive
-    metadata work according to CPU profiles. Attribute multi-second waits outside the driver phase
-    ledger on plain-file prepared-image hits before selecting a remedy. Require real workload cold/warm measurements,
+    metadata work according to CPU profiles. Attribute intermittent long waits inside the engine
+    and outside the driver ledger on image hits and program misses before selecting a remedy;
+    retain the observed small-input miss regression until its cause is isolated. Require real workload cold/warm measurements,
     unchanged bound-image reuse and specialization payback before default enablement. Preserve
     guest trait/drop/unwind, concurrency, callbacks, fork, signal and trace contracts as admission
     grows. Retain Rust diagnostics, build-script/proc-macro, layout/ABI, std and input invalidation;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare preparation costs with native outputs and fresh-process image hits."""
+"""Compare preparation costs with native outputs and fresh-process image hits or program misses."""
 import argparse
 import hashlib
 import json
@@ -13,10 +13,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "compiled-shared"))
 from harness import Runner
 
 parser = argparse.ArgumentParser(description=__doc__)
-for name in ("baseline", "candidate", "rustc", "previous_results", "corpus_results", "results"):
+paths = ("baseline", "candidate", "rustc", "previous_results", "corpus_results", "results")
+for name in paths:
     parser.add_argument(name, type=Path)
+parser.add_argument("--miss", action="store_true", help="retain installed dependencies but disable program IR caching")
 args = parser.parse_args()
-baseline, candidate, rustc, previous, corpus, root = (p.resolve() for p in vars(args).values())
+baseline, candidate, rustc, previous, corpus, root = (getattr(args, name).resolve() for name in paths)
 root.mkdir(parents=True, exist_ok=False)
 repo = Path(__file__).resolve().parents[2]
 env = {k: v for k, v in os.environ.items() if not k.startswith("MIRVM_")}
@@ -38,6 +40,8 @@ binaries = [("baseline", baseline), ("candidate", candidate)]
 for mode, binary in binaries:
     for n, path in enumerate(dict.fromkeys(path for _, path, _, _ in cases)):
         invoke(f"{mode}-install-{n}", [binary, "install", path])
+if args.miss:
+    env["MIRVM_NO_IR_CACHE"] = "1"
 rows = []
 for case, path, guest, wanted in cases:
     for repeat in range(10):
@@ -48,12 +52,14 @@ for case, path, guest, wanted in cases:
             after = resource.getrusage(resource.RUSAGE_CHILDREN)
             row.update(user_ms=(after.ru_utime - before.ru_utime) * 1000,
                        system_ms=(after.ru_stime - before.ru_stime) * 1000)
-            assert len(row["phases"]) == 1 and "cache-load" in row["phases"][0], row
-            assert "frontend" not in row["phases"][0], row
+            assert len(row["phases"]) == 1, row
+            assert ("frontend" in row["phases"][0]) == args.miss, row
+            assert ("cache-load" in row["phases"][0]) != args.miss, row
             detail = [line for line in log.splitlines() if line.startswith("mirvm-image-load:")]
-            assert len(detail) == 1, log
-            row.update(case=case, mode=mode, repeat=repeat,
-                       image=dict((k, float(v)) for k, v in re.findall(r"([\w-]+)=([\d.]+)ms", detail[0])))
+            assert len(detail) == (0 if args.miss else 1), log
+            row.update(case=case, mode=mode, repeat=repeat)
+            if detail:
+                row["image"] = dict((k, float(v)) for k, v in re.findall(r"([\w-]+)=([\d.]+)ms", detail[0]))
             instance = [line for line in log.splitlines() if line.startswith("mirvm-image-instance:")]
             assert len(instance) <= 1, log
             if instance:
@@ -62,10 +68,14 @@ for case, path, guest, wanted in cases:
             (root / "measurements.json").write_text(json.dumps(rows, indent=2) + "\n")
             print(json.dumps(row), flush=True)
 (root / "protocol.json").write_text(json.dumps(dict(
+    state="program-miss" if args.miss else "image-hit",
     binary_sha256={mode: hashlib.sha256(binary.read_bytes()).hexdigest() for mode, binary in binaries},
+    worker_sha256={mode: hashlib.sha256(binary.with_name("mirvm-compiler").read_bytes()).hexdigest()
+                   for mode, binary in binaries if binary.with_name("mirvm-compiler").is_file()},
     input_sha256={case: hashlib.sha256(path.read_bytes()).hexdigest() for case, path, _, _ in cases},
     scope="Ten alternating rounds over five workloads, two binaries with independent prepared-image "
-          "generations. All samples hit bound images and match native stdout. OS caches and heat orders "
+          "generations. All samples match native stdout and the requested hit/miss state. Program misses "
+          "retain installed std/dependency products. OS caches and heat orders "
           "retained, persistent JIT cache disabled. No overlapping experiment builds, checks or CPU "
           "captures; shared-host load is uncontrolled. "
           "Whole time brackets process creation through exit, including command routing, loading, execution "

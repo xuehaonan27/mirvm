@@ -2,7 +2,7 @@
 
 `compare.py` compares two release binaries using native output agreement and ten alternating rounds
 on five inputs: an empty main, fib(32), many generic instances, serde JSON and flate2 with a 2 KiB
-input. Both binaries must emit the `MIRVM_TIMING` image-load ledger. It uses the managed home and
+input. Both binaries must emit `MIRVM_TIMING`. It uses the managed home and
 native corpus outputs established by the compiled-shared experiment's `run.py` and `controls.py`.
 The shared compiled tier is disabled; generic templates and ordinary concrete JIT remain enabled.
 
@@ -14,7 +14,11 @@ python3 experiments/preparation/compare.py \
 
 Run on a Linux x86_64 host with the pinned toolchain and managed MIR sysroot. Keep source, build,
 temporary and result directories on the intended development filesystem. Installation prepares each
-binary's own image generation. Every timing sample must hit its image and match native stdout.
+binary's own image generation. By default every timing sample must hit its image and emit the
+image-load ledger. Add `--miss` to bypass program IR caching only during measurement while retaining
+installed std and dependency products; every sample must then report a frontend phase instead of a
+cache load. Both paths must match native stdout. A lightweight binary needs its matching
+`mirvm-compiler` sibling for installation and misses.
 OS caches and heat orders are retained and persistent JIT caching is disabled. Child user/system
 CPU time, including waited descendants, is recorded independently of elapsed time. Do not overlap timing
 with builds, tests, lints or CPU captures. All valid outliers remain in `measurements.json`.
@@ -28,7 +32,8 @@ restoration, semantic verification and lazy function-table initialization inside
 `instantiate-verify`. These intervals are already included in the outer time, not additional costs.
 The first stdout byte is recorded separately and is not necessarily a useful completed result:
 flate prints an input description before compression. Profiles are separate diagnostic captures.
-`protocol.json` records executable and input hashes; raw stdout/stderr accompany every measurement.
+`protocol.json` records the hit/miss state, executable/worker and input hashes; raw stdout/stderr
+accompany every measurement.
 
 For CPU attribution, prepare the input with the selected binary, then capture fresh processes:
 

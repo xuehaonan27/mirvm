@@ -128,10 +128,10 @@ pub(crate) struct Symbols {
     entry_names: HashMap<u64, Box<str>>,
     static_names: HashMap<u64, Box<str>>,
     /// Forward: the loaded layers' own tables.
-    funcs: HashMap<Box<str>, FuncId>,
-    tls: HashMap<Box<str>, TlsId>,
-    entries: HashMap<Box<str>, u64>,
-    statics: HashMap<Box<str>, u64>,
+    pub(super) funcs: HashMap<Box<str>, FuncId>,
+    pub(super) tls: HashMap<Box<str>, TlsId>,
+    pub(super) entries: HashMap<Box<str>, u64>,
+    pub(super) statics: HashMap<Box<str>, u64>,
 }
 
 impl Symbols {
@@ -140,30 +140,32 @@ impl Symbols {
     pub(crate) fn of<'a>(layers: impl IntoIterator<Item = &'a crate::image::BaseImage>) -> Symbols {
         let mut symbols = Symbols::default();
         for layer in layers {
-            for (name, &id) in &layer.fn_by_sym {
-                symbols.funcs.entry(name.clone()).or_insert(id);
-                symbols.func_names.entry(id).or_insert_with(|| name.clone());
-            }
-            for (name, &id) in &layer.tls_by_sym {
-                symbols.tls.entry(name.clone()).or_insert(id);
-                symbols.tls_names.entry(id).or_insert_with(|| name.clone());
-            }
-            for (name, &addr) in &layer.entry_by_sym {
-                symbols.entries.entry(name.clone()).or_insert(addr);
-                symbols
-                    .entry_names
-                    .entry(addr)
-                    .or_insert_with(|| name.clone());
-            }
-            for (name, &addr) in &layer.static_by_sym {
-                symbols.statics.entry(name.clone()).or_insert(addr);
-                symbols
-                    .static_names
-                    .entry(addr)
-                    .or_insert_with(|| name.clone());
-            }
+            symbols.extend(layer);
         }
         symbols
+    }
+
+    /// Add a validated layer above the existing prefix, retaining the first definition of every
+    /// name and every reverse binding. Reverse tables include aliases hidden by forward collisions.
+    pub(super) fn extend(&mut self, layer: &crate::image::BaseImage) {
+        for (name, &id) in &layer.fn_by_sym {
+            self.funcs.entry(name.clone()).or_insert(id);
+            self.func_names.entry(id).or_insert_with(|| name.clone());
+        }
+        for (name, &id) in &layer.tls_by_sym {
+            self.tls.entry(name.clone()).or_insert(id);
+            self.tls_names.entry(id).or_insert_with(|| name.clone());
+        }
+        for (name, &addr) in &layer.entry_by_sym {
+            self.entries.entry(name.clone()).or_insert(addr);
+            self.entry_names.entry(addr).or_insert_with(|| name.clone());
+        }
+        for (name, &addr) in &layer.static_by_sym {
+            self.statics.entry(name.clone()).or_insert(addr);
+            self.static_names
+                .entry(addr)
+                .or_insert_with(|| name.clone());
+        }
     }
 
     fn func(&self, name: &str) -> Option<FuncId> {
@@ -1123,6 +1125,117 @@ mod tests {
         symbols.func_names.insert(7, "base::fn".into());
         symbols.funcs.insert("base::fn".into(), 7);
         symbols
+    }
+
+    fn symbol_layer(name: &str, id: u32) -> crate::image::BaseImage {
+        crate::image::BaseImage {
+            module: crate::vm::ir::Module::default(),
+            instance: crate::vm::instance::Instance::default(),
+            fn_by_sym: HashMap::from([(name.into(), id)]),
+            tls_by_sym: HashMap::from([(name.into(), id + 100)]),
+            entry_by_sym: HashMap::from([(name.into(), u64::from(id) + 1000)]),
+            static_by_sym: HashMap::from([(name.into(), u64::from(id) + 2000)]),
+            lowering_fp: (false, false, false),
+            key: name.into(),
+            unit: None,
+        }
+    }
+
+    #[test]
+    fn stack_symbols_preserve_collisions_and_remove_truncated_reverse_bindings() {
+        let mut stack = crate::image::ImageStack::from_images(vec![symbol_layer("shared", 7)]);
+        stack.push(symbol_layer("shared", 17));
+        stack.push(symbol_layer("upper", 18));
+        let symbols = stack.symbols();
+        assert_eq!(stack.fn_by_sym()["shared"], 7);
+        assert_eq!(stack.tls_by_sym()["shared"], 107);
+        assert_eq!(stack.entry_by_sym()["shared"], 1007);
+        assert_eq!(stack.static_by_sym()["shared"], 2007);
+        // A forward collision must not discard the upper layer's reverse binding.
+        for id in [7, 17] {
+            assert_eq!(symbols.func_names[&id].as_ref(), "shared");
+            assert_eq!(symbols.tls_names[&(id + 100)].as_ref(), "shared");
+            assert_eq!(
+                symbols.entry_names[&(u64::from(id) + 1000)].as_ref(),
+                "shared"
+            );
+            assert_eq!(
+                symbols.static_names[&(u64::from(id) + 2000)].as_ref(),
+                "shared"
+            );
+        }
+        let tables = Tables {
+            exports: vec![(
+                "caller".into(),
+                Owned::Symbol {
+                    kind: SymbolKind::Func,
+                    name: "upper".into(),
+                },
+            )],
+            ..Default::default()
+        };
+        let mut module = crate::vm::ir::Module::default();
+        tables.restore(&mut module, &unit(), symbols).unwrap();
+        assert_eq!(module.exports["caller"], 18);
+
+        stack.truncate(1);
+        let symbols = stack.symbols();
+        assert_eq!(symbols.func("shared"), Some(7));
+        assert_eq!(symbols.tls("shared"), Some(107));
+        assert_eq!(symbols.address(SymbolKind::Entry, "shared"), Some(1007));
+        assert_eq!(symbols.address(SymbolKind::Static, "shared"), Some(2007));
+        for id in [17, 18] {
+            assert!(symbols.name_of(Target::Func(id)).is_none());
+            assert!(symbols.name_of(Target::Tls(id + 100)).is_none());
+            assert!(
+                symbols
+                    .name_of(Target::Link(LinkAddr(u64::from(id) + 1000)))
+                    .is_none()
+            );
+            assert!(
+                symbols
+                    .name_of(Target::Link(LinkAddr(u64::from(id) + 2000)))
+                    .is_none()
+            );
+        }
+        assert!(symbols.func("upper").is_none());
+        assert!(symbols.tls("upper").is_none());
+        assert!(symbols.address(SymbolKind::Entry, "upper").is_none());
+        assert!(symbols.address(SymbolKind::Static, "upper").is_none());
+        assert!(tables.restore(&mut module, &unit(), symbols).is_err());
+        stack.push(symbol_layer("upper", 28));
+        tables
+            .restore(&mut module, &unit(), stack.symbols())
+            .unwrap();
+        assert_eq!(module.exports["caller"], 28);
+    }
+
+    #[test]
+    fn fingerprint_truncation_excludes_every_symbol_of_the_discarded_suffix() {
+        let mut incompatible = symbol_layer("wrong", 17);
+        incompatible.lowering_fp.0 = true;
+        let mut stack = crate::image::ImageStack::from_images(vec![
+            symbol_layer("base", 7),
+            incompatible,
+            symbol_layer("later", 18),
+        ]);
+        assert_eq!(stack.layers().len(), 1);
+        assert_eq!(stack.key(), Some("base"));
+        assert_eq!(stack.fn_by_sym().len(), 1);
+        assert_eq!(stack.tls_by_sym().len(), 1);
+        assert_eq!(stack.entry_by_sym().len(), 1);
+        assert_eq!(stack.static_by_sym().len(), 1);
+        for id in [17, 18] {
+            assert!(stack.symbols().name_of(Target::Func(id)).is_none());
+        }
+        stack.truncate(0);
+        assert!(stack.is_empty());
+        assert!(stack.key().is_none());
+        assert!(stack.symbols().name_of(Target::Func(7)).is_none());
+        assert!(stack.fn_by_sym().is_empty());
+        assert!(stack.tls_by_sym().is_empty());
+        assert!(stack.entry_by_sym().is_empty());
+        assert!(stack.static_by_sym().is_empty());
     }
 
     fn sig() -> crate::vm::ir::ForeignSig {
