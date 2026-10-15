@@ -27,6 +27,9 @@ pub struct Ctx {
     /// Interpreted-frame recursion depth, kept for diagnostics only: guest stack overflow is
     /// detected from the real `stack_floor` guard below, not from this count.
     pub depth: u32,
+    /// Unreported interpreted calls per function. Only this host thread accesses the bytes;
+    /// admission folds them into the Engine's atomic counters in bounded batches.
+    pub(crate) pending_calls: Box<[u8]>,
     /// Ordinary execution state is delivering mailbox messages; nested safepoints traversed inside
     /// a handler must not recursively drain.
     pub(crate) signal_draining: bool,
@@ -77,6 +80,15 @@ impl Ctx {
             shared: unsafe { &*Arc::as_ptr(shared) },
             region: ByteRegion::new(),
             depth: 0,
+            pending_calls: vec![
+                0;
+                if shared.jit.enabled {
+                    shared.module.funcs.len()
+                } else {
+                    0
+                }
+            ]
+            .into_boxed_slice(),
             signal_draining: false,
             stack_floor: thread_stack_floor(),
             ffi: FfiState::default(),

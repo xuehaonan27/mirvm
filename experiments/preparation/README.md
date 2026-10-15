@@ -30,6 +30,24 @@ The first stdout byte is recorded separately and is not necessarily a useful com
 flate prints an input description before compression. Profiles are separate diagnostic captures.
 `protocol.json` records executable and input hashes; raw stdout/stderr accompany every measurement.
 
+For CPU attribution, prepare the input with the selected binary, then capture fresh processes:
+
+```sh
+python3 experiments/preparation/profile.py /path/to/mirvm /path/to/script.rs \
+    /path/to/native.out /path/to/managed-home /path/to/FlameGraph /path/to/profile-results
+```
+
+Use `--miss` to disable program IR caching while retaining installed std/dependency products;
+`--repeats N` selects the number of processes and repeated `--guest-arg VALUE` passes guest arguments.
+The instrument checks native stdout, the requested hit/miss path and zero lost samples. It stores
+the raw perf capture, driver phase output, symbol report, stacks, an interactive flame graph, and a
+JSON summary of thread and symbol self time. `perf`, a Rust-capable `c++filt`, Perl and the two
+FlameGraph scripts are required; none is downloaded. JIT maps stay in the result's physical temporary
+directory and are resolved only against the sampled PID. Flame widths and summaries are weighted by
+the recorded cycle period. Unknown frames remain visible: symbols cannot reconstruct missing caller
+unwinding. These instrumented runs identify CPU work, not normal elapsed latency or I/O waits; keep
+them separate from the comparison above and builds/checks.
+
 For a local attribution probe, copy the candidate source to a separate checkout without `.git`,
 then select a cached JSON-lines registry index file:
 

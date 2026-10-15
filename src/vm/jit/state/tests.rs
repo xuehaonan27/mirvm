@@ -36,6 +36,111 @@ fn tables_sized_to_fn_count_and_zero_initialized() {
 }
 
 #[test]
+fn call_admission_stops_at_the_threshold_without_wrapping() {
+    for threshold in [1, 1000, u32::MAX] {
+        let mut j = JitState::new(1);
+        j.threshold = threshold;
+        j.work = None;
+        j.counters[0].store(threshold - 1, Ordering::Relaxed);
+        let mut pending = 0;
+        assert!(j.record_call(0, &mut pending));
+        for _ in 0..100 {
+            assert!(!j.record_call(0, &mut pending));
+        }
+        assert_eq!(j.counters[0].load(Ordering::Relaxed), threshold);
+    }
+}
+
+#[test]
+fn concurrent_calls_request_admission_once() {
+    let mut j = JitState::new(1);
+    j.threshold = 1000;
+    j.sync = false;
+    j.work = None;
+    let start = std::sync::Barrier::new(4);
+    let requests = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                let mut pending = 0;
+                start.wait();
+                for _ in 0..1000 {
+                    if j.record_call(0, &mut pending) {
+                        requests.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+    assert_eq!(requests.load(Ordering::Relaxed), 1);
+    assert_eq!(j.counters[0].load(Ordering::Relaxed), j.threshold);
+}
+
+#[test]
+fn work_admission_keeps_sparse_retries_but_reporting_alone_does_not() {
+    for enforce in [false, true] {
+        let mut j = JitState::new(1);
+        j.threshold = 3;
+        j.work = Some(super::WorkLedger::new(1, enforce, true));
+        let mut pending = 0;
+        let requests = (1..=128)
+            .filter(|_| j.record_call(0, &mut pending))
+            .collect::<Vec<_>>();
+        assert_eq!(requests, if enforce { vec![3, 64, 128] } else { vec![3] });
+        assert_eq!(
+            j.counters[0].load(Ordering::Relaxed),
+            if enforce { 128 } else { 3 }
+        );
+    }
+}
+
+#[test]
+fn batched_calls_preserve_single_thread_threshold_and_strict_counts() {
+    for threshold in [1, 3, 64, 65, 1000] {
+        for sync in [false, true] {
+            let mut j = JitState::new(1);
+            j.threshold = threshold;
+            j.sync = sync;
+            j.work = None;
+            let mut pending = 0;
+            for call in 1..=threshold {
+                assert_eq!(j.record_call(0, &mut pending), call == threshold);
+                let reported = j.counters[0].load(Ordering::Relaxed);
+                assert_eq!(reported + u32::from(pending), call);
+                if sync {
+                    assert_eq!(reported, call);
+                } else {
+                    assert!(pending < 64);
+                }
+            }
+            assert_eq!(pending, 0);
+        }
+    }
+}
+
+#[test]
+fn distinct_threads_cannot_admit_before_enough_calls_are_reported() {
+    let mut j = JitState::new(1);
+    j.threshold = 1000;
+    j.sync = false;
+    j.work = None;
+    let mut threads = [0; 4];
+    for call in 1..=1000 {
+        assert!(!j.record_call(0, &mut threads[call % 4]));
+    }
+    assert_eq!(j.counters[0].load(Ordering::Relaxed), 4 * 192);
+    assert_eq!(threads, [58; 4]);
+    let mut admitted = false;
+    for thread in &mut threads {
+        for _ in 0..6 {
+            admitted |= j.record_call(0, thread);
+        }
+    }
+    assert!(admitted);
+    assert_eq!(j.counters[0].load(Ordering::Relaxed), 1000);
+}
+
+#[test]
 fn compiled_entry_publication_registers_all_roles_before_slots_become_visible() {
     let registry = Mutex::new(PerfMapRegistry::default());
     let path = test_map_path("jit-publish");

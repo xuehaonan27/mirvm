@@ -49,9 +49,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   startup case meets its 80 ms ceiling; uncached preparation and the corpus execution gap remain.
   Current measurements belong to [current-status.md](current-status.md). The remaining work is
   profile-driven:
-  - Small-function calls remain the first execution priority. Measure selective inlining, PLT
-    dispatch, frame setup and compiled/interpreted transitions on real call-heavy workloads. The
-    `flate2` profile retains tiny arithmetic/comparison bodies and c2i/dispatch helpers. Account for
+  - Execution profiles prioritize interpreter statement/block cost and JIT compile throughput.
+    On the focused flate2 input, statements and the block loop account for about 28% of user cycles
+    and the compiler worker for 34%. Call-admission batching removes most of its atomic-counter
+    hotspot, but flate's unprofiled comparison still regresses slightly; establish net payback on
+    this workload before claiming a general execution improvement. Measure selective inlining,
+    PLT dispatch, frame setup and compiled/interpreted transitions on call-heavy workloads. Account for
     code growth as well as latency; preserve pre-frame stack checking, every return safepoint,
     unwind metadata, plain/trace isolation and persisted JIT reload behavior. Use alternating
     whole-run and engine measurements, including a non-recursive workload.
@@ -60,6 +63,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     variable I/O latency on a bound-image miss; bound discovery to requested content without weakening recovery.
   - Frontend/base preparation is owned by D7; it may change the compiler/runtime boundary rather
     than only tuning the current rustc invocation.
+    Program-miss profiles identify repeated symbol-index construction in
+    `image::units::try_load → manifest::Symbols::of`, image folding and absorption. Reuse the
+    immutable input stack's symbol view without weakening external-reference validation; qualify
+    the saving separately from rustc query time and bound-image hits.
   - Bound archives still include thousands of std functions that a small request does not execute.
     Investigate a smaller reachable image while preserving indirect-call targets, immutable ownership
     and complete validation. Reusable packages retain the full file allocation alongside decoded

@@ -231,41 +231,64 @@ panic boundary/catcher counts during that walk. One-shot images validate address
 obligations for a later instance; reusable images retain those obligations and recheck each new
 address context. Structural byte checks, input freshness, integrity and semantic rules remain intact.
 
-A validation comparison uses 100 native-matching fresh-process image hits: ten alternating rounds
-on five inputs, both with compiler-independent CLI builds and independent prepared generations.
-OS caches and heat orders remain; persistent JIT caching is disabled. Whole time brackets process
-creation through exit, excluding result-file setup/close/persistence. Experiment builds, checks and
-CPU captures do not overlap timing; shared-host load is uncontrolled. Medians are reference / candidate:
+CPU attribution separates prepared-image hits from program misses that retain installed std and
+dependencies. Twelve fresh-process hits and six misses per workload use `cycles:u` at 1999 Hz,
+DWARF call stacks, native stdout agreement and PID-specific JIT maps. The reference captures contain
+2,457 / 6,137 hit samples and 2,616 / 4,430 miss samples for serde / flate, with no lost samples.
+Percentages below are cycle-period weighted thread shares, not elapsed-time components:
 
-| Workload | Restore + verify + function table | Complete process |
-|---|---:|---:|
-| Minimal output | 3.991 / 3.694 ms | 41.0 / 36.0 ms |
-| fib(32) through main | 3.892 / 3.489 ms | 51.6 / 50.7 ms |
-| Many generic instances | 4.405 / 3.644 ms | 148.8 / 150.9 ms |
-| serde JSON | 5.492 / 5.162 ms | 75.7 / 72.9 ms |
-| flate2, 2 KiB | 5.689 / 5.455 ms | 162.9 / 164.2 ms |
+| Workload/path | Main CLI/compiler thread | rustc threads | Guest thread | JIT worker |
+|---|---:|---:|---:|---:|
+| serde hit | 53.48% | — | 31.06% | 12.51% |
+| flate2 hit | 8.94% | — | 57.21% | 33.74% |
+| serde program miss | 52.07% | 33.99% | 9.71% | 3.86% |
+| flate2 program miss | 22.05% | 15.70% | 39.36% | 22.75% |
 
-The enclosing instance phase has lower medians, but its paired differences favor the candidate in
-only five of ten flate pairs (median paired difference is -0.044 ms). The other four cases favor it
-in 7, 10, 7 and 7 pairs. This is a bounded local reduction, not a uniform end-to-end improvement;
-whole-run changes exceed the local savings and cannot all be attributed to verification. All valid
-outliers remain. Candidate serde medians split into 0.584 ms restoration, 4.044 ms verification and
-0.503 ms function-table initialization. Individual medians need not sum to the enclosing median.
+Minor threads account for the remainder. Miss main-thread shares combine the lightweight CLI and
+its compiler-worker continuation. Hit preparation retains integrity/input hashing and archive
+validation. Miss SipHash samples concentrate in `units::try_load → manifest::Symbols::of`, with
+additional symbol-map work in image folding and absorption. flate's execution cost is predominantly
+interpretation and the concurrent compile worker. These are different optimization targets.
 
-Separate serde CPU captures cover four fresh-process hits per binary, with 798 / 785 samples.
-Semantic verification accounts for 10.90% / 9.49% of recorded user cycles; the reference's sampled
-address-obligation tree work is absent on the candidate's one-shot path. These small instrumented
-captures identify work removed and remaining; they do not establish a precise total CPU reduction.
-Structural archive validation, hashing, operand/frame checks and interpretation remain visible.
+Ordinary interpreted call admission batches thread-owned counts and stops atomic writes at the
+threshold; [the JIT design](designs/jit-code-cache-design.md) owns its trigger and concurrency contract.
+Reference disassembly places about 72–82% of dispatch samples immediately after the atomic increment.
+Separate candidate hit captures contain 2,596 / 6,280 samples, with no lost samples. Dispatch self
+time falls from 6.33% to 1.76% for serde and 9.55% to 3.39% for flate. Statement/block execution and
+frame setup remain visible; on candidate flate, statements and the block loop total 27.62% of cycles,
+and the JIT worker retains 33.90%. Removing the counter hotspot does not remove those costs.
 
-Focused verification passes 13 verifier and 11 archive checks, including invalid references, lazy
-ownership, panic role-count agreement and address rejection/rebinding. Sixteen native-matching guest
-invocations cover return/panic, generics, callbacks/concurrency and separate fork, each through
-interpreter/strict JIT and image hit/compiler miss. Native archive symbol recovery, byte-identical
-assembly content keys, independent package execution and embedded constructor/finalizer/close
-contracts also pass. Compiler, lightweight CLI and pure runtime builds pass Linux warnings-denied
-all-target Clippy; the pure runtime also passes it on macOS. No full runtime suite was run. The
-[preparation harness](../experiments/preparation/README.md) owns reproduction.
+An unprofiled comparison uses 100 native-matching fresh-process image hits: ten alternating rounds
+on five inputs, with compiler-independent CLI builds and independent prepared generations. OS caches
+and heat orders remain; persistent JIT caching is disabled. Whole time brackets process creation
+through exit, excluding result-file setup/close/persistence. Builds, checks and CPU captures do not
+overlap timing; shared-host load is uncontrolled. Medians are reference / candidate:
+
+| Workload | Engine | Complete process | Child CPU |
+|---|---:|---:|---:|
+| Minimal output | 8.70 / 8.80 ms | 34.77 / 35.45 ms | 24.52 / 25.44 ms |
+| fib(32) through main | 22.55 / 22.85 ms | 50.52 / 49.59 ms | 39.23 / 38.97 ms |
+| Many generic instances | 119.70 / 115.75 ms | 149.15 / 148.05 ms | 141.13 / 136.89 ms |
+| serde JSON | 21.70 / 19.45 ms | 70.43 / 66.72 ms | 56.37 / 54.83 ms |
+| flate2, 2 KiB | 110.50 / 115.75 ms | 155.73 / 160.06 ms | 193.49 / 194.84 ms |
+
+Paired engine differences favor the candidate in 5, 4, 8, 7 and 3 of ten pairs respectively. The
+counter work is reduced, but there is no uniform end-to-end win and flate's unprofiled median regresses.
+A separate six-pair `perf stat` diagnostic reports serde cycles 185.05 / 176.56 million and flate cycles
+877.25 / 826.82 million. It enables JIT helper statistics and its hardware counters multiplex at
+roughly 50%; instrumentation, scheduling and
+changing JIT publication work prevent treating that result as a precise speedup or overriding the
+unprofiled regression. All valid samples remain. Follow-up priorities are interpreter statement/block
+cost and compile throughput for execution, and repeated symbol-index construction for program misses.
+
+Focused validation passes 37 admission, thread-context, domain/publication and telemetry checks,
+including threshold saturation, concurrent request uniqueness and work-policy retries. Sixteen
+native-matching guest invocations cover return/panic, generics, callbacks/concurrency and separate
+fork through interpreter/strict JIT and image hit/compiler miss. JIT cache cold publication, warm
+prelink and artifact reload also pass. Full/compiler and lightweight CLI builds pass Linux
+warnings-denied all-target Clippy; the pure runtime passes on macOS. Formatting and repository
+boundary checks pass. No full runtime suite was run. The
+[preparation harness](../experiments/preparation/README.md) owns reproduction and profiling tools.
 
 Registry index lines decode their schema directly into resolver fields. Object-only visitors reject
 positional arrays; unusual shapes use the value parser to retain tolerant field rules and diagnostics.

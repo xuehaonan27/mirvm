@@ -194,8 +194,8 @@ pub struct JitState {
     /// domain has no legal way in, so no trace body is compiled -- a pinned
     /// register is not an optimization a body may run without.
     pub(crate) trace_enter: AtomicU64,
-    /// Call counters (Relaxed; a lost increment under a race is harmless -- it only shifts
-    /// the trigger moment, not program semantics).
+    /// Compilation-admission counters. Ordinary calls stop counting at `threshold`; the
+    /// experimental work policy keeps counting to retry deferred requests at sparse boundaries.
     pub counters: Vec<AtomicU32>,
     /// False under `--jit off` / `MIRVM_JIT=off`: pure interpretation, not even counters
     /// are bumped (the differential-comparison baseline).
@@ -313,6 +313,37 @@ impl JitState {
             || (self.work.as_ref().is_some_and(|work| work.enforce)
                 && count > self.threshold
                 && count.is_multiple_of(self.threshold.max(64)))
+    }
+
+    /// Fold thread-owned calls into admission in batches of at most 64. The last batch shrinks to
+    /// the remaining threshold, so one thread still requests at exactly that call. Concurrent
+    /// threads can each retain up to 63 unreported calls; they may delay admission but cannot request
+    /// early. Strict mode counts every call, as does the work policy's deferred-request schedule.
+    /// Saturation avoids writes after admission and wrapping at a `u32::MAX` threshold.
+    #[inline]
+    pub(crate) fn record_call(&self, func: u32, pending: &mut u8) -> bool {
+        let counter = &self.counters[func as usize];
+        if self.work.as_ref().is_some_and(|work| work.enforce) {
+            let count = counter.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+            return self.call_requests_compile(count);
+        }
+        let mut count = counter.load(Ordering::Relaxed);
+        if count >= self.threshold {
+            return false;
+        }
+        *pending += 1;
+        if !self.sync && u32::from(*pending) < (self.threshold - count).min(64) {
+            return false;
+        }
+        let calls = u32::from(std::mem::take(pending));
+        while count < self.threshold {
+            let next = count.saturating_add(calls).min(self.threshold);
+            match counter.compare_exchange_weak(count, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return next == self.threshold,
+                Err(observed) => count = observed,
+            }
+        }
+        false
     }
 
     /// Ask the compile service for one function, at the tier the heat ledger names. False when no

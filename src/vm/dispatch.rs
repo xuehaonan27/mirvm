@@ -4,8 +4,8 @@
 //! `run_main`/`run_export`, the c2i helper a compiled body uses to call an uncompiled callee, a
 //! native callback re-entering the guest, and the thunk trampolines. A non-zero published slot
 //! means compiled code (the packed i2c entry once published) and is called directly; a zero
-//! slot counts the call and interprets it. The counter uses Relaxed ordering because a lost
-//! count only moves the compilation trigger, while the slot load uses Acquire against the
+//! slot counts calls until compilation admission and interprets them. The admission counter uses
+//! Relaxed ordering because it publishes no code, while the slot load uses Acquire against the
 //! compiler thread's Release.
 //!
 //! A native caller's arguments arrive in the C shape, so they are converted before the same
@@ -26,7 +26,7 @@ use crate::vm::unwind::engine_abort;
 pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let jit = unsafe { &(*ctx).shared.jit };
     if jit.enabled {
-        let call_compiled = |entry: u64| -> (u64, u64) {
+        let call_compiled = move |entry: u64| -> (u64, u64) {
             // i2c: the packed entry (published fast -> packed, and the Acquire load has
             // already seen every preceding write). Where the pair can carry a pinned context across
             // compiled frames, the plain packed entry takes this thread's `Ctx` first and pins it in
@@ -93,21 +93,15 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
             }
         }
 
-        // If function not compiled yet, collect statistics, may send compilation request
-        // and interpret it for now.
-        let prev = jit.counters[func as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Meets compilation threshold and only send compilation request exactly once.
-        // Counter keeps growing later but compilation request would not be send multiple times.
-        //
         // The tier is the heat ledger's answer for this function, not this call's: a function a
         // previous run found hot is built optimized the first time it is asked for, and everything
         // else starts cheap. A body whose work is a loop is not asked for by its call count at all --
         // the interpreter reports its back edges, and enough of them ask for the function the same
         // way.
-        if jit.call_requests_compile(prev + 1)
-            && !jit.request_compile(func)
-            && jit.queue.lock().unwrap().is_some()
-        {
+        let request = jit.record_call(func, unsafe {
+            &mut (&mut (*ctx).pending_calls)[func as usize]
+        });
+        if request && !jit.request_compile(func) && jit.queue.lock().unwrap().is_some() {
             // No service is listening: the worker never started, died, or is a parent's that a fork
             // did not bring across. Staying interpreted is the semantics, but a silent "the JIT is on
             // and nothing is ever compiled" is not diagnosable, so say it once per function. Debug
@@ -121,7 +115,10 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         // the failure sentinel. With threshold = 1 this turns "request compilation on the
         // first call" into "compile and publish synchronously on the first call", so the
         // compile-on-every-call differential proves compiled code really ran.
-        if jit.sync && prev + 1 >= jit.threshold {
+        if jit.sync
+            && jit.counters[func as usize].load(std::sync::atomic::Ordering::Relaxed)
+                >= jit.threshold
+        {
             let mut spins = 0u32;
             loop {
                 entry =

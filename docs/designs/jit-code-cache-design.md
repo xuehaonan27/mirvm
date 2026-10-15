@@ -273,6 +273,14 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    tiny_skia by -22%/-41%/-14% of wall time but cost rayon 8%, because its sort is thousands of
    single-shot small loop bodies, while the iteration rule keeps those three (-22%/-11%/-19%) and
    leaves rayon where it was.
+   Ordinary interpreted calls accumulate in one byte per function in the thread's `Ctx`, then fold
+   into the Engine's atomic admission counter in batches of at most 64. A final batch shrinks to the
+   remaining threshold, preserving the exact single-thread trigger. Concurrent threads can each
+   retain up to 63 unreported calls; partial batches disappear when their context retires, so this
+   heuristic may delay compilation but cannot trigger it early. Admission saturates at the threshold
+   and only the crossing thread sends a request. Synchronous verification counts each call, and the
+   experimental work policy retains its exact sparse retry schedule. These counters neither publish
+   code nor determine the persisted heat order; published entries still require an Acquire load.
    The policy has no within-run upgrade, and measuring says why: a request is raised once while a
    function is interpreted, and publishing the baseline entry — pre-linked or compiled — means its later
    calls go through the PLT slot, where no counter observes them. So the ledger's unit of evidence is one
