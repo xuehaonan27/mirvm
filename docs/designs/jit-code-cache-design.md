@@ -138,6 +138,12 @@ an early failure drops the in-use context. Clearing removes per-definition state
 scratch capacity. Worker shutdown releases that capacity independently of the published code's
 process-long lifetime. Scratch reuse must leave canonical artifact bytes unchanged.
 
+Callee prewarming defines the missing C2I trampolines for one caller as a batch. Relocation,
+executable protection and unwind registration finish for the entire batch before publishing any
+of its callee slots; the caller is published only after prewarming succeeds. A failed batch cannot
+publish a caller that would enter an empty PLT slot. Both compilation and stored-entry loading use
+this ordering, with separate slots for each code domain.
+
 ### 2.6 Adaptive optimization tiers
 
 The optimization level is a jit-key dimension, not a global constant, and the policy is

@@ -105,7 +105,10 @@ impl<'a> Compiler<'a> {
             return;
         }
         let abi = callee_abi(ir::FuncHeader::Owned(body)).expect("admit already checked the shape");
-        self.prewarm_callees(func, body);
+        if !self.prewarm_callees(func, body) {
+            self.strict_fail(func);
+            return;
+        }
 
         // Silent-failure discipline: a compile failure keeps the function interpreted
         // and never writes a panic to stderr, because the differential oracle compares
@@ -218,7 +221,7 @@ impl<'a> Compiler<'a> {
     /// Give every PLT-visible callee of this body a fast slot: an uncompiled one gets a c2i
     /// trampoline (fast shape, so its call sites keep a constant shape). Callees that do not fit the
     /// fast shape are excluded; their call sites go straight to c2i (cold path).
-    fn prewarm_callees(&mut self, func: u32, body: &ir::FuncBody) {
+    fn prewarm_callees(&mut self, func: u32, body: &ir::FuncBody) -> bool {
         let jit = &self.shared.jit;
         let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
         for blk in &body.blocks {
@@ -234,13 +237,30 @@ impl<'a> Compiler<'a> {
                 callees.push((*callee, cabi));
             }
         }
+        let mut pending = Vec::new();
         for (c, cabi) in callees {
-            if jit.slots_for(self.domain).slots_fast[c as usize].load(Ordering::Acquire) == 0
-                && let Some((tramp, ranges)) = self.define_c2i_trampoline(c, cabi)
-            {
-                jit.publish_c2i_entry_for(self.domain, c, tramp as u64, ranges);
+            if jit.slots_for(self.domain).slots_fast[c as usize].load(Ordering::Acquire) == 0 {
+                let Some(symbol) = self.define_c2i_trampoline(c, cabi) else {
+                    return false;
+                };
+                pending.push(symbol);
             }
         }
+        if !pending.is_empty() {
+            // Relocation, executable permissions and unwind registration cover the whole batch
+            // before any callee slot is visible to compiled callers.
+            if self.module.finalize_definitions().is_err() {
+                return false;
+            }
+            self.register_pending_eh_frames();
+            for symbol in pending {
+                let callee = symbol.func;
+                let entry = self.module.get_finalized_function(symbol.id) as u64;
+                let ranges = self.finalized_symbol_ranges(vec![symbol]);
+                jit.publish_c2i_entry_for(self.domain, callee, entry, ranges);
+            }
+        }
+        true
     }
 
     /// Publish this function's code from the store, if the store holds an entry for its fragment under
@@ -283,7 +303,9 @@ impl<'a> Compiler<'a> {
             }
             return false;
         };
-        self.prewarm_callees(func, body);
+        if !self.prewarm_callees(func, body) {
+            return false;
+        }
         let shared = self.shared;
         let roles = [
             JitSymbolRole::FastBody,
@@ -568,13 +590,13 @@ impl<'a> Compiler<'a> {
     }
 
     /// c2i trampoline: fast signature, packs the arguments into a stack array, calls
-    /// `mirvm_c2i` back into the interpreter. Any compile failure returns `None`; the
-    /// caller then skips pre-warming this slot and stays interpreted, silently.
+    /// `mirvm_c2i` back into the interpreter. The definition stays unpublished until its callee
+    /// batch is finalized. A failure prevents publishing callers that would reach an empty slot.
     pub(super) fn define_c2i_trampoline(
         &mut self,
         target: u32,
         abi: CalleeAbi,
-    ) -> Option<(*const u8, Vec<JitSymbolRange>)> {
+    ) -> Option<PendingJitSymbol> {
         let sig = self.fast_sig(abi);
         let id = self
             .module
@@ -639,13 +661,7 @@ impl<'a> Compiler<'a> {
             size,
         };
         self.recycle_context(cctx);
-        if self.module.finalize_definitions().is_err() {
-            return None;
-        }
-        self.register_pending_eh_frames();
-        let entry = self.module.get_finalized_function(id);
-        let ranges = self.finalized_symbol_ranges(vec![symbol]);
-        Some((entry, ranges))
+        Some(symbol)
     }
 
     /// Fast body: bytecode blocks -> CLIF, slots -> SSA variables under the "I64

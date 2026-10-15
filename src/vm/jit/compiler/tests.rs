@@ -448,7 +448,7 @@ fn constant_copies_preserve_overlap_alignment_and_artifact_reloading() {
 
 #[test]
 fn real_compilation_registers_every_executable_role() {
-    let caller = body(
+    let mut caller = body(
         "profile_caller",
         Terminator::Call {
             callee: 1,
@@ -459,9 +459,24 @@ fn real_compilation_registers_every_executable_role() {
             role: ir::CallRole::Normal,
         },
     );
+    caller.blocks.insert(
+        1,
+        ir::Block {
+            stmts: Vec::new(),
+            term: Terminator::Call {
+                callee: 2,
+                args: Vec::new(),
+                ret: RetDest::Ignore,
+                target: 2,
+                unwind: UnwindAction::Continue,
+                role: ir::CallRole::Normal,
+            },
+        },
+    );
     let callee = body("profile_callee", Terminator::Return);
+    let second_callee = body("profile_second_callee", Terminator::Return);
     let shared = Shared::new(ir::Module {
-        funcs: vec![caller, callee].into(),
+        funcs: vec![caller, callee, second_callee].into(),
         ..ir::Module::default()
     });
     let mut compiler = test_compiler(&shared, CodeDomain::Plain);
@@ -477,7 +492,7 @@ fn real_compilation_registers_every_executable_role() {
             .any(|range| { range.start == published && range.role == JitSymbolRole::FastBody }),
         "compiled callers must enter the body after checking headroom themselves"
     );
-    assert_eq!(ranges.len(), 4);
+    assert_eq!(ranges.len(), 5);
     assert!(ranges.iter().any(|range| {
         range.func_id == 0 && range.role == JitSymbolRole::FastBody && range.size != 0
     }));
@@ -487,9 +502,16 @@ fn real_compilation_registers_every_executable_role() {
     assert!(ranges.iter().any(|range| {
         range.func_id == 0 && range.role == JitSymbolRole::Packed && range.size != 0
     }));
-    assert!(ranges.iter().any(|range| {
-        range.func_id == 1 && range.role == JitSymbolRole::C2i && range.size != 0
-    }));
+    for callee in [1, 2] {
+        let entry = shared.jit.slots_fast[callee].load(Ordering::Acquire);
+        assert_ne!(entry, 0);
+        assert!(ranges.iter().any(|range| {
+            range.func_id == callee as u32
+                && range.role == JitSymbolRole::C2i
+                && range.start == entry
+                && range.size != 0
+        }));
+    }
     assert_eq!(
         ranges
             .iter()

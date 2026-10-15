@@ -411,6 +411,79 @@ mod tests {
     }
 
     #[test]
+    fn scalar_operands_preserve_width_through_direct_and_projected_reads() {
+        let engine = Engine::new(Shared::new(Module::default()));
+        let lease = engine.execution_lease().unwrap();
+        let activation = crate::vm::ctx::activate(lease.shared());
+        let ctx = activation.ctx();
+        let base = super::region_reserve(ctx, 32, 8);
+        let bits = 0xfedc_ba98_7654_3210;
+        super::slot_write(
+            ctx,
+            base,
+            Slot {
+                off: 1,
+                width: Width::W64,
+            },
+            bits,
+        );
+        super::slot_write(
+            ctx,
+            base,
+            Slot {
+                off: 16,
+                width: Width::W64,
+            },
+            base as u64 + 1,
+        );
+        for width in [Width::W8, Width::W16, Width::W32, Width::W64] {
+            let expected = (bits & width.mask(), width);
+            assert_eq!(
+                super::eval_operand(ctx, base, &Operand::Slot(Slot { off: 1, width })),
+                expected
+            );
+            assert_eq!(
+                super::eval_operand(ctx, base, &Operand::Imm { bits, width }),
+                (bits, width)
+            );
+            for (off, steps) in [
+                (1, vec![]),
+                (16, vec![PlaceStep::Deref]),
+                (
+                    16,
+                    vec![
+                        PlaceStep::Deref,
+                        PlaceStep::Offset(1),
+                        PlaceStep::Offset(-1),
+                    ],
+                ),
+            ] {
+                let expr = PlaceExpr {
+                    base: PlaceBase::Local(off),
+                    steps: steps.into(),
+                };
+                assert_eq!(super::eval_place_addr(ctx, base, &expr), base as u64 + 1);
+                assert_eq!(
+                    super::eval_operand(ctx, base, &Operand::Mem { expr, width }),
+                    expected
+                );
+            }
+            let sub = Operand::SubImm {
+                base: Box::new(Operand::SubImm {
+                    base: Box::new(Operand::Imm { bits: 0, width }),
+                    sub: 1,
+                }),
+                sub: 1,
+            };
+            assert_eq!(
+                super::eval_operand(ctx, base, &sub),
+                (width.mask() - 1, width)
+            );
+        }
+        super::region_restore(ctx, base);
+    }
+
+    #[test]
     fn dyn_tail_alignment_preserves_prefixes_larger_than_four_gibibytes() {
         let vtable = [0u64, 0, 32];
         let unaligned = u32::MAX as u64 + 18;

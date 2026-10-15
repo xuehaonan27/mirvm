@@ -42,6 +42,17 @@ pub(crate) fn slot_write(ctx: *mut Ctx, base: usize, s: Slot, v: u64) {
 /// base is already a true address, so all arithmetic is on raw addresses).
 #[inline]
 pub(crate) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
+    if let PlaceBase::Local(off) = expr.base {
+        match expr.steps.as_ref() {
+            [] => return base as u64 + off as u64,
+            [PlaceStep::Deref] => return mem_read(base as u64 + off as u64, Width::W64),
+            _ => {}
+        }
+    }
+    eval_projected_place(ctx, base, expr)
+}
+
+fn eval_projected_place(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
     let mut addr = match expr.base {
         PlaceBase::Local(off) => base as u64 + off as u64,
         PlaceBase::Static(a) => unsafe { &(*ctx).shared.instance }.resolve_link_addr(a),
@@ -83,6 +94,15 @@ pub(crate) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u
 
 #[inline]
 pub(crate) fn eval_operand(ctx: *mut Ctx, base: usize, op: &Operand) -> (u64, Width) {
+    // Keep direct scalar reads inline without the recursive address/subtraction dispatcher.
+    match op {
+        Operand::Slot(s) => (slot_read(ctx, base, *s), s.width),
+        Operand::Imm { bits, width } => (*bits, *width),
+        _ => eval_indirect_operand(ctx, base, op),
+    }
+}
+
+fn eval_indirect_operand(ctx: *mut Ctx, base: usize, op: &Operand) -> (u64, Width) {
     match op {
         Operand::Slot(s) => (slot_read(ctx, base, *s), s.width),
         Operand::Mem { expr, width } => {
