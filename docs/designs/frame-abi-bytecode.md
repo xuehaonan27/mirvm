@@ -261,7 +261,7 @@ frames, so hot recursion goes deeper once compiled. `interp_frame` may check the
 stack at entry through a guard page or stack-pointer threshold and raise a guest stack overflow at
 the boundary rather than faulting. Compiled calls check the callee's frame bytes, alignment slack and
 safety margin at the call site, before its prologue, then call its body through the compiled slot.
-Packed boundary entries check through a separate guarded wrapper. Both paths share the check; the
+Packed boundary entries check before calling the body. Both paths share the check; the
 call site rebinds callee headroom when loading a persisted entry, and every guest return keeps its
 signal safepoint.
 

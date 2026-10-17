@@ -57,6 +57,8 @@ struct Compiler<'a> {
     /// lands back in the interpreter. `ctx` restoration is the boundary TLS attach,
     /// shared with the thunk factory and idempotent.
     c2i: ClifFuncId,
+    /// Defined trampolines that no successful caller has published yet.
+    pending_callees: std::collections::HashMap<u32, PendingJitSymbol>,
     call_main_catch: ClifFuncId,
     unreachable: ClifFuncId,
     /// Host memmove/memset channel used by Copy and frame zeroing.

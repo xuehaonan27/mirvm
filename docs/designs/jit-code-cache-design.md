@@ -56,9 +56,9 @@ Four existing properties make the artifact model natural rather than invasive:
   indirection with an atomic Release/Acquire publication protocol (`src/vm/jit/state`), so machine
   code never bakes a callee's code address, and a loaded entry plugs into dispatch exactly like a
   freshly compiled one. Compiled callers check callee headroom before entering the published body;
-  the packed boundary still calls a guarded wrapper. A callee's frame requirement is rebound through
-  its canonical function reference, so sharing a caller fragment cannot reuse another program's
-  callee layout.
+  the packed boundary performs its own check before calling the body. A callee's frame requirement
+  is rebound through its canonical function reference, so sharing a caller fragment cannot reuse
+  another program's callee layout.
 - **The input is the frozen bytecode.** The translator consumes `ir::FuncBody` with no `tcx`, under
   a bit-identical-to-interpreter contract, so the semantic key of a compile really is the body — and
   the canonical fragment is that body with context factored out.
@@ -121,6 +121,8 @@ publish), in a `cache/jit/` family. One entry: header (jit-key material for exac
 machine-code bytes, relocation table, unwind material — the Cranelift `UnwindInfo` CFA program plus
 the LSDA body with its code-relative landing-pad map; CIE and FDE are synthesized at load, so no
 absolute survives in the stored form. Entry integrity is BLAKE3-verified on read, like every blob.
+Encoding version 3 stores fast-body and packed symbols; the packed symbol includes the boundary
+stack check. Previous encodings are refused and recompiled.
 
 ### 2.5 Load-time linking and publication
 
@@ -138,11 +140,16 @@ an early failure drops the in-use context. Clearing removes per-definition state
 scratch capacity. Worker shutdown releases that capacity independently of the published code's
 process-long lifetime. Scratch reuse must leave canonical artifact bytes unchanged.
 
-Callee prewarming defines the missing C2I trampolines for one caller as a batch. Relocation,
-executable protection and unwind registration finish for the entire batch before publishing any
-of its callee slots; the caller is published only after prewarming succeeds. A failed batch cannot
-publish a caller that would enter an empty PLT slot. Both compilation and stored-entry loading use
-this ordering, with separate slots for each code domain.
+A fresh compile defines the body, packed entry and missing C2I trampolines in one finalization
+batch. Relocation, executable protection and unwind registration finish before publishing any
+callee slots, followed by the caller's fast and packed slots. A stored entry links and validates its
+frames before preparing missing C2I definitions; those definitions are finalized and registered
+before publication. Both paths keep separate slots for each code domain.
+
+A failed request publishes neither its caller nor its newly prepared callee slots. Unpublished C2I
+definitions remain available to later callers, even if an intervening request finalizes them;
+only a successful caller publishes the trampolines it needs. Captured caller artifacts are cleared
+before the next compile so a failed request cannot contaminate a stored entry.
 
 ### 2.6 Adaptive optimization tiers
 

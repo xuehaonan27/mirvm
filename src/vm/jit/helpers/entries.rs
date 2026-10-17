@@ -24,7 +24,7 @@ pub(crate) extern "C" fn mirvm_exception_is_engine_fault(exception: u64) -> u64 
 }
 
 /// The stack a compiled entry must leave: the guest frame the bytecode asks for plus room for
-/// backend spills and the diagnostic path itself. The inline check in a plain guarded entry compares
+/// backend spills and the diagnostic path itself. The inline check in a plain packed entry compares
 /// against the same margin.
 pub(crate) const STACK_GUARD_MARGIN: usize = 256 << 10;
 

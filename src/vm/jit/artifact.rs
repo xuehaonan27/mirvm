@@ -25,7 +25,7 @@ use super::state::{CodeDomain, JitSymbolRole};
 use super::{Body, SigPart};
 
 /// Encoding version, part of what an entry's bytes mean.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 /// How one relocation's value lands in the code. Mirrors the backend kinds this engine replays.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -426,7 +426,7 @@ impl Drop for Linked {
 ///
 /// `resolve` answers what a named symbol or a site is *now*: the import whitelist for a helper, the
 /// live dispatch state for a site. A name that matches one of the linked symbols resolves inside the
-/// entry, which is how the guarded wrapper finds the body it was built around. Every relocation must
+/// entry, which is how the packed wrapper finds the body it was built around. Every relocation must
 /// resolve — an entry that cannot be linked whole is a miss, because a partially patched code region
 /// would run with wrong values.
 pub(crate) fn link(

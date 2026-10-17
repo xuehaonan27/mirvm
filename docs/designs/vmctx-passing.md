@@ -52,7 +52,7 @@
    frames (the Mach-O half of the loader is still open), the packed entry keeps its plain
    `(args, ret)` shape and stack checks ask `mirvm_jit_stack_guard`, which reads the same floor
    through TLS. Compiled calls perform the check at the call site before entering the callee's frame;
-   the packed boundary performs it in the guarded wrapper. The check and margin are shared.
+   the packed boundary performs it before calling the body. The check and margin are shared.
 
 ## 2. Model
 

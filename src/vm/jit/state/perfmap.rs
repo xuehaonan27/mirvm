@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JitSymbolRole {
     FastBody,
-    Guarded,
     Packed,
     C2i,
 }
@@ -22,7 +21,6 @@ impl JitSymbolRole {
     fn as_str(self) -> &'static str {
         match self {
             Self::FastBody => "fast-body",
-            Self::Guarded => "guarded",
             Self::Packed => "packed",
             Self::C2i => "c2i",
         }

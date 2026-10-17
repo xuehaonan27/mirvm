@@ -51,14 +51,13 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   profile-driven:
   - Execution profiles prioritize interpreter statement/block cost and JIT compile throughput.
     On the focused flate2 input, statements, the block loop and residual operand/address evaluation
-    account for about 31% of user cycles, and the JIT worker for 36% on image hits. Price further
-    dispatch savings against instruction growth: direct operand paths increase measured interpreter
-    text by about 12.6 KiB. Keep the fib engine/process regression visible, including the input-load
-    variance, and qualify gains beyond flate2 and many-instance inputs. JIT role/pass measurements
-    identify register allocation, verification and wrapper construction; reducing mapping/protection
-    calls alone produces only modest compilation savings. Evaluate sharing compatible wrapper work
-    and fewer finalization boundaries while preserving validation, unwind-before-publication and
-    failed-batch isolation. Measure selective inlining,
+    account for about 33% of user cycles, and the JIT worker for 35% on image hits. Price further
+    dispatch savings against instruction growth: measured interpreter text is 64,593 bytes. Keep
+    small-input engine/process variance visible and qualify gains beyond flate2. Serde's latest
+    engine median regresses even though its whole-process median improves; the interval outside
+    the driver ledger needs attribution. Evaluate reuse of compatible C2I code generation by ABI
+    shape, preserving per-callee identity and unwind records; register allocation and verification
+    remain costs to avoid repeating, not checks to disable. Measure selective inlining,
     PLT dispatch, frame setup and compiled/interpreted transitions on call-heavy workloads. Account for
     code growth as well as latency; preserve pre-frame stack checking, every return safepoint,
     unwind metadata, plain/trace isolation and persisted JIT reload behavior. Use alternating

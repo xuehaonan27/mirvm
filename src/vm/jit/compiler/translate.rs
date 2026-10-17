@@ -1,4 +1,4 @@
-//! One body at a time: the entry signatures, the fast/guarded/packed definitions, the c2i
+//! One body at a time: the entry signatures, the fast/packed definitions, the c2i
 //! trampoline a not-yet-compiled callee lands in, and the shape checks admission already made
 //! again at the boundary.
 
@@ -105,10 +105,7 @@ impl<'a> Compiler<'a> {
             return;
         }
         let abi = callee_abi(ir::FuncHeader::Owned(body)).expect("admit already checked the shape");
-        if !self.prewarm_callees(func, body) {
-            self.strict_fail(func);
-            return;
-        }
+        self.artifacts.clear();
 
         // Silent-failure discipline: a compile failure keeps the function interpreted
         // and never writes a panic to stderr, because the differential oracle compares
@@ -124,24 +121,21 @@ impl<'a> Compiler<'a> {
         if self.fail_after_symbol == Some(JitSymbolRole::FastBody) {
             return;
         }
-        let Some((guarded_id, guarded_symbol)) = self.define_guarded_fast(func, body, abi, fast_id)
-        else {
-            self.strict_fail(func);
-            return;
-        };
-        symbols.push(guarded_symbol);
-        #[cfg(test)]
-        if self.fail_after_symbol == Some(JitSymbolRole::Guarded) {
-            return;
-        }
-        let Some((packed_id, packed_symbol)) = self.define_packed(func, body, abi, guarded_id)
-        else {
+        let Some((packed_id, packed_symbol)) = self.define_packed(func, body, abi, fast_id) else {
             self.strict_fail(func);
             return;
         };
         symbols.push(packed_symbol);
         #[cfg(test)]
         if self.fail_after_symbol == Some(JitSymbolRole::Packed) {
+            return;
+        }
+        let Some(callees) = self.prepare_callees(func, body) else {
+            self.strict_fail(func);
+            return;
+        };
+        #[cfg(test)]
+        if self.fail_after_symbol == Some(JitSymbolRole::C2i) {
             return;
         }
         if self.module.finalize_definitions().is_err() {
@@ -153,6 +147,7 @@ impl<'a> Compiler<'a> {
         reloc::forget(&self.values, func, self.sites.len());
         self.sites.clear();
         self.register_pending_eh_frames();
+        self.publish_callees(callees);
         let mut ranges = self.finalized_symbol_ranges(symbols);
 
         let mut fast = self.module.get_finalized_function(fast_id) as u64;
@@ -218,10 +213,9 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// Give every PLT-visible callee of this body a fast slot: an uncompiled one gets a c2i
-    /// trampoline (fast shape, so its call sites keep a constant shape). Callees that do not fit the
-    /// fast shape are excluded; their call sites go straight to c2i (cold path).
-    fn prewarm_callees(&mut self, func: u32, body: &ir::FuncBody) -> bool {
+    /// Define missing PLT entries without making them callable. Keep unpublished definitions so
+    /// another caller can reuse them if this request fails before publication.
+    fn prepare_callees(&mut self, func: u32, body: &ir::FuncBody) -> Option<Vec<u32>> {
         let jit = &self.shared.jit;
         let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
         for blk in &body.blocks {
@@ -240,27 +234,26 @@ impl<'a> Compiler<'a> {
         let mut pending = Vec::new();
         for (c, cabi) in callees {
             if jit.slots_for(self.domain).slots_fast[c as usize].load(Ordering::Acquire) == 0 {
-                let Some(symbol) = self.define_c2i_trampoline(c, cabi) else {
-                    return false;
-                };
-                pending.push(symbol);
+                if !self.pending_callees.contains_key(&c) {
+                    let symbol = self.define_c2i_trampoline(c, cabi)?;
+                    self.pending_callees.insert(c, symbol);
+                }
+                pending.push(c);
             }
         }
-        if !pending.is_empty() {
-            // Relocation, executable permissions and unwind registration cover the whole batch
-            // before any callee slot is visible to compiled callers.
-            if self.module.finalize_definitions().is_err() {
-                return false;
-            }
-            self.register_pending_eh_frames();
-            for symbol in pending {
-                let callee = symbol.func;
-                let entry = self.module.get_finalized_function(symbol.id) as u64;
-                let ranges = self.finalized_symbol_ranges(vec![symbol]);
-                jit.publish_c2i_entry_for(self.domain, callee, entry, ranges);
-            }
+        Some(pending)
+    }
+
+    /// All definitions and their unwind records must be finalized before any slot is visible.
+    fn publish_callees(&mut self, callees: Vec<u32>) {
+        for callee in callees {
+            let symbol = self.pending_callees.remove(&callee).unwrap();
+            let entry = self.module.get_finalized_function(symbol.id) as u64;
+            let ranges = self.finalized_symbol_ranges(vec![symbol]);
+            self.shared
+                .jit
+                .publish_c2i_entry_for(self.domain, callee, entry, ranges);
         }
-        true
     }
 
     /// Publish this function's code from the store, if the store holds an entry for its fragment under
@@ -303,15 +296,8 @@ impl<'a> Compiler<'a> {
             }
             return false;
         };
-        if !self.prewarm_callees(func, body) {
-            return false;
-        }
         let shared = self.shared;
-        let roles = [
-            JitSymbolRole::FastBody,
-            JitSymbolRole::Guarded,
-            JitSymbolRole::Packed,
-        ];
+        let roles = [JitSymbolRole::FastBody, JitSymbolRole::Packed];
         let Ok(linked) = artifact::link(&entry, &roles, |target| match target {
             // One import table, so what a helper name means here is what it meant when the entry was
             // written.
@@ -333,6 +319,16 @@ impl<'a> Compiler<'a> {
             }
             return false;
         };
+        let Some(callees) = self.prepare_callees(func, body) else {
+            return false;
+        };
+        if !callees.is_empty() {
+            if self.module.finalize_definitions().is_err() {
+                return false;
+            }
+            self.register_pending_eh_frames();
+            self.publish_callees(callees);
+        }
         self.register_eh_frames(frames);
         let ranges = linked_ranges(shared, func, &linked);
         let (Some(body_entry), Some(packed)) = (
@@ -464,11 +460,7 @@ impl<'a> Compiler<'a> {
         let ordinals = self.ordinals.as_ref()?;
         let linked = artifact::link(
             &entry,
-            &[
-                JitSymbolRole::FastBody,
-                JitSymbolRole::Guarded,
-                JitSymbolRole::Packed,
-            ],
+            &[JitSymbolRole::FastBody, JitSymbolRole::Packed],
             |target| match target {
                 // Every helper generated code may call is in the one import table, so what a name
                 // means here is what it meant at compile time.
@@ -483,90 +475,6 @@ impl<'a> Compiler<'a> {
             crate::diag_debug!(Jit, "f{func} linked back from its artifact");
         }
         Some(linked)
-    }
-
-    /// Guarded boundary entry, called by the packed wrapper before the body allocates its frame.
-    /// Compiled callers perform the same check at their call site and enter the body directly.
-    pub(super) fn define_guarded_fast(
-        &mut self,
-        func: u32,
-        body: &ir::FuncBody,
-        abi: CalleeAbi,
-        fast: ClifFuncId,
-    ) -> Option<(ClifFuncId, PendingJitSymbol)> {
-        let sig = self.fast_sig(abi);
-        let id = self
-            .module
-            .declare_function(&format!("g{func}"), Linkage::Local, &sig)
-            .ok()?;
-        let mut cctx = self.take_context();
-        cctx.func.signature = sig;
-        {
-            let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
-            let entry = b.create_block();
-            b.append_block_params_for_function_params(entry);
-            b.switch_to_block(entry);
-            let params = b.block_params(entry).to_vec();
-            // The guard's first argument is this function's id, and an id is a program's number: it
-            // goes through the site vocabulary so a stored entry replays it as the entry's own id.
-            let fv = reloc::emit_site(
-                &mut self.module,
-                &self.values,
-                &mut b,
-                func,
-                Site::Func(func),
-                u64::from(func),
-                &mut self.sites,
-            );
-            let need = b.ins().iconst(
-                types::I64,
-                super::super::guard::required_headroom(ir::FuncHeader::Owned(body)) as i64,
-            );
-            super::super::guard::emit(
-                &mut self.module,
-                &mut b,
-                self.domain,
-                fv,
-                need,
-                self.stack_guard,
-                self.stack_overflow,
-            );
-            let target = self.module.declare_func_in_func(fast, b.func);
-            let call = b.ins().call(target, &params);
-            let results = b.inst_results(call).to_vec();
-            b.ins().return_(&results);
-            b.seal_all_blocks();
-            b.finalize();
-        }
-        if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if crate::options::jit_debug() {
-                crate::diag_debug!(Jit, "guarded entry define failed: {e:#?}");
-            }
-            return None;
-        }
-        // The CFA program goes to the batch that registers today's code *and* into the artifact: a
-        // later session registers it again at the address it links the entry to.
-        let unwind = self.registrable_unwind(&cctx)?;
-        self.pending_unwind.push((id, unwind.clone(), None));
-        let size = cctx.compiled_code()?.code_buffer().len() as u64;
-        self.capture_wrapper(
-            func,
-            JitSymbolRole::Guarded,
-            &format!("g{func}"),
-            unwind,
-            None,
-            &cctx,
-        );
-        self.recycle_context(cctx);
-        Some((
-            id,
-            PendingJitSymbol {
-                id,
-                func,
-                role: JitSymbolRole::Guarded,
-                size,
-            },
-        ))
     }
 
     /// Strict verification mode (MIRVM_JIT_SYNC): an admitted function that fails to
@@ -590,7 +498,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// c2i trampoline: fast signature, packs the arguments into a stack array, calls
-    /// `mirvm_c2i` back into the interpreter. The definition stays unpublished until its callee
+    /// `mirvm_c2i` back into the interpreter. The definition stays unpublished until its caller
     /// batch is finalized. A failure prevents publishing callers that would reach an empty slot.
     pub(super) fn define_c2i_trampoline(
         &mut self,
@@ -871,7 +779,6 @@ impl<'a> Compiler<'a> {
         abi: CalleeAbi,
         fast: ClifFuncId,
     ) -> Option<(ClifFuncId, PendingJitSymbol)> {
-        let _ = body;
         let plain = self.plain_pins_ctx();
         let mut sig = self.module.make_signature();
         for _ in 0..if plain { 3 } else { 2 } {
@@ -901,6 +808,30 @@ impl<'a> Compiler<'a> {
             } else {
                 None
             };
+            // The guard's first argument is this function's id, and an id is a program's number: it
+            // goes through the site vocabulary so a stored entry replays it as the entry's own id.
+            let fv = reloc::emit_site(
+                &mut self.module,
+                &self.values,
+                &mut b,
+                func,
+                Site::Func(func),
+                u64::from(func),
+                &mut self.sites,
+            );
+            let need = b.ins().iconst(
+                types::I64,
+                super::super::guard::required_headroom(ir::FuncHeader::Owned(body)) as i64,
+            );
+            super::super::guard::emit(
+                &mut self.module,
+                &mut b,
+                self.domain,
+                fv,
+                need,
+                self.stack_guard,
+                self.stack_overflow,
+            );
             let (argp, retp) = if plain {
                 (ps[1], ps[2])
             } else {

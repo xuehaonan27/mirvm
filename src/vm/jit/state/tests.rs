@@ -150,11 +150,10 @@ fn compiled_entry_publication_registers_all_roles_before_slots_become_visible() 
     j.publish_compiled_entries_with(
         super::CodeDomain::Plain,
         3,
-        0x2000,
+        0x1000,
         0x3000,
         vec![
             range(3, JitSymbolRole::FastBody, 0x1000, 0x31),
-            range(3, JitSymbolRole::Guarded, 0x2000, 0x17),
             range(3, JitSymbolRole::Packed, 0x3000, 0x29),
         ],
         &registry,
@@ -167,18 +166,17 @@ fn compiled_entry_publication_registers_all_roles_before_slots_become_visible() 
         &registry,
     );
 
-    assert_eq!(j.slots_fast[3].load(Ordering::Acquire), 0x2000);
+    assert_eq!(j.slots_fast[3].load(Ordering::Acquire), 0x1000);
     assert_eq!(j.slots[3].load(Ordering::Acquire), 0x3000);
     assert_eq!(j.slots_fast[2].load(Ordering::Acquire), 0x4000);
     let ranges = j.symbol_ranges();
-    assert_eq!(ranges.len(), 4);
+    assert_eq!(ranges.len(), 3);
     assert_eq!(
         with_registry(&registry, |registry| registry.ranges.len()),
-        4
+        3
     );
     for role in [
         JitSymbolRole::FastBody,
-        JitSymbolRole::Guarded,
         JitSymbolRole::Packed,
         JitSymbolRole::C2i,
     ] {
@@ -192,15 +190,14 @@ fn compiled_entry_publication_registers_all_roles_before_slots_become_visible() 
     assert_eq!(std::fs::read(&path).unwrap(), b"");
     let active = with_registry(&registry, |registry| registry.status());
     assert_eq!(active.health, PerfMapHealth::Active);
-    assert_eq!(active.registered_ranges, 4);
+    assert_eq!(active.registered_ranges, 3);
     assert_eq!(active.written_ranges, 0);
 
     let stopped = stop_registry(&registry);
     assert_eq!(stopped.health, PerfMapHealth::Inactive);
-    assert_eq!(stopped.written_ranges, 4);
+    assert_eq!(stopped.written_ranges, 3);
     let map = std::fs::read_to_string(&path).unwrap();
     assert!(map.contains("1000 31 mirvm::engine-17::func-3::fast-body::guest\\nname\n"));
-    assert!(map.contains("2000 17 mirvm::engine-17::func-3::guarded::guest\\nname\n"));
     assert!(map.contains("3000 29 mirvm::engine-17::func-3::packed::guest\\nname\n"));
     assert!(map.contains("4000 1d mirvm::engine-17::func-2::c2i::guest\\nname\n"));
     let _ = std::fs::remove_file(path);

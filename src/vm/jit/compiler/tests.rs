@@ -492,12 +492,9 @@ fn real_compilation_registers_every_executable_role() {
             .any(|range| { range.start == published && range.role == JitSymbolRole::FastBody }),
         "compiled callers must enter the body after checking headroom themselves"
     );
-    assert_eq!(ranges.len(), 5);
+    assert_eq!(ranges.len(), 4);
     assert!(ranges.iter().any(|range| {
         range.func_id == 0 && range.role == JitSymbolRole::FastBody && range.size != 0
-    }));
-    assert!(ranges.iter().any(|range| {
-        range.func_id == 0 && range.role == JitSymbolRole::Guarded && range.size != 0
     }));
     assert!(ranges.iter().any(|range| {
         range.func_id == 0 && range.role == JitSymbolRole::Packed && range.size != 0
@@ -528,44 +525,88 @@ fn real_compilation_registers_every_executable_role() {
 
 #[test]
 fn failed_request_cannot_leak_symbols_into_the_next_compile_batch() {
+    for domain in [CodeDomain::Plain, CodeDomain::Trace] {
+        for role in [
+            JitSymbolRole::FastBody,
+            JitSymbolRole::Packed,
+            JitSymbolRole::C2i,
+        ] {
+            let caller = |name| {
+                body(
+                    name,
+                    Terminator::Call {
+                        callee: 2,
+                        args: Vec::new(),
+                        ret: RetDest::Ignore,
+                        target: 1,
+                        unwind: UnwindAction::Continue,
+                        role: ir::CallRole::Normal,
+                    },
+                )
+            };
+            let shared = Shared::new(ir::Module {
+                funcs: vec![
+                    caller("failed_caller"),
+                    caller("successful_caller"),
+                    body("shared_callee", Terminator::Return),
+                    body("independent_target", Terminator::Return),
+                ]
+                .into(),
+                ..ir::Module::default()
+            });
+            let mut compiler = test_compiler(&shared, domain);
+            compiler.reload = true;
+            compiler.fail_after_symbol = Some(role);
+            compiler.compile(0);
+            let slots = shared.jit.slots_for(domain);
+            assert_eq!(slots.slots[0].load(Ordering::Acquire), 0);
+            assert_eq!(slots.slots_fast[2].load(Ordering::Acquire), 0);
+            assert!(shared.jit.symbol_ranges().is_empty());
+
+            compiler.fail_after_symbol = None;
+            compiler.compile(3);
+            assert_ne!(slots.slots[3].load(Ordering::Acquire), 0);
+            assert_eq!(slots.slots_fast[2].load(Ordering::Acquire), 0);
+            let ranges = shared.jit.symbol_ranges();
+            assert_eq!(ranges.len(), 2);
+            assert!(ranges.iter().all(|range| range.func_id == 3));
+
+            // This caller needs the same trampoline as the failed request. Its definition may
+            // already be finalized, but must remain reusable without publishing the failed body.
+            compiler.compile(1);
+            assert_ne!(slots.slots[1].load(Ordering::Acquire), 0);
+            assert_ne!(slots.slots_fast[2].load(Ordering::Acquire), 0);
+            assert_eq!(slots.slots[0].load(Ordering::Acquire), 0);
+            let ranges = shared.jit.symbol_ranges();
+            assert_eq!(ranges.len(), 5);
+            assert!(ranges.iter().all(|range| range.func_id != 0));
+            assert_eq!(
+                ranges
+                    .iter()
+                    .filter(|range| range.role == JitSymbolRole::C2i)
+                    .count(),
+                1
+            );
+            assert!(compiler.pending_callees.is_empty());
+            assert!(compiler.artifacts.is_empty());
+            std::mem::forget(compiler);
+        }
+    }
+}
+
+#[test]
+fn previous_artifact_encoding_is_refused() {
     let shared = Shared::new(ir::Module {
-        funcs: vec![
-            body("failed_profile_target", Terminator::Return),
-            body("successful_profile_target", Terminator::Return),
-        ]
-        .into(),
-        ..ir::Module::default()
+        funcs: vec![body("encoding_probe", Terminator::Return)].into(),
+        ..Default::default()
     });
     let mut compiler = test_compiler(&shared, CodeDomain::Plain);
-    compiler.fail_after_symbol = Some(JitSymbolRole::FastBody);
-
+    compiler.reload = true;
     compiler.compile(0);
-
-    assert_eq!(shared.jit.slots[0].load(Ordering::Acquire), 0);
-    assert!(shared.jit.symbol_ranges().is_empty());
-
-    compiler.fail_after_symbol = None;
-    compiler.compile(1);
-
-    assert_ne!(shared.jit.slots[1].load(Ordering::Acquire), 0);
-    let ranges = shared.jit.symbol_ranges();
-    assert_eq!(ranges.len(), 3);
-    assert!(ranges.iter().all(|range| range.func_id == 1));
-    assert!(
-        ranges
-            .iter()
-            .any(|range| range.role == JitSymbolRole::FastBody)
-    );
-    assert!(
-        ranges
-            .iter()
-            .any(|range| range.role == JitSymbolRole::Guarded)
-    );
-    assert!(
-        ranges
-            .iter()
-            .any(|range| range.role == JitSymbolRole::Packed)
-    );
+    let mut bytes = compiler.last_entry.as_ref().unwrap().encode().unwrap();
+    assert!(artifact::Entry::decode(&bytes).is_ok());
+    bytes[0] = 2;
+    assert!(artifact::Entry::decode(&bytes).is_err());
     std::mem::forget(compiler);
 }
 
@@ -1057,6 +1098,7 @@ fn compiled_call_checks_the_callees_frame_before_entering_it() {
             ..Default::default()
         };
         module.exports.insert("caller".into(), 0);
+        module.exports.insert("callee".into(), 1);
         let engine = crate::vm::ctx::Engine::new(Shared::new(module));
         let mut compiler = test_compiler(engine.shared(), CodeDomain::Plain);
         compiler.reload = reload;
@@ -1070,13 +1112,15 @@ fn compiled_call_checks_the_callees_frame_before_entering_it() {
         unsafe {
             (*ctx).stack_floor = &marker as *const u8 as usize - STACK_GUARD_MARGIN - (64 << 10);
         }
-        let result = unsafe { crate::vm::interp::run_export(&engine, "caller", &[]) };
+        for entry in ["caller", "callee"] {
+            let result = unsafe { crate::vm::interp::run_export(&engine, entry, &[]) };
+            let error = result.expect_err("callee frame was entered without sufficient headroom");
+            assert!(error.message.contains("guest stack overflow"), "{error:?}");
+            assert!(error.message.contains("large_callee"), "{error:?}");
+        }
         unsafe {
             (*ctx).stack_floor = saved;
         }
-        let error = result.expect_err("callee frame was entered without sufficient headroom");
-        assert!(error.message.contains("guest stack overflow"), "{error:?}");
-        assert!(error.message.contains("large_callee"), "{error:?}");
         drop(activation);
         std::mem::forget(compiler);
     }

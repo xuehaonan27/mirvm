@@ -300,6 +300,7 @@ impl<'a> Compiler<'a> {
             fbc: FunctionBuilderContext::new(),
             context: None,
             c2i,
+            pending_callees: std::collections::HashMap::new(),
             call_main_catch,
             unreachable,
             memmove,

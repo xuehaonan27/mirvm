@@ -231,7 +231,7 @@ pub struct JitState {
     /// Once set during teardown, the worker drops unconsumed compile requests after it
     /// finishes the current function.
     pub stopping: AtomicBool,
-    /// Machine-code ranges of published guest fast bodies. guarded/packed/c2i wrappers are
+    /// Machine-code ranges of published guest fast bodies. packed/c2i wrappers are
     /// not registered, so a backtrace shows exactly one function frame per guest call.
     pub guest_code: RwLock<Vec<JitCodeRange>>,
     /// All Cranelift code ranges of this engine, for profiling and integrity checks.
@@ -461,11 +461,6 @@ impl JitState {
         debug_assert!(
             ranges
                 .iter()
-                .any(|range| range.role == JitSymbolRole::Guarded)
-        );
-        debug_assert!(
-            ranges
-                .iter()
                 .any(|range| range.role == JitSymbolRole::Packed)
         );
         for range in ranges {
@@ -486,7 +481,7 @@ impl JitState {
     }
 
     /// Publish a compiled body into its domain's slots. Compiled callers check headroom before
-    /// entering it; packed callers use their own guarded wrapper. Register ranges with
+    /// entering it; packed entries check before calling the body. Register ranges with
     /// the process registry. This is the production entry point; the `_with`
     /// cores take an injected registry so tests can observe registration.
     pub(crate) fn publish_compiled_entries_for(

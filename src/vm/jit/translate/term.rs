@@ -165,7 +165,7 @@ impl Translator<'_, '_> {
                             let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
                             if let Some(cabi) = plt {
                                 // Compiled slots point to bodies. Check before entering the callee's
-                                // prologue; packed boundary entries carry their own guarded wrapper.
+                                // prologue; packed boundary entries perform their own check.
                                 let fv = self.site(Site::Func(*callee), u64::from(*callee));
                                 let need = self.site(
                                     Site::StackNeed(*callee),
