@@ -215,116 +215,108 @@ isolation, relocation, publication, failure handling and scratch lifetimes. Gues
 optimization levels and admission thresholds are unchanged. C2I templates are not persisted; artifact
 encoding remains 3.
 
-An unprofiled comparison uses 100 native-matching fresh processes: ten alternating rounds on five
-inputs, comparing `418cf8c` with C2I template reuse. Both builds use the compiler-independent CLI
-and independent prepared generations. Bound images, installed std and dependencies, OS caches and
-heat orders remain; persistent JIT caching is disabled. These are fresh processes with prepared
-images, not empty-installation runs. Whole time brackets process creation through exit, excluding
-result-file setup/close/persistence. Builds, checks and CPU captures do not overlap timing;
-shared-host load is uncontrolled. Medians are reference / candidate:
+The performance priority is ordinary prepared execution. The focused measurements below use the
+compiler-independent CLI with its matching worker, offline prepared inputs and generic templates
+enabled; the experimental shared compiled tier is disabled. Ordinary JIT thresholds are retained
+unless stated otherwise. This does not qualify the full default binary/configuration. C2I reuse
+reduces strict threshold-one compilation ledgers by 13.0% on serde and 11.0% on flate, but does not
+establish general ordinary-run payback: flate's process median regresses 3.7% in the alternating
+comparison. Ordinary C2I definition
+cost is only 0.235 ms / 0.856 ms, including template misses, copying and rebinding. These are small
+parts of the end-to-end budget; forced compilation throughput is not an ordinary-run acceptance metric.
 
-| Workload | Engine | Complete process | Child CPU |
-|---|---:|---:|---:|
-| Minimal output | 9.00 / 9.65 ms | 41.73 / 39.60 ms | 28.12 / 26.41 ms |
-| fib(32) through main | 24.95 / 25.30 ms | 57.11 / 54.72 ms | 42.67 / 40.09 ms |
-| Many generic instances | 94.80 / 85.00 ms | 132.95 / 121.50 ms | 106.45 / 107.84 ms |
-| serde JSON | 21.75 / 23.65 ms | 80.63 / 81.39 ms | 62.95 / 61.76 ms |
-| flate2, 2 KiB | 88.35 / 90.40 ms | 142.69 / 148.02 ms | 166.87 / 168.95 ms |
+An instrumented startup decomposition uses ten native-matching fresh processes per input, with
+prepared-image hits and persistent JIT caching disabled. Medians are independent and do not form
+an exactly additive wall-time partition:
 
-This comparison establishes no general improvement under the ordinary asynchronous JIT policy.
-Flate engine and process medians regress 2.3% / 3.7%, improving in only 1/10 and 2/10 pairs.
-Serde engine and process medians regress 8.7% / 0.9%, despite improving in 6/10 and 5/10 pairs.
-Many-instance engine and process medians improve 10.3% / 8.6%, but only 5/10 and 6/10 pairs improve,
-and its child CPU rises 1.3%. Fib's process median improves 4.2% in 6/10 pairs while engine time is
-essentially flat. Small-input variance and the flate regression remain unresolved.
-
-A separate five-pair control disables JIT in both binaries. Serde engine/process medians are
-18.70 / 18.50 ms and 75.02 / 74.47 ms; flate medians are 218.40 / 203.40 ms and
-319.93 / 286.41 ms, with flate improving in 4/5 engine and 5/5 process pairs. The regression is
-not reproduced with JIT disabled, but this control does not isolate publication scheduling from
-code layout or shared-host variance.
-
-Five alternating strict-JIT pairs per corpus input force threshold one and compile equal function
-counts and body-size multisets. They isolate compilation throughput from the ordinary policy;
-their timings are not ordinary-run startup estimates:
-
-| Workload | Compiled functions | Compilation ledger | Complete process | Child CPU |
-|---|---:|---:|---:|---:|
-| serde JSON | 1,689 | 535.49 / 465.70 ms | 632.73 / 588.70 ms | 1,156.64 / 1,014.40 ms |
-| flate2 | 2,128 | 776.27 / 690.52 ms | 889.22 / 826.29 ms | 1,655.79 / 1,479.98 ms |
-
-Compilation falls 13.0% / 11.0% and child CPU 12.3% / 10.6%, with all five pairs improving on both
-measures. Process medians improve 7.0% / 7.1%, in four of five pairs. The first compiled entry has an
-11-byte IR body in every run; compile-to-publication medians are 0.116 / 0.110 ms for serde and
-0.105 / 0.102 ms for flate, excluding queue waiting and earlier startup work. Separate syscall
-captures retain 1,793 / 2,242 mmap calls and roughly unchanged mprotect counts. This change reduces
-backend work, not finalization frequency. Interpreter text remains 64,593 bytes, including an
-11,270-byte block loop.
-
-A diagnostic candidate measures C2I definitions separately. Three strict synchronous runs per input
-create 1,909 serde and 2,380 flate trampolines with only 22–25 and 26–44 backend template compilations
-across the two tiers. Definition-time medians, including template misses, copying and rebinding, are
-3.17 / 4.97 ms. In ten ordinary runs, serde creates only 10 copies from six templates (0.235 ms),
-and flate 117 copies from 17 templates (0.856 ms). The much smaller ordinary-run demand limits the
-available saving. Five alternating diagnostic pairs retain the same 17 / 205 compiled functions
-and 10 / 117 C2I copies in both binaries; no larger compilation set explains the flate regression.
-
-Strict perf-map inventories retain equal body and packed code-size multisets. Each x86_64 C2I copy
-is five bytes larger because its relocatable ID uses a full-width immediate. Total C2I bytes rise
-from 120,672 to 130,217 for serde and 153,528 to 165,428 for flate: 9.3 / 11.6 KiB, or 0.97% / 0.81%
-of all published body/wrapper code. Ordinary-run increases are 50 / 585 bytes. Each copy retains
-its own address and unwind record; template reuse does not share a callable entry between callees.
-
-Separate image-hit CPU captures use twelve fresh processes per binary/workload, `cycles:u` at
-1999 Hz, DWARF stacks and PID-specific JIT maps. Reference / candidate captures contain
-5,270 / 5,571 flate samples and 2,317 / 2,419 serde samples, with no lost samples. Total sampled
-cycles rise 6.0% / 1.0%. Flate's candidate guest/JIT shares are 55.29% / 34.03%; its statement,
-block-loop and operand/address group consumes 35.04% of total cycles. Serde's main-CLI/guest/JIT
-shares are 57.24% / 28.87% / 10.73%. CPU sampling is separate from latency controls; asynchronous
-publication changes how much guest work remains interpreted.
-
-An instrumented candidate attributes startup outside the driver clock. Ten ordinary fresh runs
-per input retain native output and prepared-image hits. Phase medians are independent, so their
-sum need not equal the whole-process median:
-
-| Interval | serde JSON | flate2 |
+| Interval | serde JSON | flate2, 2 KiB |
 |---|---:|---:|
 | Main entry to driver clock | 20.32 ms | 18.01 ms |
-| Registry opening within that interval | 1.35 ms | 2.09 ms |
 | Dependency resolution within that interval | 10.42 ms | 6.06 ms |
-| Lock/links checks and sysroot selection within that interval | 3.65 ms | 4.44 ms |
-| Dependency scheduler within that interval | 1.23 ms | 1.20 ms |
 | Prepared-image loading | 27.01 ms | 29.34 ms |
 | Image loaded to exit request, including engine execution | 23.30 ms | 93.85 ms |
 | Process time outside main-entry-to-atexit markers | 7.19 ms | 7.12 ms |
 
-In the uninstrumented serde CPU capture, dependency resolution accounts for 11.09% of total user
-cycles; index-entry lookup beneath feature unification accounts for 9.08%. A locked run still
-materializes the full crate version history from JSON before selecting its exact version. Parsed
-entries are already shared within the command, so this is first-read decoding, not repeated deep
-cloning of the whole index. Selective materialization under the existing validation and refresh
-rules is the next startup candidate. Independent syscall traces (three per input) place
-execve-to-main at 2.14 / 1.91 ms and exit_group-to-observed-exit at 4.52 / 5.98 ms. These traced
-intervals explain where much of the residual can occur, but cannot replace untraced wall readings.
-The in-process atexit interval itself is about 0.01 / 0.02 ms in ordinary runs.
+Serde pays about 47 ms before engine execution even with preparation complete. Its uninstrumented
+CPU capture attributes 57.24% of user cycles to the main CLI thread, 28.87% to the guest and 10.73%
+to JIT. Dependency resolution accounts for 11.09% of total user cycles; index-entry lookup beneath
+feature unification accounts for 9.08%. A locked run still materializes the full crate version history
+from JSON before selecting its exact version. Parsed entries are already shared within the command.
+Registry opening, lock/links checks and sysroot selection, and dependency scheduling take medians
+of 1.35, 3.65 and 1.23 ms respectively. The main startup opportunity spans the prepared launch path
+and image materialization; an isolated decoder improvement cannot remove that whole cost.
+
+A separate cache matrix uses five rotating rounds per workload, with native stdout agreement and
+fixed per-workload heat snapshots. Prepared IR, installed dependencies and OS caches remain. Cold JIT
+starts with an empty machine-code store; warm JIT uses three ordinary prior runs and retains pack
+file identities so catalogue entries remain valid. Timings exclude result-file setup and cache resets;
+no builds, CPU sampling or correctness suites overlap. Shared-host load is uncontrolled. These are
+fresh processes with prepared inputs, not empty-installation or cold-filesystem measurements:
+
+| JIT configuration | serde process / engine | flate process / engine |
+|---|---:|---:|
+| Persistence disabled | 75.06 / 21.30 ms | 148.14 / 98.00 ms |
+| Persistence enabled, empty JIT store | 83.66 / 30.90 ms | 166.32 / 105.20 ms |
+| Persistence enabled, populated JIT store | 84.37 / 23.90 ms | 161.77 / 108.50 ms |
+| Interpreter only | 79.45 / 19.70 ms | 251.56 / 198.60 ms |
+
+The populated JIT store reduces flate child CPU from 169.20 to 154.39 ms relative to disabled
+persistence, without a process-latency gain. A separate diagnostic ledger links 142 functions in
+40.30 ms and compiles 63 in 18.25 ms, with zero cache refusals. The no-persistence ledger compiles
+205 functions in 47.72 ms. These ledger intervals are instrumented and overlap guest execution;
+they do not partition wall time. A cache hit is not evidence of cheaper execution.
+
+A fresh flate CPU capture contains 5,560 samples over twelve processes with no lost samples. Guest,
+JIT and main-thread shares are 54.44%, 33.76% and 11.66%; the block loop and complex statement
+handler alone consume 28.99% of total user cycles. Sampling uses `cycles:u` at 1999 Hz, DWARF stacks
+and PID-specific JIT maps. It excludes kernel work and I/O/scheduling waits.
+
+A diagnostic interpreter census attributes statements and terminators to guest functions. The first
+ordinary flate run executes 8,554,170 such units; these counts are not CPU time. Four functions own
+49.5% of that interpreted work:
+
+| Function | Interpreted units | Interpreted calls | JIT request |
+|---|---:|---:|---|
+| `deflate::core::compress_normal` | 17.5% | 320 | None |
+| `DictOxide::find_match` | 15.7% | 1,250 | 54.38 ms after probe start |
+| `inflate::core::init_tree` | 8.6% | 22 | None |
+| `deflate::stored::compress_stored` | 7.7% | 6 | None |
+
+Across three runs, observed interpreted work after publication of the same function is at most
+0.00012%. The probe checks publication every 256 blocks, so this is a lower bound, not a complete
+OSR opportunity estimate. Instrumentation changes scheduling. These observations nominate admission
+candidates; they do not establish that compiling them will repay its cost.
+
+Two diagnostic binaries request those four functions on first entry. One waits for publication;
+the other continues interpreting asynchronously. Compilation, selection and waiting costs remain
+inside the engine and process clocks. Ten alternating pairs per flate configuration give baseline /
+probe medians:
+
+| First-entry policy | Persistence | Engine | Complete process | Child CPU |
+|---|---|---:|---:|---:|
+| Wait for publication | Disabled | 100.45 / 102.85 ms | 167.78 / 176.86 ms | 173.02 / 198.70 ms |
+| Wait for publication | Enabled, empty | 123.55 / 124.00 ms | 192.89 / 199.85 ms | 185.34 / 209.28 ms |
+| Continue interpreting | Disabled | 98.70 / 88.00 ms | 169.27 / 154.25 ms | 179.73 / 190.46 ms |
+| Continue interpreting | Enabled, empty | 115.25 / 114.70 ms | 180.82 / 189.55 ms | 195.28 / 186.22 ms |
+
+Waiting fails to improve either configuration and raises CPU 13–15%. Separate CPU captures show
+25.7% fewer guest user cycles but 25.3% more JIT user cycles; waiting also changes the critical path.
+Asynchronous admission improves all ten no-persistence engine pairs and eight process pairs, at
+6.0% more CPU. With persistence enabled, only five of ten engine/process pairs improve. This batch
+also contains large non-CPU stalls and variation on serde, where none of the four functions is
+selected. It establishes no general admission policy or persistence-enabled speedup. The
+workload-specific selectors remain diagnostic artifacts; production policy is unchanged.
 
 Program-miss profiles retain image absorption's symbol-table copying/hashing, compiler metadata
-decoding/allocation and semantic verification. Intermittent non-CPU waits and the small-input
-program-miss regression remain unresolved under D7. Ordinary interpreted call admission uses
-thread-owned count batches; the JIT design owns its trigger and concurrency contract. The telemetry
-stream records guest syscalls and capture lifecycle; CPU samples and diagnostic phase clocks supply
-compiler and pre-driver attribution.
+allocation and semantic verification. Intermittent non-CPU waits remain unresolved under D7.
+The telemetry stream records guest syscalls and capture lifecycle; CPU samples, phase clocks and
+the function census supply compiler and pre-driver attribution. The
+[preparation harness](../experiments/preparation/README.md) owns the reproduction and profiling tools.
 
-Focused validation passes 46 compiler/state/context unit tests, including template copies with
-zero/register/stack parameters, zero/one/two return words, high callee IDs, both tiers/domains and
-execution after template release. Failure isolation, persisted-code reload, packed/call stack checks,
-12 native differential cases, four ABI/call/unwind/overflow gates and 16 entry-boundary invocations
-pass. Independent interpreter and strict trace-JIT captures retain clean parent/fork-child files,
-10 / 4 records, distinct generations and multiple parent producers. Linux full and lightweight CLI
-plus macOS runtime/Cranelift pass warnings-denied all-target Clippy. The template execution test also
-passes on macOS/aarch64. Formatting and 14 repository boundary checks pass. No full runtime suite
-was run. The [preparation harness](../experiments/preparation/README.md) owns reproduction and
-profiling tools.
+C2I correctness coverage includes zero/register/stack parameters, zero/one/two return words, high
+callee IDs, both tiers/domains, execution after template release, failure isolation, persisted reload,
+stack checks, unwind and native differentials. The bottleneck experiments check native stdout on
+every measured run; they do not rerun the full runtime suite or change runtime code.
 
 Registry index lines decode their schema directly into resolver fields. Object-only visitors reject
 positional arrays; unusual shapes use the value parser to retain tolerant field rules and diagnostics.
@@ -898,11 +890,14 @@ product covering all of Rust.
 
 ## 5. Development order
 
-1. **Performance (D16).** Close the `fib(32)` RED by making it faster, never by relaxing the gate.
-   Address pack discovery and input/image validation first for startup; measure interpreted calls,
-   compilation throughput and publication latency separately for execution-heavy workloads. Use
-   unprofiled wall-time controls, the timing ledger, CPU call stacks and syscall counts together.
-   A local small-cache result does not qualify a populated or network-backed store.
+1. **Performance (D16).** Preserve the focused `fib(32)` ceiling and target the ordinary-run
+   bottlenecks in E40. First address prepared launch and image materialization for short programs;
+   then the combined interpretation, JIT compilation and cache-linking cost on execution-heavy
+   workloads. Admission experiments must include their compilation and publication costs. Require
+   alternating unprofiled process/engine controls under default persistence, empty and populated
+   JIT stores, and a non-recursive workload. CPU samples and diagnostic ledgers explain those
+   results; isolated throughput or hit counts do not establish payback. A local small-cache result
+   does not qualify a populated or network-backed store. OSR remains deferred.
 2. **Logging and telemetry.** Fork generations are closed. Next: the remaining direct hot path, the
    trace interpreter loop, then stateless inline-asm raw syscall sites — the first internal syscall
    slice must not be claimed complete before those raw sites land. Only variadic `libc::syscall` forms

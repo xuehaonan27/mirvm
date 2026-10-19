@@ -47,52 +47,48 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 - **E40** `OPEN`: guest execution remains substantially slower than native. The focused `fib32`
   startup case meets its 80 ms ceiling; uncached preparation and the corpus execution gap remain.
-  Current measurements belong to [current-status.md](current-status.md). The remaining work is
-  profile-driven:
-  - Execution profiles prioritize interpreter statement/block cost and JIT compile throughput.
-    On the focused flate2 input, statements, the block loop and residual operand/address evaluation
-    account for about 35% of user cycles, and the JIT worker for 34% on image hits. Price further
-    dispatch savings against instruction growth: measured interpreter text is 64,593 bytes. Keep
-    small-input engine/process variance visible. Faster compilation under the strict policy has not
-    established ordinary-run savings: flate's engine/process medians regress 2.3% / 3.7% with the
-    same compilation set. Attribute the regression and publication timing before changing admission
-    thresholds. Register allocation and verification remain costs to avoid repeating, not checks to
-    disable. Measure selective inlining,
-    PLT dispatch, frame setup and compiled/interpreted transitions on call-heavy workloads. Account for
-    code growth as well as latency; preserve pre-frame stack checking, every return safepoint,
-    unwind metadata, plain/trace isolation and persisted JIT reload behavior. Use alternating
-    whole-run and engine measurements, including a non-recursive workload.
-  - Locked dependency resolution still decodes the full version history of each registry crate.
-    Serde spends a 10.42 ms median in resolution before the driver clock; index-entry lookup beneath
-    feature unification accounts for 9.08% of total user CPU cycles. Evaluate selective materialization
-    of locked versions while preserving index validation, refresh-on-missing behavior, source identity,
-    checksum/yank semantics and the full candidate set for fresh solves. Parsed entries are already
-    shared within a command. Keep pre-driver, image-load and process-entry/exit intervals separate;
-    dependency scheduling itself is only about 1.23 ms in this prepared-image case.
-  - Pack discovery still enumerates each family directory and decodes its catalogue. This work grows
-    with the store even though record reads open only selected packs. Network-backed stores retain
-    variable I/O latency on a bound-image miss; bound discovery to requested content without weakening recovery.
-  - Frontend/base preparation is owned by D7; it may change the compiler/runtime boundary rather
-    than only tuning the current rustc invocation.
+  Current measurements belong to [current-status.md](current-status.md). Priorities follow ordinary
+  end-to-end cost, in this order:
+  - Prepared startup: serde spends about 20 ms before the driver clock and 27 ms loading its image.
+    Evaluate a validated prepared-launch path that reuses the resolved build plan without repeating
+    the resolver/scheduler on unchanged inputs. Define source, manifest, lockfile, configuration,
+    build-script, toolchain and managed-generation invalidation before bypassing that work; retain
+    normal preparation as the miss path. Bound archives retain thousands of unexecuted std functions;
+    evaluate a smaller reachable image while preserving indirect targets, immutable ownership and
+    complete validation. Measure the two costs separately and the complete run together.
+  - Execution payback: flate spends about 54% of user cycles in the guest and 34% in JIT. Expensive
+    functions with few entries can remain interpreted; the loop counter also discards partial
+    256-backedge batches at frame exit. Evaluate own-body work and admission/publication timing,
+    including the cost of observing that work. The four-function first-entry probes do not establish
+    a default-configuration speedup; avoid a blanket threshold reduction or synchronous compilation.
+    Price saved interpretation against compilation, queueing, publication and code growth, retaining
+    pre-frame stack checks, return safepoints, unwind metadata and plain/trace isolation. Register
+    allocation and verification are costs to avoid repeating, not checks to disable. Rayon's delayed
+    publication and compiled/interpreted transitions need the same accounting. OSR remains deferred.
+  - Persistent JIT payback: the populated store reduces flate CPU without improving process latency.
+    Attribute selected-pack reads, relocation/finalization and prelink scheduling before changing
+    cache layout. Establish stable heat/tier selection across repeated runs and count hits, misses
+    and refusals. Preserve file identities when seeding a warm-store experiment; copying packs makes
+    catalogue offsets stale and invalidates the comparison.
+  - Locked resolution still decodes full registry version histories; the measured 10.42 ms resolution
+    interval is part of prepared startup above. Selective materialization remains a bounded fallback
+    if complete plan reuse is inappropriate. Preserve index validation, refresh-on-missing behavior,
+    source identity, checksum/yank semantics and fresh solves' full candidate sets. Parsed entries
+    are already shared within a command.
+  - Pack discovery enumerates family directories and decodes catalogues. Bound discovery to requested
+    content without weakening recovery, including populated and network-backed stores. External
+    inputs still require content validation. Reusable packages retain the full file alongside decoded
+    metadata/native sections, so large native payloads can duplicate resident bytes.
+  - Frontend/base preparation is owned by D7 and may change the compiler/runtime boundary.
     Program-miss profiles retain image absorption's symbol-map copying/hashing, compiler metadata
-    decoding/allocation and semantic verification. Qualify further savings separately from rustc
-    query time and bound-image hits, preserving external-reference validation.
-  - Bound archives still include thousands of std functions that a small request does not execute.
-    Investigate a smaller reachable image while preserving indirect-call targets, immutable ownership
-    and complete validation. Reusable packages retain the full file allocation alongside decoded
-    metadata/native sections; large native payloads can duplicate resident bytes.
-  - Bound execution images avoid stack reconstruction and managed sysroots avoid full payload
-    hashing. Their remaining costs are archive I/O/validation, instance materialization and process
-    setup; external inputs still require full content hashing. Qualify default runtime/compiler
-    routing under D7 separately from archive pruning. The timing ledger includes base
-    preparation inside `frontend` and excludes work before driver entry, so use whole-process wall
-    measurements alongside its phases.
-  - Rayon's hot functions can execute many interpreted calls before the single compiler worker
-    publishes their entries. Compile throughput and time to publication remain open; lowering the
-    call threshold alone does not establish an improvement.
-  - JIT policy measurements must compare warmed, alternating release binaries and check guest
-    output. Compilation changes the retired-instruction count, so that count alone does not prove
-    faster execution. Keep the existing ceilings and distinguish engine time from whole-run time.
+    allocation and semantic verification. Qualify savings separately from rustc query time and
+    bound-image hits, preserving external-reference validation.
+  - Accept changes using alternating release binaries, native output agreement and whole-process,
+    engine and CPU measurements under default JIT persistence as well as disabled persistence.
+    Distinguish fresh-process, empty-JIT, populated-JIT and preparation-miss states. Keep compilation,
+    image loading, pre-driver work and process-entry/exit intervals visible; do not accept forced-JIT
+    throughput, instruction counts or a single phase improvement as end-to-end evidence. Include
+    short non-recursive and execution-heavy controls, and retain the existing ceilings.
 
 ## Approved, awaiting construction
 
