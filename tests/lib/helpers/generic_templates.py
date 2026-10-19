@@ -36,7 +36,7 @@ def home(name):
 
 
 for mode, settings in [
-    ("eager", {"MIRVM_JIT": "off"}),
+    ("eager", {"MIRVM_JIT": "off", "MIRVM_GENERIC_TEMPLATES": "0"}),
     ("templates", {"MIRVM_GENERIC_TEMPLATES": "1", "MIRVM_JIT": "off"}),
     ("jit", {"MIRVM_GENERIC_TEMPLATES": "1", "MIRVM_JIT_SYNC": "1",
              "MIRVM_JIT_THRESHOLD": "1", "MIRVM_NO_JIT_CACHE": "1"}),
@@ -104,7 +104,8 @@ fn main() { if std::hint::black_box(false) { bad::<u64>(); } }
 """)
 native_error = run("invalid-native", [rustc, "--edition=2024", invalid, "-o", native], success=False)
 assert "E0080" in native_error.stderr.decode()
-for mode, flags in [("eager", {}), ("templates", {"MIRVM_GENERIC_TEMPLATES": "1"})]:
+for mode, flags in [("eager", {"MIRVM_GENERIC_TEMPLATES": "0"}),
+                    ("templates", {"MIRVM_GENERIC_TEMPLATES": "1"})]:
     error = run("invalid-" + mode, [mirvm, "run", invalid],
                 dict(flags, MIRVM_HOME=home("invalid-" + mode)),
                 success=False)

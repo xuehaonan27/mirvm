@@ -206,6 +206,9 @@ pub(crate) fn run_driver(
     suppress_runner_warning_summary: bool,
     guest_process: Option<GuestProcessState>,
 ) -> ExitCode {
+    if crate::cli::prepare_only() && crate::options::no_prelower() {
+        return ExitCode::SUCCESS;
+    }
     if let Err(error) = crate::sysroot::pin_args(&rustc_args) {
         crate::diag::emit(&crate::error::Error::from(error));
         return ExitCode::from(crate::diag::exit::FAILURE);

@@ -25,6 +25,12 @@ mode_run() {
     guest=(${EXPANDED[@]+"${EXPANDED[@]}"})
 
     local best=99999999 run ms t0 code out
+    run_case_cmd "$TMP/install" "$MIRVM" install --no-prelower "$DATA_DIR/$input"
+    if [ "$(cat "$TMP/install.code")" -ne 0 ]; then
+        bad "$name (input installation failed)"
+        head -10 "$TMP/install.err"
+        return 1
+    fi
     for ((run = 1; run <= runs; run++)); do
         t0=$(now_ms)
         run_case_cmd "$TMP/run" env -u RUST_BACKTRACE "$MIRVM" run "${pre[@]}" "$DATA_DIR/$input" \

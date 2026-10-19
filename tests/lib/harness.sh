@@ -176,6 +176,21 @@ normalize_stderr() {
     sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$1" >"$2"
 }
 
+# Install source/metadata inputs without warming bytecode caches, then capture the cold run.
+# Preparation failures retain their status and diagnostics for expected-failure cases.
+run_with_installed_inputs() { # <out-prefix> <input> <command...>
+    local prefix=$1 input=$2 suffix
+    shift 2
+    run_case_cmd "$prefix.install" env -u RUST_BACKTRACE "$MIRVM" install --no-prelower "$input"
+    if [ "$(cat "$prefix.install.code")" -eq 0 ]; then
+        run_case_cmd "$prefix" "$@"
+    else
+        for suffix in out err code; do
+            cp "$prefix.install.$suffix" "$prefix.$suffix"
+        done
+    fi
+}
+
 # crash_report <exit-code> <out-prefix>: the context a signal or a timeout leaves behind. Such a run
 # is killed, so its verdict line is the *wrapper's* ("dumped core", or nothing for a timeout), and
 # the last lines of the run's own streams are the only place the reason can be. A mode that reports a

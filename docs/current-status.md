@@ -56,8 +56,12 @@ contracts are its siblings in `docs/designs/`.
   [startup-cache-design.md](designs/startup-cache-design.md) owns these contracts. `MIRVM_TIMING`
   prints a phase ledger. Std products are currently built locally; release delivery remains
   unimplemented. Project `install` and `prepare` publish a complete bound image before succeeding,
-  independently of optional symbolic delta publication. Required image failures fail preparation;
-  ordinary runs retain best-effort caching. The installation boundary is
+  independently of optional symbolic delta publication. They also prepare supported generic and
+  non-generic dependency definitions, including library-only packages without a consumer.
+  `--no-prelower` skips bytecode/image preparation; a later default install fills missing products.
+  Required publication failures fail preparation; ordinary runs retain best-effort caching.
+  `run` uses local dependency inputs and refuses missing downloads. Resolution and scheduling
+  still run before bound-image lookup. The installation boundary is
   specified in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the
   source into a process-owned immutable snapshot and each `unsafe instantiate` builds an independent
@@ -589,14 +593,14 @@ test tier is established by the census.
 
 ### Production shared generic execution
 
-Setting `MIRVM_GENERIC_TEMPLATES=1` enables reusable templates for scalar/pair and
+Reusable templates are enabled by default (`MIRVM_GENERIC_TEMPLATES=0` selects eager lowering) for scalar/pair and
 opaque by-value locals, slice metadata and patterns, sized struct/tuple field projections and
 construction, checked slice/array indexing, pointer/const operations and resolved direct guest calls. Each admitted definition is
 exported once; binding fixes ABI, frame storage, dictionary values and guest-call adapters without
 copying its ordinary instructions. The interpreter executes the shared template directly. The existing
 JIT service requests concrete instructions through a per-Engine publication slot when compiling an
-instance. Unsupported functions retain the original lowerer, and default enablement remains gated
-on whole-program measurements.
+instance. Unsupported functions retain the original lowerer. This default establishes installed
+bytecode reuse; it does not establish whole-program performance gains or enable experimental tiers.
 
 Dependency compiler sessions also export unbound templates before a concrete consumer exists.
 Checksummed per-crate products retain owned instructions, MIR recipe locations and negative export
@@ -605,9 +609,10 @@ restoring compiler recipes and binding current types/callees. A binary-only anal
 HIR hashes keeps local templates in memory. Concurrent writers merge definition sets without
 retaining replaced bodies. `cache purge --units` removes these disposable products.
 
-The preparation contract exports an unused dependency generic on both dependency tracks, then
-changes only the consumer and verifies reuse with a new aggregate containing a by-value array. It also checks
-bound-image hits, tracked-input invalidation and failed required publication. Template unit checks
+The preparation contract installs a library without a consumer on both dependency tracks, then
+verifies reuse with distinct concrete types in different consumers. It checks prepared non-generic
+arithmetic and overflow/unwind behavior, bound-image hits, tracked-input invalidation, prelower
+opt-out and repair, missing dependencies and failed required publication. Template unit checks
 cover exact identity, damaged/truncated archives, recipe bounds, instruction/schema validation,
 stale publishers and failed publication. `MIRVM_TIMING` separates accepted export, rejected probes,
 product loading, restore/verification, concrete binding and publication.
@@ -715,14 +720,13 @@ Flate's diagnostic capture reduces shared transitions from 30 to 14 and worker t
 3.529 ms under the budget, but its complete-time median rises by 19.8 ms. First stdout byte rises
 from 75.9 to 90.3 ms there; synthetic cases print a startup marker before their measured work, so
 that marker is not a completed useful result. The budget reduces compilation spending without an
-established latency win. Default generic enablement and the compiled shared tier remain open.
+established latency win. Default compile-work admission and the compiled shared tier remain open.
 
 The generic contract agrees with native under eager/shared interpretation, synchronous JIT and
 bound-image reload, including concurrent entries, callbacks, unwind and fork. The budget mode also
 matches native for normal and fork invocations. Focused template, cache-publication and compile-work
 unit checks, all-target/all-feature Clippy, formatting and repository boundary checks pass. The
-preparation contract passes 86 assertions across both dependency tracks. No full runtime test tier
-was run for this change; OSR remains deferred.
+preparation contract covers both dependency tracks. OSR remains deferred.
 
 ### Runtime generics prototype
 

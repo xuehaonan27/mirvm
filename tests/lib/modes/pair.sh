@@ -37,7 +37,7 @@ mode_run() {
         disk_guard
         local -a cmd=(env -u RUST_BACKTRACE MIRVM_DEPS=$leg "$MIRVM" run "$DATA_DIR/$input")
         [ ${#args[@]} -gt 0 ] && cmd+=(-- "${args[@]}")
-        run_case_cmd "$TMP/$leg" "${cmd[@]}"
+        MIRVM_DEPS="$leg" run_with_installed_inputs "$TMP/$leg" "$DATA_DIR/$input" "${cmd[@]}"
         if [ "$leg" = self ]; then
             run_case_cmd "$TMP/self.warm" "${cmd[@]}"
             compare_streams "$name (self warm rerun)" "$TMP/self" "$TMP/self.warm" cold warm || return 1

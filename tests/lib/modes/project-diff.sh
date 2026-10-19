@@ -31,7 +31,7 @@ mode_run() {
     disk_guard
     local -a cmd=(env -u RUST_BACKTRACE "$MIRVM" run "$dir")
     [ ${#args[@]} -gt 0 ] && cmd+=(-- "${args[@]}")
-    run_case_cmd "$TMP/cold" "${cmd[@]}"
+    run_with_installed_inputs "$TMP/cold" "$dir" "${cmd[@]}"
     if [ "$(cat "$TMP/cold.code")" -ne 0 ]; then
         bad "$name (cold mirvm run exit=$(cat "$TMP/cold.code"))"
         tail -5 "$TMP/cold.err"

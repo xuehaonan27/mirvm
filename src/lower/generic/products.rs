@@ -277,6 +277,16 @@ impl Products {
         Ok(())
     }
 
+    pub fn stamp(&self) -> Option<Result<crate::utils::content::FileStamp, super::super::Error>> {
+        if self.records.is_empty() {
+            return None;
+        }
+        Some(
+            crate::utils::content::FileStamp::of(&self.path)
+                .map_err(|error| super::super::Error::io("cannot stamp prepared templates", error)),
+        )
+    }
+
     fn encode(&self) -> Result<Vec<u8>, super::super::Error> {
         let header = Header {
             build_id: crate::options::build::BUILD_ID.into(),
@@ -327,13 +337,16 @@ fn restore_call<'tcx>(tcx: TyCtxt<'tcx>, mir: &mir::Body<'tcx>, block: u32) -> O
             ),
             None,
         ),
-        mir::TerminatorKind::Assert { msg, .. }
-            if matches!(&**msg, mir::AssertKind::BoundsCheck { .. }) =>
-        {
+        mir::TerminatorKind::Assert { msg, .. } => {
+            let panic = match &**msg {
+                mir::AssertKind::BoundsCheck { .. } => rustc_hir::LangItem::PanicBoundsCheck,
+                mir::AssertKind::Overflow(..) => msg.panic_function(),
+                _ => return None,
+            };
             (
                 Ty::new_fn_def(
                     tcx,
-                    tcx.require_lang_item(rustc_hir::LangItem::PanicBoundsCheck, span),
+                    tcx.require_lang_item(panic, span),
                     ty::GenericArgs::empty(),
                 ),
                 Some(span),

@@ -309,8 +309,12 @@ fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, crate
     // target side: the __cless-dep child (-Zno-codegen rlib)
     if ctx.target_set.contains(&ix) {
         // fingerprint hit: content-addressed, same-name artifact means same content, skip
+        let artifact = ctx.layout.deps.join(format!("{stem}.rlib"));
         let hit = ctx.layout.deps.join(format!("{stem}.rmeta")).is_file()
-            && ctx.layout.deps.join(format!("{stem}.rlib")).is_file();
+            && artifact.is_file()
+            && (!crate::cli::prepare_only()
+                || crate::options::no_prelower()
+                || crate::depinfo::prelower::is_current(&artifact));
         if !hit {
             let args = schedule::dep_rustc_args(
                 ctx.plan,

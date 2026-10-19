@@ -1,6 +1,7 @@
 # Shared generic execution and specialization
 
-> Status: Production shared interpretation, reusable templates and on-demand JIT specialization are opt-in.
+> Status: Shared interpretation and reusable templates are enabled by default. JIT specialization
+> remains demand-driven; the compile-work budget and compiled shared tier are experimental.
 > Owns generic execution products, promotion and integration gates. Frontend selection and semantic
 > validation remain in [frontend-boundary.md](frontend-boundary.md#41-runtime-generics); measurements
 > belong to [current-status.md](../current-status.md#production-shared-generic-execution). D7 and T13 in
@@ -16,8 +17,8 @@ existing JIT. Unsupported functions retain ordinary eager lowering in the produc
 
 The production lowerer admits scalar/pair frames, opaque by-value locals, slice metadata and pair
 moves, sized struct/tuple field projections and construction, checked slice/array indexing, slice
-patterns, scalar const parameters, integer operations and opaque-pointee offset/copy loops under
-`MIRVM_GENERIC_TEMPLATES=1` (unset disables it). Direct calls bind concrete guest functions,
+patterns, scalar const parameters, integer operations and opaque-pointee offset/copy loops.
+`MIRVM_GENERIC_TEMPLATES=0` selects eager lowering. Direct calls bind concrete guest functions,
 including resolved trait methods and Clone/Drop shims, through the existing linker worklist. One
 compiler session caches both eligible templates and rejected definitions. Only ordinary Item
 instances are eligible; reusable dependency products also retain these results across consumers.
@@ -42,7 +43,7 @@ Construction writes fields from unprojected locals distinct from the destination
 scalar constants, into a local destination. Aliasing projections, enum/union construction and unsized tails retain eager
 lowering. Return and parameter ABIs still come from the complete concrete aggregate layout.
 
-Bounds assertions branch to the guest panic lang item with the original source location and unwind
+Bounds and integer-overflow assertions branch to the guest panic lang item with the original source location and unwind
 action. Index strides read type-size bindings through ordinary IR; address temporaries remain live
 through every operand of a statement or terminator and are reused only after it completes. Slice
 patterns preserve metadata while selecting from the front, from the end or a subslice. Collection
@@ -83,8 +84,10 @@ an incompatible template or descriptor cannot fall through to an old specialized
 std and project preparation use the ownership and invalidation rules of the existing distribution
 and cache designs.
 
-Dependency compilation exports admitted local definitions with identity generic arguments after
-required instance validation. It does not need a consuming concrete type. The compiler-side store
+Dependency compilation exports admitted generic and non-generic local definitions with identity
+arguments after required instance validation, unless installation opts out of prelowering. It does
+not need a consuming concrete type. Non-generic consumer instances reuse prepared definitions;
+without a prepared definition they retain ordinary lowering. The compiler-side store
 holds one checksummed generation file per defining crate and exact target/profile. Its identity
 includes the MIRVM build, stable crate identity, rustc crate hash (including upstream inputs), target
 layout, CPU/features and semantic checks. Definitions use stable path hashes. Both accepted
@@ -191,6 +194,14 @@ shared entries do not prelink from previous-run heat before earning credit; sync
 bypasses admission. The option is off by default. Reducing compiler work alone does not establish
 better latency; all final publication work remains inside whole-process measurements.
 
+The reference for admission is [HotSpot's compilation policy](https://github.com/openjdk/jdk/blob/master/src/hotspot/share/compiler/compilationPolicy.cpp):
+it combines invocation/backedge activity with tier state, scales thresholds with compiler queue
+pressure, and removes stale queued tasks. MIRVM should measure its own removable work, queue delay
+and compilation/publication cost before promoting an instance. Installation prepares reusable
+bytecode, not native code for every definition. A shared template does not imply that every bound
+instance is hot. Thresholds and tier choices require whole-process payback on MIRVM workloads;
+copying HotSpot constants is not a policy. OSR remains a separate deferred contract.
+
 Use shared interpretation as the guaranteed fallback. A compiled shared template is a candidate
 intermediate tier when many instances execute briefly; it can amortize one compilation across
 instances. It is not automatically enabled: a short run can finish before even that cost is repaid.
@@ -238,7 +249,7 @@ recursion, native callbacks, unwind, signals, close and fork. These lifecycle co
 required as admission and promotion change. The isolated contract probes do not close the full
 product gate.
 
-Do not select default enablement from the execution microbenchmarks. The release decision needs
+Do not select default tier promotion from the execution microbenchmarks. The release decision needs
 unmodified reference/candidate whole-process measurements, native output agreement, the relevant
 repository correctness checks, and demonstrated reuse of a bound image after preparation. OSR can
 resume after the activation ownership contract is fixed; it is not part of the current preparation,

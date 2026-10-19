@@ -26,6 +26,7 @@ struct DepCallbacks {
     /// rlib stem = `lib<crate_name><extra-filename>` (extra-filename includes its leading `-`)
     rlib_stem: String,
     publication_failed: bool,
+    prepared: Option<Vec<crate::utils::content::FileStamp>>,
 }
 
 impl Callbacks for DepCallbacks {
@@ -50,14 +51,40 @@ impl Callbacks for DepCallbacks {
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let _ = tcx.collect_and_partition_mono_items(());
-        if let Err(reason) = crate::lower::prepare_generic_templates(tcx) {
-            crate::diag_error!(
-                Build,
-                "cannot prepare dependency generic templates: {reason}"
-            );
-            self.publication_failed = true;
-            return Compilation::Stop;
+        if !crate::options::no_prelower() {
+            match crate::lower::prepare_generic_templates(tcx) {
+                Ok(products) => {
+                    for product in &products {
+                        tcx.sess
+                            .file_depinfo
+                            .borrow_mut()
+                            .insert(rustc_span::Symbol::intern(&product.path));
+                    }
+                    self.prepared = Some(products);
+                }
+                Err(reason) if crate::options::require_installed() => {
+                    crate::diag_debug!(Build, "cannot retain dependency bytecode: {reason}");
+                }
+                Err(reason) => {
+                    crate::diag_error!(Build, "cannot prepare dependency bytecode: {reason}");
+                    self.publication_failed = true;
+                    return Compilation::Stop;
+                }
+            }
         }
+        // Cargo snapshots dep-info when this process exits. rustc wrote its first copy before
+        // analysis; include the prepared products and policy in that snapshot as well.
+        tcx.sess.env_depinfo.borrow_mut().insert((
+            rustc_span::Symbol::intern(crate::options::env_var_name("no_prelower")),
+            Some(rustc_span::Symbol::intern(
+                if crate::options::no_prelower() {
+                    "1"
+                } else {
+                    "0"
+                },
+            )),
+        ));
+        rustc_interface::passes::write_dep_info(tcx);
         match crate::lower::global_asm::materialize_dep_text(tcx) {
             Ok(crate::lower::global_asm::DepAsmText::Text(text)) => {
                 let path = format!("{}/{}.mirasm.s", self.out_dir, self.rlib_stem);
@@ -100,6 +127,7 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
         out_dir,
         rlib_stem: format!("lib{crate_name}{extra}"),
         publication_failed: false,
+        prepared: None,
     };
     let _compiler_session = compiler_session_guard();
     // Arguments the scheduler already consumed for its unit fingerprint; the flag below only shapes
@@ -109,6 +137,21 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
     let code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&session_args, &mut callbacks)
     });
+    if code == ExitCode::SUCCESS
+        && !callbacks.publication_failed
+        && let Some(products) = callbacks.prepared.take()
+    {
+        let artifact =
+            std::path::Path::new(&callbacks.out_dir).join(format!("{}.rlib", callbacks.rlib_stem));
+        if let Err(error) = crate::depinfo::prelower::publish(&artifact, products) {
+            if crate::options::require_installed() {
+                crate::diag_debug!(Build, "cannot retain dependency prelower receipt: {error}");
+            } else {
+                crate::diag::emit(&error);
+                callbacks.publication_failed = true;
+            }
+        }
+    }
     // This unit's verdict is known: release the diagnostics held back during its session when it
     // failed, drop them when it succeeded (unless the run asked for detail).
     let failed = code != ExitCode::SUCCESS || callbacks.publication_failed;

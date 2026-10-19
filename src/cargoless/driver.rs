@@ -563,8 +563,12 @@ fn drive(
             .as_ref()
             .expect("root_lib present means fp must already be computed");
         let stem = format!("lib{}-{}", lib_name.replace('-', "_"), fp);
+        let artifact = layout.deps.join(format!("{stem}.rlib"));
         let hit = layout.deps.join(format!("{stem}.rmeta")).is_file()
-            && layout.deps.join(format!("{stem}.rlib")).is_file();
+            && artifact.is_file()
+            && (!crate::cli::prepare_only()
+                || crate::options::no_prelower()
+                || crate::depinfo::prelower::is_current(&artifact));
         if !hit {
             let searches = buildrs::aggregate_link_searches(&plan, &plan.root_deps, &outputs);
             let args = schedule::root_lib_rustc_args(
@@ -618,6 +622,15 @@ fn drive(
                 std::process::exit(crate::diag::exit::FAILURE.into());
             }
         }
+    }
+
+    if crate::cli::prepare_only()
+        && (crate::options::no_prelower()
+            || (bin_sel.is_none()
+                && root_lib.is_some()
+                && !manifest.targets.iter().any(|target| target.is_bin())))
+    {
+        return ExitCode::SUCCESS;
     }
 
     // 6. bin: root crate goes through existing MirvmCallbacks session (stops at after_analysis, zero artifacts)

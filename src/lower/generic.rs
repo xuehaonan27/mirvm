@@ -42,22 +42,17 @@ struct Timing {
 }
 
 fn eligible(tcx: TyCtxt<'_>, instance: Instance<'_>) -> bool {
-    crate::options::generic_templates()
-        && matches!(instance.def, InstanceKind::Item(_))
-        && instance.args.iter().any(|arg| {
-            matches!(
-                arg.kind(),
-                ty::GenericArgKind::Type(_) | ty::GenericArgKind::Const(_)
-            )
-        })
+    matches!(instance.def, InstanceKind::Item(_))
         && !tcx.is_foreign_item(instance.def_id())
         && !instance.def.requires_caller_location(tcx)
 }
 
 /// Prepare definitions with identity arguments; neither discovery nor export needs a consumer.
-pub(crate) fn prepare(tcx: TyCtxt<'_>) -> Result<(), super::Error> {
-    if !crate::options::generic_templates() {
-        return Ok(());
+pub(crate) fn prepare(
+    tcx: TyCtxt<'_>,
+) -> Result<Vec<crate::utils::content::FileStamp>, super::Error> {
+    if crate::options::no_prelower() {
+        return Ok(Vec::new());
     }
     let mut templates = Templates::default();
     for &def in tcx.mir_keys(()) {
@@ -72,10 +67,15 @@ pub(crate) fn prepare(tcx: TyCtxt<'_>) -> Result<(), super::Error> {
             ty::GenericArgs::identity_for_item(tcx, def),
         );
         if eligible(tcx, instance) {
-            templates.export(tcx, instance);
+            templates.export(tcx, instance, true);
         }
     }
-    templates.publish()
+    templates.publish()?;
+    templates
+        .products
+        .values()
+        .filter_map(products::Products::stamp)
+        .collect()
 }
 
 impl<'tcx> Templates<'tcx> {
@@ -85,10 +85,16 @@ impl<'tcx> Templates<'tcx> {
         env: TypingEnv<'tcx>,
         instance: Instance<'tcx>,
     ) -> Option<Bound<'tcx>> {
-        if !eligible(tcx, instance) {
+        if !crate::options::generic_templates() || !eligible(tcx, instance) {
             return None;
         }
-        self.export(tcx, instance);
+        let generic = instance.args.iter().any(|arg| {
+            matches!(
+                arg.kind(),
+                ty::GenericArgKind::Type(_) | ty::GenericArgKind::Const(_)
+            )
+        });
+        self.export(tcx, instance, generic);
         let exported = self.exports.get(&instance.def_id())?.as_ref()?;
         let started = crate::options::timing().then(std::time::Instant::now);
         let bound = exported.bind(tcx, env, instance);
@@ -103,7 +109,7 @@ impl<'tcx> Templates<'tcx> {
         bound
     }
 
-    fn export(&mut self, tcx: TyCtxt<'tcx>, instance: Instance<'tcx>) {
+    fn export(&mut self, tcx: TyCtxt<'tcx>, instance: Instance<'tcx>, allow_export: bool) {
         let def = instance.def_id();
         if self.exports.contains_key(&def) {
             return;
@@ -147,6 +153,7 @@ impl<'tcx> Templates<'tcx> {
                 }
                 template
             }
+            None if !allow_export => None,
             None => {
                 let started = crate::options::timing().then(std::time::Instant::now);
                 let template = Exporter::export(tcx, instance);
@@ -937,6 +944,25 @@ impl<'tcx> Exporter<'tcx> {
 
     fn assign(&mut self, place: mir::Place<'tcx>, rv: &mir::Rvalue<'tcx>) -> Option<Vec<Stmt>> {
         let ty = place.ty(&self.mir.local_decls, self.tcx).ty;
+        if let mir::Rvalue::BinaryOp(op, box (a, b)) = rv {
+            let op = match op {
+                mir::BinOp::AddWithOverflow => Some(OvfOp::Add),
+                mir::BinOp::SubWithOverflow => Some(OvfOp::Sub),
+                mir::BinOp::MulWithOverflow => Some(OvfOp::Mul),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let (dst_val, dst_flag) = self.pair(place)?;
+                return Some(vec![Stmt::AssignOverflow {
+                    op,
+                    signed: frame::ty_signed(a.ty(&self.mir.local_decls, self.tcx)),
+                    a: self.operand(a)?,
+                    b: self.operand(b)?,
+                    dst_val,
+                    dst_flag,
+                }]);
+            }
+        }
         if let mir::Rvalue::Aggregate(kind, ops) = rv
             && !matches!(**kind, mir::AggregateKind::RawPtr(..))
         {
@@ -1158,14 +1184,16 @@ impl<'tcx> Exporter<'tcx> {
                 target,
                 unwind,
             } => {
-                let mir::AssertKind::BoundsCheck { len, index } = &**msg else {
-                    return None;
+                let (panic, args) = match &**msg {
+                    mir::AssertKind::BoundsCheck { len, index } => (
+                        rustc_hir::LangItem::PanicBoundsCheck,
+                        vec![self.operand(index)?, self.operand(len)?],
+                    ),
+                    mir::AssertKind::Overflow(..) => (msg.panic_function(), Vec::new()),
+                    _ => return None,
                 };
                 let span = block.terminator().source_info.span;
-                let def = self
-                    .tcx
-                    .require_lang_item(rustc_hir::LangItem::PanicBoundsCheck, span);
-                let args = vec![self.operand(index)?, self.operand(len)?];
+                let def = self.tcx.require_lang_item(panic, span);
                 let unwind = unwind_action(*unwind);
                 let callee = self.call(
                     Call {

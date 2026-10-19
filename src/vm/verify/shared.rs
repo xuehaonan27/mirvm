@@ -52,6 +52,18 @@ impl Verifier<'_> {
                             _ => return Err(crate::fail!(Engine, "unsupported shared rvalue")),
                         }
                     }
+                    Stmt::AssignOverflow {
+                        a,
+                        b,
+                        dst_val,
+                        dst_flag,
+                        ..
+                    } => {
+                        self.shared_operand(body, a)?;
+                        self.shared_operand(body, b)?;
+                        self.shared_destination(body, dst_val)?;
+                        self.shared_destination(body, dst_flag)?;
+                    }
                     Stmt::MemCopy {
                         src, dst, count, ..
                     } => {

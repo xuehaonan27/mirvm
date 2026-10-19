@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::utils::content::FileStamp;
 
+#[cfg(any(feature = "cli", test))]
+pub(crate) mod prelower;
+
 /// The input manifest of one compilation.
 ///
 /// Files are identified by content digest; size and mtime are recorded for diagnostics only. A

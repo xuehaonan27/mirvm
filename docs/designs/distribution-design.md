@@ -164,6 +164,7 @@ Release delivery remains unimplemented. Project `install` and `prepare` share a 
 pipeline on both dependency tracks: they lower the selected root, bind and validate its complete
 execution image, publish it and stop before guest entry. The Cargo track uses its runner even when
 Cargo's artifacts are already fresh, because the root's MIRVM products may still need preparation.
+Library-only packages prepare their definitions without requiring a runnable target.
 
 **Runtime distribution** provides the pinned compiler inputs and pre-lowered std together. Building
 the MIR-rich sysroot produces compiler metadata; building the std base translates a canonical
@@ -192,7 +193,15 @@ validated execution closure. Reusable dependency products follow
 [dep-sharing-design.md](dep-sharing-design.md); instances involving application types remain in the
 program delta. Installation binds and validates the complete image, publishes the required products
 and records their input identity before reporting success. It does not invoke the program entry.
-`install` and `prepare` should share this preparation pipeline on both dependency tracks.
+`install` and `prepare` share this preparation pipeline on both dependency tracks. Prelowering is
+enabled by default. `--no-prelower` or `MIRVM_NO_PRELOWER=1` stops after fetching and compiler
+metadata/host preparation, without producing dependency bytecode or a root execution image.
+
+Ordinary `run` resolves against locally available inputs and never fetches missing dependencies,
+even if `MIRVM_OFFLINE=0`. A missing registry entry, archive or Git checkout is an error; install
+the project first. Cached archives may be unpacked locally. Source edits and new concrete bindings
+can rebuild from installed inputs. This boundary does not yet bypass resolution and scheduling on
+an unchanged project; prepared build-plan reuse is separate startup work.
 
 For cacheable programs, the first unchanged run after successful installation must load the bound
 image without frontend or lowering work. Changes to source, lockfile, features, target/profile,
@@ -206,14 +215,21 @@ prevent the self-contained image from being published. Cache writers preserve th
 on failure. Compiler warnings deliberately prevent caching so subsequent runs retain diagnostic
 behavior; preparation still validates such a program and succeeds without invoking its entry.
 
-Installing a library without a consumer can prepare its non-generic roots and concrete instances
-reachable from them. It cannot enumerate future `Vec<UserType>` or `deserialize::<UserType>`
-instances. Retain generic MIR metadata and prepare those instances when a consuming project is
-installed. The default path prepares concrete bytecode; the opt-in
-[shared-generics path](runtime-generics-design.md) prepares owned templates and validated instance
-descriptors, with concrete instructions generated when the JIT requests them. Dependency compiler
-sessions export admitted templates with identity generic arguments, including definitions the
-current consumer does not instantiate; subsequent consumers reuse those products with exact bindings.
+Installing a library without a consumer exports supported generic and non-generic definitions as
+owned bytecode templates. It does not enumerate future `Vec<UserType>` or
+`deserialize::<UserType>` instances. The default [shared-generics path](runtime-generics-design.md)
+binds those instructions to validated instance descriptors when a consumer is prepared; concrete
+instructions are generated when the JIT requests them. Dependency compiler sessions use identity
+generic arguments, including definitions the current consumer does not instantiate. Unsupported
+definitions retain MIR metadata and ordinary consumer-side lowering.
+
+A dependency's compiler artifact alone is not proof of completed prelowering. Completion receipts
+bind its content to the bytecode products and MIRVM build. The own scheduler checks these receipts
+during installation; Cargo tracks product files and the prelower policy in rustc dep-info. Missing
+products and a metadata-only installation must trigger preparation on the next default install.
+The Cargo compatibility track replays preparation to settle newly generated dep-info inputs before
+publishing its final bound image. This adds installation work but keeps it out of the first run;
+the own scheduler uses content receipts and needs no replay.
 Installation must still settle known semantic errors and runtime bindings before guest entry;
 deferred specialization must not require a new rustc session. JIT compilation and per-process
 native binding remain governed by their runtime contracts.
@@ -239,6 +255,9 @@ native binding remain governed by their runtime contracts.
 - **Project installation**: on both dependency tracks, install a cacheable generic-heavy program
   without invoking its entry; the first run must hit its bound image and match native output.
   Source/feature/input edits must invalidate it, and failed publication must fail installation.
+  Install a library without a consumer, then reuse its generic and non-generic bytecode from
+  different consumers. Check metadata-only opt-out, subsequent repair, deleted products and
+  rejection of missing dependencies during `run`.
 - **Gate**: `make test` / `make smoke` / `make gate`, plus `make case C=<id>`; L2 adds an acceptance
   dimension to this gate rather than a parallel harness.
 - **Phase timing**: use `MIRVM_TIMING` for the preparation/execution split described in §2.6.

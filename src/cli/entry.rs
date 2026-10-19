@@ -447,6 +447,10 @@ pub(super) fn run_main(
     // behalf, so the build-diagnostic policy travels with the command instead of being re-decided.
     // `prepare` reaches here too, and asks for the same policy.
     crate::options::export_to_process("build_log", "hold");
+    crate::options::export_to_process(
+        "require_installed",
+        if crate::cli::prepare_only() { "0" } else { "1" },
+    );
     let mut args = args.peekable();
     let mut input = None;
     let mut dump_mir = false;
@@ -500,6 +504,10 @@ pub(super) fn run_main(
             // cargo run --bin semantics (project form only; no meaning for script/single-file)
             "--bin" => bin_sel = Some(next("--bin")?),
             "--ignore-rust-version" => ignore_rust_version = true,
+            "--no-prelower" if crate::cli::prepare_only() => {
+                crate::options::note_cli("no_prelower");
+                crate::options::export_to_process("no_prelower", "1");
+            }
             "--stack-size" => {
                 let v = next("--stack-size")?;
                 parse_stack_size(&v)?;

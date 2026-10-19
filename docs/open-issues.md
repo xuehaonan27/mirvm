@@ -275,7 +275,7 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     metadata work according to CPU profiles. Attribute intermittent long waits inside the engine
     and outside the driver ledger on image hits and program misses before selecting a remedy;
     retain the observed small-input miss regression until its cause is isolated. Require real workload cold/warm measurements,
-    unchanged bound-image reuse and specialization payback before default enablement. Preserve
+    unchanged bound-image reuse and specialization payback before enabling experimental tier policies. Preserve
     guest trait/drop/unwind, concurrency, callbacks, fork, signal and trace contracts as admission
     grows. Retain Rust diagnostics, build-script/proc-macro, layout/ABI, std and input invalidation;
     coordinate single-invocation optimization with T13.

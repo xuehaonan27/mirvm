@@ -324,8 +324,14 @@ entries! {
     dev  a2_debug        env("MIRVM_A2_DEBUG")        default("off") => reads(bool, |o| o.a2_debug);
     /// Print lowering purity statistics.
     dev  purity_stats    env("MIRVM_PURITY_STATS")    default("off") => reads(bool, |o| o.purity_stats);
-    /// Reuse structurally eligible generic MIR templates on lowering misses.
-    dev  generic_templates env("MIRVM_GENERIC_TEMPLATES") default("off") => reads(bool, |o| o.generic_templates);
+    /// Reuse prepared generic instructions with concrete runtime bindings; 0 selects eager lowering.
+    user generic_templates env("MIRVM_GENERIC_TEMPLATES") default("on") => reads(bool, |o| o.generic_templates);
+    /// Skip dependency bytecode preparation and the root execution image during installation.
+    user no_prelower env("MIRVM_NO_PRELOWER") default("off") cli("--no-prelower", "Prepare Install") flag
+        => live(bool, |_| raw("no_prelower").as_deref() == Some("1"));
+    /// Execution may use local dependency inputs but must not fetch missing ones.
+    protocol require_installed env("MIRVM_REQUIRE_INSTALLED") default("off")
+        => live(bool, |_| raw("require_installed").as_deref() == Some("1"));
     /// Experimentally budget shared-instance JIT compilation against sampled interpreter work.
     dev  generic_payback env("MIRVM_GENERIC_PAYBACK") default("off") => reads(bool, |o| o.generic_payback);
     /// Print the dedup probe: canonical fragment ids and the frozen share of a lowered layer.
@@ -432,7 +438,11 @@ pub fn env_var_name(field: &str) -> &'static str {
 /// An offline diagnostic. The knob's own name comes from the register, so the message cannot drift
 /// from the variable it tells the user to set.
 pub fn offline_error(detail: impl std::fmt::Display) -> String {
-    format!("{}: {detail}", env_var_name("offline"))
+    if require_installed() {
+        format!("dependency is not installed: {detail}; run `mirvm install <input>` first")
+    } else {
+        format!("{}: {detail}", env_var_name("offline"))
+    }
 }
 
 // ===== source tracking =====
@@ -647,7 +657,8 @@ impl Options {
             c2_debug: flag("c2_debug"),
             a2_debug: flag("a2_debug"),
             purity_stats: nonempty("purity_stats"),
-            generic_templates: flag("generic_templates"),
+            generic_templates: raw("generic_templates")
+                .is_none_or(|value| !matches!(value.as_str(), "" | "0")),
             generic_payback: flag("generic_payback"),
             frag_stats: nonempty("frag_stats"),
             syscall_trace: flag("syscall_trace"),
@@ -682,7 +693,7 @@ fn read_sysroot() -> Option<PathBuf> {
 
 /// The `MIRVM_OFFLINE` reader.
 fn read_offline() -> bool {
-    flag("offline")
+    require_installed() || flag("offline")
 }
 
 /// The `MIRVM_DEPS` reader.

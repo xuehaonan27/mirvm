@@ -217,6 +217,8 @@ run_cargo() { # <project>
 
 run_self() { # <project>
     PATH="$NO_CARGO:$PATH" MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
+        MIRVM_DEPS=self "$MIRVM" install "$1" || return $?
+    PATH="$NO_CARGO:$PATH" MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
         MIRVM_DEPS=self "$MIRVM" run "$1"
 }
 
@@ -262,7 +264,26 @@ else
     tail -20 "$TMP/alt-cargo.err"
 fi
 cp "$ALT/Cargo.lock" "$TMP/alt-cargo.lock"
+requests_before=$(wc -l <"$REQ_LOG")
+if MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
+    "$MIRVM" run "$ALT" >"$TMP/uninstalled.out" 2>"$TMP/uninstalled.err"; then
+    bad "run accepted an uninstalled registry dependency"
+elif [ "$(wc -l <"$REQ_LOG")" -eq "$requests_before" ] \
+    && rg -q -F 'run `mirvm install <input>` first' "$TMP/uninstalled.err"; then
+    ok "run refuses missing dependencies without contacting the registry"
+else
+    bad "uninstalled run fetched inputs or omitted the install diagnostic"
+fi
 fresh_self_lock "$ALT" "$TMP/alt-cargo.lock" 123 alt-registry
+requests_before=$(wc -l <"$REQ_LOG")
+if MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
+    "$MIRVM" run "$ALT" >"$TMP/installed.out" 2>"$TMP/installed.err" \
+    && [ "$(cat "$TMP/installed.out")" = 123 ] \
+    && [ "$(wc -l <"$REQ_LOG")" -eq "$requests_before" ]; then
+    ok "installed run reuses dependencies without contacting the registry"
+else
+    bad "installed run failed or contacted the registry"
+fi
 if "$PYTHON" - "$PROVIDER_LOG" <<'PY'
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
@@ -317,6 +338,14 @@ else
     tail -20 "$TMP/local-cargo.err"
 fi
 cp "$LOCAL_APP/Cargo.lock" "$TMP/local-cargo.lock"
+if MIRVM_HOME="$TMP/local-only-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
+    "$MIRVM" run "$LOCAL_APP" >"$TMP/local-only.out" 2>"$TMP/local-only.err" \
+    && [ "$(cat "$TMP/local-only.out")" = 123 ]; then
+    ok "run consumes an available local-registry archive without downloading"
+else
+    bad "run refused a locally available registry archive"
+    tail -10 "$TMP/local-only.err"
+fi
 fresh_self_lock "$LOCAL_APP" "$TMP/local-cargo.lock" 123 local-registry
 
 # 4. cargo vendor directory replacement + per-file checksum rejection of tampering.

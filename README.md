@@ -25,10 +25,13 @@ Baseline: Linux/ELF/x86_64, toolchain pinned to `nightly-2026-07-02`.
 cargo build --release --locked
 
 ./target/release/mirvm run tests/data/programs/fib.rs             # single file
-./target/release/mirvm run tests/data/programs/ecosystem.rs       # single file with dependencies
-./target/release/mirvm run path/to/project -- arg1 arg2     # Cargo project
-./target/release/mirvm prepare path/to/project              # build it, report it, run nothing
+./target/release/mirvm install tests/data/programs/ecosystem.rs   # fetch and prelower dependencies
+./target/release/mirvm run tests/data/programs/ecosystem.rs       # reuse installed dependencies
 ./target/release/mirvm install path/to/project              # prepare the selected target for its first run
+./target/release/mirvm run path/to/project -- arg1 arg2      # Cargo project
+./target/release/mirvm prepare path/to/project              # build it, report it, run nothing
+./target/release/mirvm install path/to/library              # prepare definitions without a consumer
+./target/release/mirvm install --no-prelower path/to/project # fetch and build metadata only
 ./target/release/mirvm test path/to/project -- --nocapture  # cargo test, without Cargo
 ./target/release/mirvm pack path/to/project -o app.mirvm    # self-contained package
 ./target/release/mirvm run app.mirvm
@@ -38,9 +41,16 @@ cargo build --release --locked
 command that does the building and shows it, and `run -v` (`MIRVM_LOG=debug`) is how one run asks for
 that detail.
 
-`install` and `prepare` share the preparation pipeline on both dependency tracks. For a cacheable
-program they publish a complete execution image before succeeding, so its first unchanged `run`
-skips frontend and lowering work. Neither command invokes the guest entry.
+`install` and `prepare` share the preparation pipeline on both dependency tracks. By default they
+fetch dependencies and prelower supported definitions, including generics with no concrete consumer
+types. For a cacheable program they also publish a complete execution image, so its first unchanged
+`run` skips frontend and lowering work. Neither command invokes the guest entry. `--no-prelower`
+(or `MIRVM_NO_PRELOWER=1`) skips bytecode preparation and image publication.
+
+`run` uses local dependency sources and artifacts; it never downloads missing dependencies. Run
+`install` after adding a dependency that is not available locally. Source edits can still rebuild
+from local inputs. Shared generic bytecode is enabled by default; `MIRVM_GENERIC_TEMPLATES=0`
+selects eager lowering for new execution images. Unsupported definitions retain ordinary lowering.
 
 A single file declares its dependencies with cargo-script (RFC 3424) frontmatter:
 

@@ -110,12 +110,15 @@ pub(super) fn arg_flag_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
-fn exec(mut cmd: Command) -> ! {
-    let status = cmd.status().unwrap_or_else(|e| {
+fn command_status(cmd: &mut Command) -> std::process::ExitStatus {
+    cmd.status().unwrap_or_else(|e| {
         crate::diag_error!(Runner, "cannot execute {cmd:?}: {e}");
         exit(crate::diag::exit::FAILURE.into());
-    });
-    exit(status.code().unwrap_or(1));
+    })
+}
+
+fn exec(mut cmd: Command) -> ! {
+    exit(command_status(&mut cmd).code().unwrap_or(1));
 }
 
 fn cargo_target_dir() -> PathBuf {
@@ -188,6 +191,9 @@ fn cargo_project_command(
     let mut cmd = Command::new(crate::sysroot::toolchain::cargo());
     cmd.current_dir(project_dir);
     cmd.arg(action.subcommand());
+    if crate::options::offline() {
+        cmd.arg("--offline");
+    }
     if locked {
         cmd.arg("--locked");
     }
@@ -232,6 +238,14 @@ fn cargo_project_command(
     // config files and the CARGO_BUILD_* environment aliases. MIRVM remains
     // innermost and sees the final argument vector after both wrappers.
     cmd.env("RUSTC", self_str);
+    cmd.env(
+        crate::options::env_var_name("no_prelower"),
+        if crate::options::no_prelower() {
+            "1"
+        } else {
+            "0"
+        },
+    );
     crate::options::protocol::set_cargo_session(&mut cmd);
     crate::options::protocol::set_cargo_compiler(&mut cmd);
     cmd.env(crate::options::env_var_name("sysroot"), sysroot);
@@ -263,6 +277,10 @@ enum CargoAction<'a> {
     Test {
         cargo_args: &'a [String],
     },
+    /// Prepare a library's dependency products without requiring an executable target.
+    PrepareLibrary {
+        ignore_rust_version: bool,
+    },
     /// Select and build like `cargo run`, then prepare the recorded root without executing it.
     Prepare {
         bin_sel: Option<&'a str>,
@@ -275,6 +293,7 @@ impl CargoAction<'_> {
         match self {
             Self::Run { .. } | Self::Prepare { .. } => "run",
             Self::Test { .. } => "test",
+            Self::PrepareLibrary { .. } => "build",
         }
     }
 
@@ -307,6 +326,14 @@ impl CargoAction<'_> {
             }
             Self::Test { cargo_args } => {
                 cmd.args(cargo_args);
+            }
+            Self::PrepareLibrary {
+                ignore_rust_version,
+            } => {
+                cmd.arg("--lib");
+                if ignore_rust_version {
+                    cmd.arg("--ignore-rust-version");
+                }
             }
         }
     }
@@ -341,7 +368,19 @@ pub fn phase_cargo(
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
     let locked = crate::options::cargo_locked();
-    let action = if crate::cli::prepare_only() {
+    let library = crate::cli::prepare_only()
+        && bin_sel.is_none()
+        && crate::cargoless::manifest::PackageManifest::read_dir(project_dir).is_ok_and(
+            |manifest| {
+                manifest.targets.iter().any(|target| target.is_lib())
+                    && !manifest.targets.iter().any(|target| target.is_bin())
+            },
+        );
+    let action = if library {
+        CargoAction::PrepareLibrary {
+            ignore_rust_version,
+        }
+    } else if crate::cli::prepare_only() {
         CargoAction::Prepare {
             bin_sel,
             ignore_rust_version,
@@ -352,7 +391,7 @@ pub fn phase_cargo(
             ignore_rust_version,
         }
     };
-    let cmd = cargo_project_command(
+    let mut cmd = cargo_project_command(
         project_dir,
         &guest_cwd,
         action,
@@ -361,6 +400,15 @@ pub fn phase_cargo(
         &self_exe,
         locked,
     );
+    if crate::cli::prepare_only() && !crate::options::no_prelower() {
+        // Newly exported templates are newer than Cargo's build-start timestamp. Settle its
+        // dep-info freshness before publishing the final image, so the first run cannot rebuild
+        // an rlib and invalidate that image. Reused templates are not republished.
+        let status = command_status(&mut cmd);
+        if !status.success() {
+            exit(status.code().unwrap_or(1));
+        }
+    }
     exec(cmd)
 }
 

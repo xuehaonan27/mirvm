@@ -164,6 +164,10 @@ impl FuncBody {
                         Rvalue::Ref(_) => {}
                         _ => unreachable!("verified shared rvalue"),
                     },
+                    Stmt::AssignOverflow { a, b, .. } => {
+                        bind(a);
+                        bind(b);
+                    }
                     Stmt::MemCopy {
                         src, dst, count, ..
                     } => {
@@ -273,6 +277,66 @@ pub(crate) fn test_generic_body(value: u64) -> FuncBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_overflow_binds_constants_and_protects_dictionary() {
+        let mut body = test_generic_body(7);
+        body.frame_size = 32;
+        let shared = body.shared.as_mut().unwrap();
+        let mut code = GenericInstructions::clone(&shared.template);
+        let Stmt::Assign {
+            dst,
+            rv: Rvalue::IntBin { a, b, .. },
+        } = code.blocks[0].stmts.remove(0)
+        else {
+            unreachable!();
+        };
+        code.blocks[0].stmts.push(Stmt::AssignOverflow {
+            op: OvfOp::Add,
+            signed: false,
+            a,
+            b,
+            dst_val: dst,
+            dst_flag: ScalarPlace::Slot(Slot {
+                off: 24,
+                width: Width::W8,
+            }),
+        });
+        shared.template = Arc::new(GenericTemplate::new(code.clone()).unwrap());
+        let verify = |body: FuncBody| {
+            let module = Module {
+                funcs: FuncTable::from(vec![body]),
+                ..Module::default()
+            };
+            crate::vm::verify::module(&module, &crate::vm::instance::Instance::default())
+        };
+        verify(body.clone()).unwrap();
+        let concrete = body.specialize();
+        assert!(matches!(
+            concrete.blocks[0].stmts[0],
+            Stmt::AssignOverflow {
+                b: Operand::Imm { bits: 7, .. },
+                ..
+            }
+        ));
+        verify(concrete).unwrap();
+        for flag in [false, true] {
+            let mut damaged = code.clone();
+            let Stmt::AssignOverflow {
+                dst_val, dst_flag, ..
+            } = &mut damaged.blocks[0].stmts[0]
+            else {
+                unreachable!();
+            };
+            *(if flag { dst_flag } else { dst_val }) = ScalarPlace::Slot(Slot {
+                off: 16,
+                width: Width::W64,
+            });
+            body.shared.as_mut().unwrap().template =
+                Arc::new(GenericTemplate::new(damaged).unwrap());
+            assert!(verify(body.clone()).is_err());
+        }
+    }
 
     #[test]
     fn generic_template_identity_preserves_fragment_encoding_and_tracks_content() {

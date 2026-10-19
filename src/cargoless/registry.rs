@@ -678,8 +678,8 @@ impl Registry {
                 Vec::new()
             };
             if found.is_empty() {
-                // ⑤ HTTP
-                if self.offline {
+                // Local registry archives are already available inputs, even in offline mode.
+                if self.offline && !matches!(&endpoint.backend, Backend::LocalRegistry { .. }) {
                     return Err(crate::fail!(
                         Resolver,
                         crate::options::offline_error(format!(

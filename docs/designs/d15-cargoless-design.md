@@ -67,7 +67,8 @@ Cargo.
   Cargo leg of a differential, or a user who ran `cargo` first — may have resolved against a newer
   index, so a version the snapshot lacks is looked up again after a refresh and only a version the
   refreshed copy also lacks is refused. Offline mode cannot revalidate and falls back to the
-  snapshot.
+  snapshot. Ordinary `run` always uses this local-input path; installation owns fetching under the
+  [distribution contract](distribution-design.md#27-installed-execution-products).
 - **C14 the fresh solve revalidates what it reads.** The snapshot problem is not the lock's alone: a
   program with no lock — a frontmatter script, a first run — resolves against whatever the copy holds,
   and one measured `libc = "0.2"` at 0.2.189 where the pinned Cargo on the same machine had just
@@ -76,7 +77,7 @@ Cargo.
   copy: a `304` keeps it, so an unchanged crate costs one round trip and no body, and an answer that
   carries a body replaces it. Later reads of that crate in the same process serve the copy this one
   checked. Offline mode cannot ask and keeps the snapshot, which is what makes an offline resolve
-  reproducible; it says so once per run at `info` (the user asked for offline), while a revalidation
+  reproducible; it says so once per command at `info`, while a revalidation
   that failed says so at `warning`, so a resolution that may be older than the registry is never
   silent. The first revalidation that fails also stops the asking for the rest of the run: a registry
   that did not answer once will not answer for the next crate either, and a run whose registry is

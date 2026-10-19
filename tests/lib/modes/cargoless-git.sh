@@ -78,6 +78,8 @@ make_app "$APP" git-contract-app \
 
 run_self() {
     PATH="$TMP/no-cargo:$PATH" MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
+        MIRVM_DEPS=self "$MIRVM" install "$@" || return $?
+    PATH="$TMP/no-cargo:$PATH" MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
         MIRVM_DEPS=self "$MIRVM" run "$@"
 }
 

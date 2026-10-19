@@ -35,7 +35,7 @@ mode_run() {
 
     disk_guard
     local t0; t0=$(date +%s)
-    run_case_cmd "$TMP/run" "${cmd[@]}"
+    run_with_installed_inputs "$TMP/run" "$DATA_DIR/$input" "${cmd[@]}"
     local code; code=$(cat "$TMP/run.code")
     local secs=$(( $(date +%s) - t0 ))
     if [ -z "${MIRVM_GATE_KEEP_CACHE:-}" ]; then

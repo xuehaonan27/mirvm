@@ -127,12 +127,12 @@ different products. A shared body can avoid cloning code for every type argument
 that type's size, alignment, layout, drop behavior and trait implementations. Rust's source semantics
 do not require MIRVM to use native rustc's eager code-generation strategy.
 
-Target dependency rlibs already retain generic MIR. The default root session instantiates required
-bodies in `lower::func::lower_instance`, freezes their frame and calling convention in `lower::frame`,
-and closes over callees before execution. The opt-in
-[shared-generics path](runtime-generics-design.md) exports admitted instructions once and binds
-concrete descriptors before entry. Runtime decoding and specialization use only these owned
-products. The existing JIT consumes concrete bytecode and has no generic type resolver.
+Target dependency rlibs retain generic MIR. The default
+[shared-generics path](runtime-generics-design.md) reuses prepared instructions and binds concrete
+descriptors before entry. Unsupported definitions use `lower::func::lower_instance`. Both paths
+freeze the frame and calling convention and close over callees before execution. Runtime decoding
+and specialization use only owned products. The existing JIT consumes concrete bytecode and has
+no generic type resolver.
 
 | Candidate | Deferred or shared work | Main cost |
 |---|---|---|
