@@ -245,6 +245,9 @@ families! {
     // owners: image::execution — independently owned, bound execution images; removing one only
     // costs reconstruction from the sharing manifests. Cleared with the program IR family.
     Cache EXECUTION       "execution"       generation("bin") flag(Ir);
+    // owners: cargoless::driver::prepared — validated recipes that bypass resolution and scheduling.
+    #[cfg(any(feature = "cli", test))]
+    Cache LAUNCH          "launch"          generation("bin") flag(Ir);
     // owners: store::frags, image::collect — the shared canonical function bodies every manifest
     // references by content address; a pack is reachable only through the manifests that name its
     // fragments.
@@ -561,8 +564,8 @@ mod tests {
             if let Some(flag) = family.flag {
                 if flags.contains(&flag) {
                     let expected = match flag {
-                        FamilyFlag::Ir => [IR.path(), EXECUTION.path()],
-                        FamilyFlag::Units => [UNITS.path(), GENERIC_TEMPLATES.path()],
+                        FamilyFlag::Ir => vec![IR.path(), EXECUTION.path(), LAUNCH.path()],
+                        FamilyFlag::Units => vec![UNITS.path(), GENERIC_TEMPLATES.path()],
                         _ => panic!("`{flag:?}` unexpectedly names multiple families"),
                     };
                     let members: Vec<_> = FAMILIES

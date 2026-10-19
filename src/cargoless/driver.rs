@@ -39,6 +39,7 @@ use super::resolve::{ResolvePlan, UnitClass, resolve};
 use super::schedule::{self, Layout};
 
 mod build;
+mod prepared;
 mod test_driver;
 
 use build::run_build_lifecycle_root;
@@ -53,6 +54,13 @@ pub fn run_project(
     bin_sel: Option<&str>,
     ignore_rust_version: bool,
 ) -> ExitCode {
+    let request = prepared::Request::new(dir, bin_sel, ignore_rust_version);
+    if let Some(code) = request
+        .as_ref()
+        .and_then(|request| request.run(program_args))
+    {
+        return code;
+    }
     let mut manifest = match PackageManifest::read_dir(dir) {
         Ok(m) => m,
         Err(e) => {
@@ -61,7 +69,7 @@ pub fn run_project(
         }
     };
     manifest.ignore_rust_version = ignore_rust_version;
-    drive(&manifest, program_args, bin_sel, None)
+    drive(&manifest, program_args, bin_sel, None, request)
 }
 
 /// `mirvm pack <dir|Cargo.toml>` default self path. Deps, build.rs,
@@ -75,7 +83,7 @@ pub fn pack_project(dir: &Path, out: &Path) -> ExitCode {
             std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
-    drive(&manifest, &[], None, Some(out))
+    drive(&manifest, &[], None, Some(out), None)
 }
 
 /// Independent execution recipe for a root test target. Cargo spawns one process per test artifact; the self
@@ -347,15 +355,22 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
 /// `mirvm run <frontmatter script>` (MIRVM_DEPS=self): the body is materialized into the script cache directory
 /// (the same key cli::script_cache_dir hands the cargo track), and the pseudo-package manifest goes through the same drive.
 pub fn run_script(file: &Path, program_args: &[String], ignore_rust_version: bool) -> ExitCode {
+    let request = prepared::Request::new(file, None, ignore_rust_version);
+    if let Some(code) = request
+        .as_ref()
+        .and_then(|request| request.run(program_args))
+    {
+        return code;
+    }
     let mut manifest = script_manifest(file);
     manifest.ignore_rust_version = ignore_rust_version;
-    drive(&manifest, program_args, None, None)
+    drive(&manifest, program_args, None, None, request)
 }
 
 /// `mirvm pack <frontmatter script>` default self path.
 pub fn pack_script(file: &Path, out: &Path) -> ExitCode {
     let manifest = script_manifest(file);
-    drive(&manifest, &[], None, Some(out))
+    drive(&manifest, &[], None, Some(out), None)
 }
 
 fn script_manifest(file: &Path) -> PackageManifest {
@@ -423,6 +438,7 @@ fn drive(
     program_args: &[String],
     bin_sel: Option<&str>,
     pack_out: Option<&Path>,
+    request: Option<prepared::Request>,
 ) -> ExitCode {
     // 1. resolver: use the lock when it is present, otherwise a fresh pubgrub solve
     let mut registry = match Registry::open_for(&manifest.lock_root) {
@@ -641,23 +657,37 @@ fn drive(
             std::process::exit(crate::diag::exit::FAILURE.into());
         }
     };
-    // SAFETY: single-threaded startup phase (rustc session not started, engine not running), env writes have no concurrent readers.
-    // bin session is in-process (same env-replay pattern as runner_main).
-    unsafe {
-        for (k, v) in &manifest.pkg_env {
-            std::env::set_var(k, v);
-        }
-        std::env::set_var("CARGO_CRATE_NAME", bin_name.replace('-', "_"));
-        std::env::set_var("CARGO_BIN_NAME", bin_name);
-        std::env::set_var("CARGO_MANIFEST_DIR", &manifest.root);
-        std::env::set_var("CARGO_MANIFEST_PATH", manifest.root.join("Cargo.toml"));
-        if let (Some(bo), Some(fp)) = (&root_bo, &root_fp) {
-            // root build.rs rustc-env + OUT_DIR enter bin session (readable by env!, same as cargo)
-            std::env::set_var("OUT_DIR", layout.build_dir(&manifest.name, fp).join("out"));
-            for (k, v) in &bo.envs {
-                std::env::set_var(k, v);
-            }
-        }
+    let mut env: Vec<(String, String)> = manifest
+        .pkg_env
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    env.extend([
+        ("CARGO_CRATE_NAME".into(), bin_name.replace('-', "_")),
+        ("CARGO_BIN_NAME".into(), bin_name.to_string()),
+        (
+            "CARGO_MANIFEST_DIR".into(),
+            manifest.root.display().to_string(),
+        ),
+        (
+            "CARGO_MANIFEST_PATH".into(),
+            manifest.root.join("Cargo.toml").display().to_string(),
+        ),
+    ]);
+    if let (Some(bo), Some(fp)) = (&root_bo, &root_fp) {
+        env.push((
+            "OUT_DIR".into(),
+            layout
+                .build_dir(&manifest.name, fp)
+                .join("out")
+                .display()
+                .to_string(),
+        ));
+        env.extend(
+            bo.envs
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
     }
     let root_searches = buildrs::aggregate_link_searches(&plan, &plan.root_deps, &outputs);
     let root_lib_ref = root_lib.as_ref().map(|(n, _, _)| {
@@ -690,6 +720,30 @@ fn drive(
     // produces zero artifacts, use deps/<bin> as placeholder — guest only sees argv string, does not read file)
     let mut program_argv = vec![layout.deps.join(bin_name).display().to_string()];
     program_argv.extend(program_args.iter().cloned());
+    if let Some(request) = request {
+        let recipe = RootRunRecipe {
+            rustc_args: args.clone(),
+            env: env.clone(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| manifest.root.clone()),
+            argv0: program_argv[0].clone(),
+        };
+        let _ = prepared::store(
+            request,
+            manifest,
+            &plan,
+            &fps,
+            &layout,
+            root_fp.as_deref(),
+            &sysroot,
+            recipe,
+        );
+    }
+    // SAFETY: compiler and guest threads have not started; dependency workers have joined.
+    unsafe {
+        for (name, value) in env {
+            std::env::set_var(name, value);
+        }
+    }
     // no chdir throughout: guest cwd = caller cwd, consistent with cargo run semantics
     if let Some(out) = pack_out {
         crate::cli::pack_driver(args, program_argv, out.to_path_buf())

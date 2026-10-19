@@ -60,8 +60,9 @@ contracts are its siblings in `docs/designs/`.
   non-generic dependency definitions, including library-only packages without a consumer.
   `--no-prelower` skips bytecode/image preparation; a later default install fills missing products.
   Required publication failures fail preparation; ordinary runs retain best-effort caching.
-  `run` uses local dependency inputs and refuses missing downloads. Resolution and scheduling
-  still run before bound-image lookup. The installation boundary is
+  `run` uses local dependency inputs and refuses missing downloads. On the own dependency track,
+  validated launch recipes skip resolution and scheduling before bound-image lookup; invalidation
+  returns to ordinary preparation. The installation boundary is
   specified in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the
   source into a process-owned immutable snapshot and each `unsafe instantiate` builds an independent
@@ -229,26 +230,39 @@ comparison. Ordinary C2I definition
 cost is only 0.235 ms / 0.856 ms, including template misses, copying and rebinding. These are small
 parts of the end-to-end budget; forced compilation throughput is not an ordinary-run acceptance metric.
 
-An instrumented startup decomposition uses ten native-matching fresh processes per input, with
-prepared-image hits and persistent JIT caching disabled. Medians are independent and do not form
-an exactly additive wall-time partition:
+Prepared launch bypasses resolver and scheduler work on unchanged own-track projects and scripts.
+A Linux x86_64 release comparison against `b3a6ac7` uses ten alternating pairs per workload and
+configuration, the lightweight CLI with its matching worker, prepared inputs and native stdout
+agreement. Timings are uninstrumented fresh processes with warm filesystem caches. The default
+configuration retains the populated persistent JIT store; a separate control disables persistence.
+No builds, correctness suites or CPU sampling overlap these measurements. Shared-host load remains
+uncontrolled; these are not cold-filesystem or empty-installation timings.
 
-| Interval | serde JSON | flate2, 2 KiB |
-|---|---:|---:|
-| Main entry to driver clock | 20.32 ms | 18.01 ms |
-| Dependency resolution within that interval | 10.42 ms | 6.06 ms |
-| Prepared-image loading | 27.01 ms | 29.34 ms |
-| Image loaded to exit request, including engine execution | 23.30 ms | 93.85 ms |
-| Process time outside main-entry-to-atexit markers | 7.19 ms | 7.12 ms |
+| Configuration / workload | Baseline process median | Prepared launch median | Change |
+|---|---:|---:|---:|
+| Default JIT, serde JSON | 81.35 ms | 66.14 ms | -18.7% |
+| Default JIT, flate2, 2 KiB | 135.30 ms | 136.71 ms | +1.0% |
+| Persistence disabled, serde JSON | 81.78 ms | 71.22 ms | -12.9% |
+| Persistence disabled, flate2, 2 KiB | 153.70 ms | 153.42 ms | -0.2% |
 
-Serde pays about 47 ms before engine execution even with preparation complete. Its uninstrumented
-CPU capture attributes 57.24% of user cycles to the main CLI thread, 28.87% to the guest and 10.73%
-to JIT. Dependency resolution accounts for 11.09% of total user cycles; index-entry lookup beneath
-feature unification accounts for 9.08%. A locked run still materializes the full crate version history
-from JSON before selecting its exact version. Parsed entries are already shared within the command.
-Registry opening, lock/links checks and sysroot selection, and dependency scheduling take medians
-of 1.35, 3.65 and 1.23 ms respectively. The main startup opportunity spans the prepared launch path
-and image materialization; an isolated decoder improvement cannot remove that whole cost.
+Serde improves in all ten default pairs and nine persistence-disabled pairs. Flate establishes no
+end-to-end improvement; its execution/JIT budget still dominates. First-process checks immediately
+after installation hit both prepared launch and the bound image, without frontend or lowering.
+Separate syscall traces reduce registry-index opens from 12 to zero for serde and eight to zero for
+flate. Serde's total `openat` / `read` / `statx` calls fall from 202 / 208 / 456 to 180 / 178 / 383;
+flate's fall from 383 / 553 / 628 to 374 / 542 / 568. These traced runs establish removed work, not
+latency. Separate serde captures over 15 fresh processes per binary use `cycles:u` at 1999 Hz
+with DWARF stacks and process-local JIT maps, with no lost samples. Resolver stacks account for
+11.94% of baseline user cycles and disappear on launch hits, as does the scheduling entry.
+Source/configuration validation and bound-image loading remain necessary.
+
+The `prepared-launch` contract covers 29 scenarios, including the first process after install,
+caller argv/environment, compile-time environment invalidation, equal-size path-dependency edits
+with restored timestamps, build-script inputs, config discovery and optional includes, lockfiles,
+target selection, corrupt/missing records and images, missing dependencies and frontmatter edits.
+The preparation contract's 126 assertions, 43 related scheduler/build-script/config/store unit tests,
+all-target/all-feature Clippy and 14 source-boundary checks pass. The complete runtime suite is not
+part of this validation.
 
 A separate cache matrix uses five rotating rounds per workload, with native stdout agreement and
 fixed per-workload heat snapshots. Prepared IR, installed dependencies and OS caches remain. Cold JIT

@@ -433,7 +433,7 @@ pub fn fingerprints(
 /// not stamped -- the mtime of an unpacked .crate tree is the unpack time, so stamping it
 /// would only cause pointless rebuilds, and the version already covers the content); a path
 /// unit = recursive walk over every file under source_dir (excluding target/ and .git/),
-/// folding (relative path, len, mtime_ns) after sorting. The root package follows the same
+/// folding (relative path, len, mtime_ns, content digest) after sorting. The root package follows the same
 /// rule (root_fingerprint reuses this).
 fn source_stamp(u: &Unit) -> Result<String, crate::error::Error> {
     if let Some(source_id) = &u.immutable_source_id {
@@ -481,23 +481,18 @@ pub(super) fn source_stamp_dir(
                 }
                 stack.push(p);
             } else if p.is_file() {
-                let md = std::fs::metadata(&p)
-                    .map_err(|e| {
-                        format!(
-                            "failed to stat source file of path dependency {} at {}: {e}",
-                            package,
-                            p.display()
-                        )
-                    })
-                    .map_err(|e| crate::fail!(Build, e))?;
+                let stamp = crate::utils::content::FileStamp::of(&p)
+                    .map_err(|error| crate::fail!(Build, format!(
+                        "failed to stamp source file of path dependency {package} at {}: {error}", p.display()
+                    )))?;
                 let rel = p.strip_prefix(source_dir).unwrap_or(&p);
-                let mtime_ns = md
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0);
-                rows.push(format!("{}:{}:{}", rel.display(), md.len(), mtime_ns));
+                rows.push(format!(
+                    "{}:{}:{}:{}",
+                    rel.display(),
+                    stamp.size,
+                    stamp.mtime_ns,
+                    crate::utils::content::digest_hex(&stamp.digest)
+                ));
             }
         }
     }

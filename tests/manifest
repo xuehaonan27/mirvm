@@ -312,6 +312,7 @@ frag-collect         frag-collect         gate  900   fixture=fixtures/unit-shar
 c-unwind             c-unwind             fast  900   fixture=fixtures/c-unwind-contract
 diagnostics          diagnostics          fast  300   fixture=programs/probe_diagnostic_router_direct.rs;programs/probe_diagnostic_router_script.rs
 prepare              prepare              fast  600   fixture=programs/prepare_clean.rs;programs/prepare_warning.rs
+prepared-launch      prepared-launch      fast  600
 telemetry            telemetry            fast  300   fixture=programs/probe_telemetry_fork_child.rs
 cargo-contract       cargo-contract       fast  900
 framework-self-test  framework-self-test  fast  300   fixture=fixtures/fakes

@@ -1,6 +1,6 @@
 # Startup cache
 
-> Status: Implemented. Owns managed compiler-input identity, base construction/loading and bound execution images.
+> Status: Implemented. Owns managed compiler-input identity, prepared launch, base construction/loading and bound execution images.
 > Shared fragments and collection remain owned by [dep-sharing-design.md](dep-sharing-design.md);
 > the package container remains owned by [modeb-mirvmar-design.md](modeb-mirvmar-design.md).
 
@@ -98,6 +98,39 @@ The driver ledger's `base-load` is nested inside `frontend` or `cache-load`. On 
 runs after analysis and measures std lowering, encoding, validation and publication separately from
 program `lower`. `layer-load` sums manifest loading before analysis and after a newly built base.
 Compiler finalization still completes before Engine entry.
+
+## Prepared launch
+
+The default own dependency track publishes a disposable launch recipe for runnable projects and
+frontmatter scripts. Installation still visits the preparation pipeline so missing dependency
+templates can be repaired. An unchanged `run` validates the recipe before opening the registry or
+constructing the schedule, then enters the bound-image loader. The Cargo compatibility track retains
+Cargo's freshness decisions. Verbose and build/resolver diagnostic modes retain the ordinary path
+and its cached diagnostics.
+
+The key includes the input path, caller directory, selected binary, rust-version policy, relevant
+Cargo/rustflags environment, sysroot selection and compiler options. The record pins the MIRVM build,
+root and mutable dependency source trees, manifests, lockfile, config discovery candidates and
+includes (including absent optional files), dependency source presence, and build-script records.
+Mutable tree fingerprints include file contents as well as paths, sizes and timestamps; additions,
+deletions and equal-size rewrites with restored timestamps invalidate them. Registry and locked Git
+sources retain the resolver's immutable source contract. Existing build-script rerun rules are
+rechecked, including declared file and environment inputs. The sysroot selector must still select the
+recorded generation; the image loader independently validates its managed/external compiler inputs,
+compile-time environment and native files.
+
+Only compiler-injected environment values and `argv[0]` are replayed. Guest arguments, runtime
+environment and working directory belong to the current invocation. No guest is started until the
+execution image passes its existing checks. A missing, corrupt or stale record or image falls back to
+ordinary preparation; an image miss restores the caller's environment before resolving. Record
+publication is atomic and best effort, and the checksum covers the whole recipe. A record without a
+successfully published image cannot bypass preparation. `cache purge --ir` removes launch records
+along with program and bound images.
+
+`MIRVM_TIMING=1` reports `mirvm-launch: hit validation=...ms` only when both recipe and image succeed.
+Validation precedes and is separate from the driver's cache-load interval. Large mutable source
+trees still require content reads; this shortcut does not promise constant-time validation of
+arbitrary external inputs.
 
 ## Bound execution images
 

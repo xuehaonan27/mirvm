@@ -24,7 +24,7 @@ mod frontmatter;
 pub(crate) mod worker;
 
 pub(crate) use self::cargo::{GuestProcessState, run_dep_compiler};
-pub(crate) use self::driver::{pack_driver, run_driver};
+pub(crate) use self::driver::{pack_driver, run_driver, try_prepared_launch};
 pub(crate) use self::frontmatter::{
     ScriptPackage, effective_manifest, parse_frontmatter_pub, script_cache_dir,
 };

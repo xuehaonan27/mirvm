@@ -38,27 +38,44 @@ struct Layer {
 pub struct CargoConfig {
     layers: Vec<Layer>,
     cargo_home: Option<PathBuf>,
+    inputs: Vec<PathBuf>,
 }
 
 impl CargoConfig {
     pub fn load_at(current: &Path, cargo_home: Option<&Path>) -> Result<Self, crate::error::Error> {
         let mut layers = Vec::new();
+        let mut inputs = Vec::new();
+        if let Some(home) = cargo_home {
+            inputs.extend([home.join("config"), home.join("config.toml")]);
+        }
+        for directory in current.ancestors() {
+            inputs.extend([
+                directory.join(".cargo/config"),
+                directory.join(".cargo/config.toml"),
+            ]);
+        }
         if let Some(home) = cargo_home
             && let Some(file) = config_file(home)
         {
-            load_file(&file, &mut Vec::new(), &mut layers)?;
+            load_file(&file, &mut Vec::new(), &mut layers, &mut inputs)?;
         }
         let mut ancestors: Vec<&Path> = current.ancestors().collect();
         ancestors.reverse();
         for directory in ancestors {
             if let Some(file) = config_file(&directory.join(".cargo")) {
-                load_file(&file, &mut Vec::new(), &mut layers)?;
+                load_file(&file, &mut Vec::new(), &mut layers, &mut inputs)?;
             }
         }
         Ok(Self {
             layers,
             cargo_home: cargo_home.map(Path::to_path_buf),
+            inputs,
         })
+    }
+
+    /// Includes absent discovery candidates and optional includes, so their creation invalidates a launch.
+    pub(crate) fn input_paths(&self) -> &[PathBuf] {
+        &self.inputs
     }
 
     pub fn incompatible_rust_versions(
@@ -376,6 +393,36 @@ fn registry_env_name(name: &str) -> String {
         .collect()
 }
 
+/// Build-selection environment, hashed so registry credentials never enter a launch record.
+/// Runtime-only guest variables remain live; rustc and build scripts validate their declared inputs.
+pub(crate) fn launch_environment() -> [u8; 32] {
+    let mut entries: Vec<_> = std::env::vars_os()
+        .filter(|(name, _)| {
+            let name = name.to_string_lossy();
+            matches!(
+                name.as_ref(),
+                "HOME"
+                    | "CARGO_HOME"
+                    | "RUSTFLAGS"
+                    | "CARGO_ENCODED_RUSTFLAGS"
+                    | "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
+            ) || name.starts_with("CARGO_REGISTRIES_")
+                || name.starts_with("CARGO_REGISTRY_")
+                || name.starts_with("CARGO_CREDENTIAL_ALIAS_")
+        })
+        .collect();
+    entries.sort();
+    let mut hash = blake3::Hasher::new();
+    for (name, value) in entries {
+        for part in [name, value] {
+            let bytes = part.as_encoded_bytes();
+            hash.update(&(bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+    }
+    *hash.finalize().as_bytes()
+}
+
 fn config_file(directory: &Path) -> Option<PathBuf> {
     let legacy = directory.join("config");
     if legacy.is_file() {
@@ -389,6 +436,7 @@ fn load_file(
     path: &Path,
     stack: &mut Vec<PathBuf>,
     layers: &mut Vec<Layer>,
+    inputs: &mut Vec<PathBuf>,
 ) -> Result<(), crate::error::Error> {
     let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if stack.contains(&identity) {
@@ -423,6 +471,7 @@ fn load_file(
         for include in includes {
             let (relative, optional) = include_value(include, path)?;
             let include_path = path.parent().unwrap_or(Path::new(".")).join(relative);
+            inputs.push(include_path.clone());
             if !include_path.is_file() {
                 if optional {
                     continue;
@@ -436,7 +485,7 @@ fn load_file(
                     )
                 ));
             }
-            load_file(&include_path, stack, layers)?;
+            load_file(&include_path, stack, layers, inputs)?;
         }
     }
     layers.push(Layer {

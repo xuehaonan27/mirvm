@@ -53,6 +53,18 @@ pub fn from_env_and_disk(root: &Path) -> Result<Vec<String>, crate::error::Error
     resolve(|k| std::env::var(k).ok(), root)
 }
 
+/// Every discovery candidate, including absent files which can later shadow the selected one.
+pub(crate) fn config_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = root
+        .ancestors()
+        .map(|dir| dir.join(".cargo/config.toml"))
+        .collect();
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join(".cargo/config.toml"));
+    }
+    paths
+}
+
 /// CARGO_ENCODED_RUSTFLAGS: split on \x1f (empty string = empty list; empty segments are
 /// filtered out harmlessly).
 fn split_encoded(v: &str) -> Vec<String> {

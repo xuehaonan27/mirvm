@@ -92,7 +92,7 @@ because that is what decides whether a tree may be deleted:
 
 | sub-root | contract | contents |
 |---|---|---|
-| `cache/` | derived; safe to delete at any time | `base/`, `deps/`, `ir/` (generational: `build_id` is the first field of every entry), `asm-stubs/`, `global-asm/`, `native-archives/`, `package-native/`, `package-heat/` |
+| `cache/` | derived; safe to delete at any time | `base/`, `deps/`, `ir/`, `execution/`, `launch/` (generational: `build_id` is the first field of every entry), `asm-stubs/`, `global-asm/`, `native-archives/`, `package-native/`, `package-heat/` |
 | `data/` | fetched or built once; expensive to lose | `registry/` (crate and git sources, read-through to `~/.cargo`), `sysroot-<host>/` (MIR-rich std) |
 | `build/` | project and session space | `scripts/` (frontmatter materialization, keyed by path), `target/mirvm` (Cargo track), `target/cargoless/` (own scheduler), `target/native` (differential builds), `sysroot-build/` |
 | `run/` | process scratch | `runtime-native/` (per-Engine copies of required native libraries) and `lower-native/` (private copies of self-produced objects) |
@@ -197,11 +197,12 @@ and records their input identity before reporting success. It does not invoke th
 enabled by default. `--no-prelower` or `MIRVM_NO_PRELOWER=1` stops after fetching and compiler
 metadata/host preparation, without producing dependency bytecode or a root execution image.
 
-Ordinary `run` resolves against locally available inputs and never fetches missing dependencies,
-even if `MIRVM_OFFLINE=0`. A missing registry entry, archive or Git checkout is an error; install
-the project first. Cached archives may be unpacked locally. Source edits and new concrete bindings
-can rebuild from installed inputs. This boundary does not yet bypass resolution and scheduling on
-an unchanged project; prepared build-plan reuse is separate startup work.
+Ordinary `run` uses locally available inputs and never fetches missing dependencies,
+even if `MIRVM_OFFLINE=0`. Preparation misses require local registry metadata and sources; absent
+required inputs report an error directing the user to install first. Cached archives may be unpacked locally. Source edits and new concrete bindings
+can rebuild from installed inputs. The own dependency track's
+[prepared launch](startup-cache-design.md#prepared-launch) bypasses resolution and scheduling when
+its input guards and bound image both validate; misses retain the local-only preparation path.
 
 For cacheable programs, the first unchanged run after successful installation must load the bound
 image without frontend or lowering work. Changes to source, lockfile, features, target/profile,

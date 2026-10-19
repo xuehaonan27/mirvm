@@ -49,13 +49,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   startup case meets its 80 ms ceiling; uncached preparation and the corpus execution gap remain.
   Current measurements belong to [current-status.md](current-status.md). Priorities follow ordinary
   end-to-end cost, in this order:
-  - Prepared startup: serde spends about 20 ms before the driver clock and 27 ms loading its image.
-    Evaluate a validated prepared-launch path that reuses the resolved build plan without repeating
-    the resolver/scheduler on unchanged inputs. Define source, manifest, lockfile, configuration,
-    build-script, toolchain and managed-generation invalidation before bypassing that work; retain
-    normal preparation as the miss path. Bound archives retain thousands of unexecuted std functions;
-    evaluate a smaller reachable image while preserving indirect targets, immutable ownership and
-    complete validation. Measure the two costs separately and the complete run together.
+  - Prepared startup: bound archives retain thousands of unexecuted std functions. Evaluate a
+    smaller reachable image while preserving indirect targets, immutable ownership and complete
+    validation. Attribute input validation and image loading separately, then measure the complete
+    run together; mutable source trees still require content reads.
   - Execution payback: flate spends about 54% of user cycles in the guest and 34% in JIT. Expensive
     functions with few entries can remain interpreted; the loop counter also discards partial
     256-backedge batches at frame exit. Evaluate own-body work and admission/publication timing,
@@ -70,9 +67,9 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     cache layout. Establish stable heat/tier selection across repeated runs and count hits, misses
     and refusals. Preserve file identities when seeding a warm-store experiment; copying packs makes
     catalogue offsets stale and invalidates the comparison.
-  - Locked resolution still decodes full registry version histories; the measured 10.42 ms resolution
-    interval is part of prepared startup above. Selective materialization remains a bounded fallback
-    if complete plan reuse is inappropriate. Preserve index validation, refresh-on-missing behavior,
+  - Locked resolution on preparation misses still decodes full registry version histories.
+    Evaluate selective materialization without requiring a reusable launch record.
+    Preserve index validation, refresh-on-missing behavior,
     source identity, checksum/yank semantics and fresh solves' full candidate sets. Parsed entries
     are already shared within a command.
   - Pack discovery enumerates family directories and decodes catalogues. Bound discovery to requested

@@ -206,12 +206,53 @@ pub(crate) fn run_driver(
     suppress_runner_warning_summary: bool,
     guest_process: Option<GuestProcessState>,
 ) -> ExitCode {
+    run_driver_inner(
+        rustc_args,
+        program_argv,
+        dump_mir,
+        vm_call,
+        vm_stats,
+        suppress_runner_warning_summary,
+        guest_process,
+        None,
+    )
+    .expect("ordinary driver always runs")
+}
+
+pub(crate) fn try_prepared_launch(
+    rustc_args: Vec<String>,
+    program_argv: Vec<String>,
+    validation: std::time::Duration,
+) -> Option<ExitCode> {
+    run_driver_inner(
+        rustc_args,
+        program_argv,
+        false,
+        None,
+        false,
+        true,
+        None,
+        Some(validation),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_driver_inner(
+    rustc_args: Vec<String>,
+    program_argv: Vec<String>,
+    dump_mir: bool,
+    vm_call: Option<String>,
+    vm_stats: bool,
+    suppress_runner_warning_summary: bool,
+    guest_process: Option<GuestProcessState>,
+    prepared: Option<std::time::Duration>,
+) -> Option<ExitCode> {
     if crate::cli::prepare_only() && crate::options::no_prelower() {
-        return ExitCode::SUCCESS;
+        return Some(ExitCode::SUCCESS);
     }
     if let Err(error) = crate::sysroot::pin_args(&rustc_args) {
         crate::diag::emit(&crate::error::Error::from(error));
-        return ExitCode::from(crate::diag::exit::FAILURE);
+        return Some(ExitCode::from(crate::diag::exit::FAILURE));
     }
     let mut diagnostic_router = match diagnostics::DiagnosticRouter::start(
         capture_directory(),
@@ -220,7 +261,7 @@ pub(crate) fn run_driver(
         Ok(router) => router,
         Err(error) => {
             crate::diag_error!(Capture, "cannot start diagnostics stream: {error}");
-            return ExitCode::from(crate::diag::exit::SOFTWARE);
+            return Some(ExitCode::from(crate::diag::exit::SOFTWARE));
         }
     };
     let t_start = std::time::Instant::now();
@@ -228,6 +269,14 @@ pub(crate) fn run_driver(
     // stack, which self-heals onto the full cold path). The lowering fingerprint
     // (ub/overflow/contract checks) can only be verified inside the session; after_analysis does.
     if !dump_mir && let Some(artifact) = crate::image::execution::lookup(&rustc_args) {
+        if let Some(validation) = prepared
+            && crate::options::timing()
+        {
+            crate::diag::instrument(format_args!(
+                "mirvm-launch: hit validation={:.3}ms",
+                validation.as_secs_f64() * 1000.0
+            ));
+        }
         diagnostic_router.seal_compiler();
         let timing = PhaseTiming {
             cache_load: Some(t_start.elapsed()),
@@ -237,15 +286,15 @@ pub(crate) fn run_driver(
             print_phase_timing(&timing, None, t_start.elapsed(), crate::diag::verbose());
             if let Err(error) = diagnostic_router.finish() {
                 crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
-                return ExitCode::from(crate::diag::exit::SOFTWARE);
+                return Some(ExitCode::from(crate::diag::exit::SOFTWARE));
             }
-            return ExitCode::SUCCESS;
+            return Some(ExitCode::SUCCESS);
         }
         if let Some(guest) = &guest_process
             && let Err(error) = guest.enter()
         {
             crate::diag::emit(&crate::error::Error::from(error));
-            return ExitCode::from(crate::diag::exit::FAILURE);
+            return Some(ExitCode::from(crate::diag::exit::FAILURE));
         }
         let t_engine = std::time::Instant::now();
         let code = run_verified_engine(
@@ -267,9 +316,16 @@ pub(crate) fn run_driver(
         }
         exit(code);
     }
+    if prepared.is_some() {
+        if let Err(error) = diagnostic_router.finish() {
+            crate::diag_error!(Capture, "cannot finish diagnostics stream: {error}");
+            return Some(ExitCode::from(crate::diag::exit::SOFTWARE));
+        }
+        return None;
+    }
     #[cfg(feature = "compiler")]
     {
-        compiler::run_miss(
+        Some(compiler::run_miss(
             rustc_args,
             program_argv,
             dump_mir,
@@ -279,11 +335,11 @@ pub(crate) fn run_driver(
             guest_process,
             diagnostic_router,
             t_start,
-        )
+        ))
     }
     #[cfg(not(feature = "compiler"))]
     {
-        super::worker::run(super::worker::RunRequest {
+        Some(super::worker::run(super::worker::RunRequest {
             rustc_args,
             program_argv,
             dump_mir,
@@ -292,7 +348,7 @@ pub(crate) fn run_driver(
             suppress_runner_warning_summary,
             guest_process,
             pack_out: None,
-        })
+        }))
     }
 }
 
