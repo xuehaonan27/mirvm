@@ -116,7 +116,9 @@ impl<'a> Compiler<'a> {
         let values = std::sync::Arc::new(reloc::Values::default());
         jb.symbol_lookup_fn({
             let values = std::sync::Arc::clone(&values);
-            Box::new(move |name: &str| reloc::lookup(&values, name))
+            Box::new(move |name: &str| {
+                c2i::target_id(name).or_else(|| reloc::lookup(&values, name))
+            })
         });
         let mut module = JITModule::new(jb);
 
@@ -301,6 +303,7 @@ impl<'a> Compiler<'a> {
             context: None,
             c2i,
             pending_callees: std::collections::HashMap::new(),
+            c2i_templates: std::collections::HashMap::new(),
             call_main_catch,
             unreachable,
             memmove,

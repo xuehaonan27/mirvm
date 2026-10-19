@@ -382,7 +382,7 @@ impl<'a> Compiler<'a> {
     /// A frame without an FDE is a frame an unwind passes over, so a definition that has none is not
     /// published at all: the callers treat it like a failed definition and the function stays
     /// interpreted, which is the semantic reference.
-    fn registrable_unwind(
+    pub(super) fn registrable_unwind(
         &self,
         cctx: &cranelift_codegen::Context,
     ) -> Option<cranelift_codegen::isa::unwind::UnwindInfo> {
@@ -495,81 +495,6 @@ impl<'a> Compiler<'a> {
             );
             jit.slots_for(self.domain).slots[func as usize].store(FAIL_SENTINEL, Ordering::Release);
         }
-    }
-
-    /// c2i trampoline: fast signature, packs the arguments into a stack array, calls
-    /// `mirvm_c2i` back into the interpreter. The definition stays unpublished until its caller
-    /// batch is finalized. A failure prevents publishing callers that would reach an empty slot.
-    pub(super) fn define_c2i_trampoline(
-        &mut self,
-        target: u32,
-        abi: CalleeAbi,
-    ) -> Option<PendingJitSymbol> {
-        let sig = self.fast_sig(abi);
-        let id = self
-            .module
-            .declare_function(&format!("t{target}"), Linkage::Local, &sig)
-            .unwrap();
-        let mut cctx = self.take_context();
-        cctx.func.signature = sig;
-        {
-            let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
-            let entry = b.create_block();
-            b.append_block_params_for_function_params(entry);
-            b.switch_to_block(entry);
-            let params = b.block_params(entry).to_vec();
-            let args_ss = b.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                (abi.nparams.max(1) * 8) as u32,
-                3,
-            ));
-            for (i, p) in params.iter().enumerate() {
-                b.ins().stack_store(*p, args_ss, (i * 8) as i32);
-            }
-            let ret_ss =
-                b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
-            let fref = self.module.declare_func_in_func(self.c2i, b.func);
-            let fv = b.ins().iconst(types::I64, target as i64);
-            let ap = b.ins().stack_addr(types::I64, args_ss, 0);
-            let nv = b.ins().iconst(types::I64, abi.nparams as i64);
-            let rp = b.ins().stack_addr(types::I64, ret_ss, 0);
-            b.ins().call(fref, &[fv, ap, nv, rp]);
-            // mirvm_c2i always writes both the (lo, hi) slots (helpers.rs); read back
-            // according to this callee's return shape.
-            match abi.nrets {
-                0 => {
-                    b.ins().return_(&[]);
-                }
-                1 => {
-                    let lo = b.ins().stack_load(types::I64, ret_ss, 0);
-                    b.ins().return_(&[lo]);
-                }
-                _ => {
-                    let lo = b.ins().stack_load(types::I64, ret_ss, 0);
-                    let hi = b.ins().stack_load(types::I64, ret_ss, 8);
-                    b.ins().return_(&[lo, hi]);
-                }
-            }
-            b.seal_all_blocks();
-            b.finalize();
-        }
-        if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if crate::options::jit_debug() {
-                crate::diag_debug!(Jit, "define_function failed: {e:#?}");
-            }
-            return None;
-        }
-        self.pending_unwind
-            .push((id, self.registrable_unwind(&cctx)?, None));
-        let size = cctx.compiled_code()?.code_buffer().len() as u64;
-        let symbol = PendingJitSymbol {
-            id,
-            func: target,
-            role: JitSymbolRole::C2i,
-            size,
-        };
-        self.recycle_context(cctx);
-        Some(symbol)
     }
 
     /// Fast body: bytecode blocks -> CLIF, slots -> SSA variables under the "I64

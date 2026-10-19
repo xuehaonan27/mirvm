@@ -51,17 +51,24 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   profile-driven:
   - Execution profiles prioritize interpreter statement/block cost and JIT compile throughput.
     On the focused flate2 input, statements, the block loop and residual operand/address evaluation
-    account for about 33% of user cycles, and the JIT worker for 35% on image hits. Price further
+    account for about 35% of user cycles, and the JIT worker for 34% on image hits. Price further
     dispatch savings against instruction growth: measured interpreter text is 64,593 bytes. Keep
-    small-input engine/process variance visible and qualify gains beyond flate2. Serde's latest
-    engine median regresses even though its whole-process median improves; the interval outside
-    the driver ledger needs attribution. Evaluate reuse of compatible C2I code generation by ABI
-    shape, preserving per-callee identity and unwind records; register allocation and verification
-    remain costs to avoid repeating, not checks to disable. Measure selective inlining,
+    small-input engine/process variance visible. Faster compilation under the strict policy has not
+    established ordinary-run savings: flate's engine/process medians regress 2.3% / 3.7% with the
+    same compilation set. Attribute the regression and publication timing before changing admission
+    thresholds. Register allocation and verification remain costs to avoid repeating, not checks to
+    disable. Measure selective inlining,
     PLT dispatch, frame setup and compiled/interpreted transitions on call-heavy workloads. Account for
     code growth as well as latency; preserve pre-frame stack checking, every return safepoint,
     unwind metadata, plain/trace isolation and persisted JIT reload behavior. Use alternating
     whole-run and engine measurements, including a non-recursive workload.
+  - Locked dependency resolution still decodes the full version history of each registry crate.
+    Serde spends a 10.42 ms median in resolution before the driver clock; index-entry lookup beneath
+    feature unification accounts for 9.08% of total user CPU cycles. Evaluate selective materialization
+    of locked versions while preserving index validation, refresh-on-missing behavior, source identity,
+    checksum/yank semantics and the full candidate set for fresh solves. Parsed entries are already
+    shared within a command. Keep pre-driver, image-load and process-entry/exit intervals separate;
+    dependency scheduling itself is only about 1.23 ms in this prepared-image case.
   - Pack discovery still enumerates each family directory and decodes its catalogue. This work grows
     with the store even though record reads open only selected packs. Network-backed stores retain
     variable I/O latency on a bound-image miss; bound discovery to requested content without weakening recovery.

@@ -59,6 +59,8 @@ struct Compiler<'a> {
     c2i: ClifFuncId,
     /// Defined trampolines that no successful caller has published yet.
     pending_callees: std::collections::HashMap<u32, PendingJitSymbol>,
+    /// Unrelocated code for each flattened signature, private to this module's ISA and imports.
+    c2i_templates: std::collections::HashMap<(usize, usize), c2i::Template>,
     call_main_catch: ClifFuncId,
     unreachable: ClifFuncId,
     /// Host memmove/memset channel used by Copy and frame zeroing.
@@ -153,6 +155,7 @@ struct PendingJitSymbol {
 mod lsda;
 pub(crate) use lsda::*;
 
+mod c2i;
 mod imports;
 mod symbols;
 mod trace;
@@ -373,8 +376,10 @@ pub(super) fn worker(
         work.report(publishing.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
     }
     // Scratch belongs to the worker, not to the published code's process-long lifetime.
-    baseline.context = None;
-    optimized.context = None;
+    for compiler in [&mut baseline, &mut optimized] {
+        compiler.context = None;
+        compiler.c2i_templates = Default::default();
+    }
     // Published JIT code may still be live on a sleeping stack in the process-wide
     // thread pool. Teardown has to join the compile thread rather than race libc
     // cleanup, and it must not destruct the JITModules either, since that would unmap

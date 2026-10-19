@@ -140,6 +140,15 @@ an early failure drops the in-use context. Clearing removes per-definition state
 scratch capacity. Worker shutdown releases that capacity independently of the published code's
 process-long lifetime. Scratch reuse must leave canonical artifact bytes unchanged.
 
+C2I backend output is reused by flattened parameter and return word counts within one compiler.
+The compiler fixes the ISA, flags, tier, code domain and helper imports; sret and indirect arguments
+are already represented in those word counts. The first definition runs the normal verifier and
+backend, retaining unrelocated bytes, alignment, relocations and the unwind program. Each callee
+gets an arena-owned copy with its integer ID rebound through a module relocation and local code
+references rebound to that copy. Finalization registers an independent unwind record for each
+address. Worker shutdown frees the templates without releasing published code or unwind records.
+Templates are process-local scratch and are not part of the persistent artifact format.
+
 A fresh compile defines the body, packed entry and missing C2I trampolines in one finalization
 batch. Relocation, executable protection and unwind registration finish before publishing any
 callee slots, followed by the caller's fast and packed slots. A stored entry links and validates its
