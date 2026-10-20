@@ -9,6 +9,9 @@ use crate::vm::archive::{Image, VerifiedArtifact, bytes::Bytes, functions, meta}
 #[cfg(any(feature = "compiler", test))]
 use crate::vm::{instance::Instance, ir::Module};
 
+#[cfg(any(feature = "compiler", test))]
+mod reachable;
+
 #[derive(Serialize, Deserialize)]
 struct Header {
     build_id: String,
@@ -165,6 +168,16 @@ fn encode(
             format!("cannot encode execution-image functions: {error}")
         )
     })?;
+    if crate::options::timing() {
+        let live = reachable::functions(module, instance);
+        crate::diag::instrument(format_args!(
+            "mirvm-image-store: slots={} reachable={} metadata={}B code={}B",
+            live.len(),
+            live.iter().filter(|keep| **keep).count(),
+            metadata.len(),
+            functions.len()
+        ));
+    }
     bytes.reserve(metadata.len() + rkyv::AlignedVec::ALIGNMENT - 1 + functions.len() + 32);
     bytes.extend(metadata);
     bytes.resize(bytes.len().next_multiple_of(rkyv::AlignedVec::ALIGNMENT), 0);

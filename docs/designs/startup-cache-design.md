@@ -162,6 +162,14 @@ The nested `mirvm-image-instance` ledger separates instance restoration, semanti
 lazy function-table initialization within `instantiate-verify`. Its intervals must not be added to
 the enclosing load ledger. A successful instance check can precede a later materialization failure.
 
+During publication, the same option emits `mirvm-image-roots` and `mirvm-image-store`: distinct
+conservative roots, total/reachable function slots, metadata bytes and function-archive bytes. The
+census roots the ordinary entry, all address-taken functions and native callbacks, allocator shims
+and panic cleanup, then follows direct calls and shared bodies' concrete call adapters. It borrows
+archive views without filling body decode cells. An artifact without an ordinary entry retains every
+function in this census. These diagnostics do not prune images or alter the exported-function table;
+static reachability and actual execution frequency are separate measurements.
+
 ## Immutable verification
 
 The loader owns one immutable byte snapshot. Archive bounds, discriminants, lengths and semantic

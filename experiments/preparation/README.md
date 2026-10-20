@@ -53,6 +53,13 @@ the recorded cycle period. Unknown frames remain visible: symbols cannot reconst
 unwinding. These instrumented runs identify CPU work, not normal elapsed latency or I/O waits; keep
 them separate from the comparison above and builds/checks.
 
+To distinguish functions that were not executed from functions safe to remove, install an input
+with `MIRVM_TIMING=1`. `mirvm-image-roots` counts conservative entry/address-taken roots;
+`mirvm-image-store` reports their transitive function closure and the metadata/code section sizes.
+This walk includes native callbacks, allocator/panic roots and concrete generic call adapters, and
+does not decode archived bodies or prune anything. A closure covering every slot rules out simple
+static function pruning for that input; it does not imply every function executes during the run.
+
 For a local attribution probe, copy the candidate source to a separate checkout without `.git`,
 then select a cached JSON-lines registry index file:
 
