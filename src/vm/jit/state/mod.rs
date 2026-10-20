@@ -290,18 +290,29 @@ impl JitState {
     }
 
     /// Record interpreted loop iterations for one function and ask for it to be compiled when the
-    /// count first crosses [`ITERATION_REQUEST`]. Batching is the caller's: one atomic per batch keeps
-    /// this off the interpreter's hot path. A request already answered is a no-op at the worker, so
-    /// the crossing is the only filter this needs.
+    /// count first crosses [`ITERATION_REQUEST`]. Batching is the caller's. Ordinary admission
+    /// saturates at the threshold; the work policy keeps sparse retries without wrapping the count.
     pub fn note_iterations(&self, func: u32, count: u32) {
         let Some(slot) = self.iterations.get(func as usize) else {
             return;
         };
-        let prev = slot.fetch_add(count, Ordering::Relaxed);
-        if (prev < ITERATION_REQUEST || self.work.as_ref().is_some_and(|work| work.enforce))
-            && prev / ITERATION_REQUEST < prev.saturating_add(count) / ITERATION_REQUEST
-        {
-            self.request_compile(func);
+        let limit = if self.work.as_ref().is_some_and(|work| work.enforce) {
+            u32::MAX
+        } else {
+            ITERATION_REQUEST
+        };
+        let mut prev = slot.load(Ordering::Relaxed);
+        while prev < limit {
+            let next = prev.saturating_add(count).min(limit);
+            match slot.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => {
+                    if prev / ITERATION_REQUEST < next / ITERATION_REQUEST {
+                        self.request_compile(func);
+                    }
+                    return;
+                }
+                Err(observed) => prev = observed,
+            }
         }
     }
 

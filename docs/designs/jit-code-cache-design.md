@@ -295,12 +295,14 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    `ITERATION_REQUEST` back edges in. The call count is the right question for a body whose work is its
    calls, and the wrong one for a body whose work is a loop — the entry function of a program is called
    once and can loop for the whole run — so the interpreter reports its back edges to `JitState` in
-   batches and enough of them raise the same request. The batch keeps the report off the hot path, and
-   the iteration count is what distinguishes work worth compiling from a body that is merely entered
-   often: on the corpus drivers, compiling a body after its second call moved flate2, brotli and
-   tiny_skia by -22%/-41%/-14% of wall time but cost rayon 8%, because its sort is thousands of
-   single-shot small loop bodies, while the iteration rule keeps those three (-22%/-11%/-19%) and
-   leaves rayon where it was.
+   batches of 256 and enough of them raise the same request. Each invocation reports its remaining
+   partial batch on return or unwind, including cleanup execution, so repeated short loops retain
+   their evidence. Ordinary loop admission saturates at 65,536 reported backedges and only the
+   crossing thread requests compilation; the experimental work policy retains sparse retries with
+   a saturating counter. JIT-disabled execution reports nothing. The batch keeps the report off the
+   hot path. Backedge count is an activity heuristic: it does not price a body's own work, predict
+   remaining calls or transfer a running frame into compiled code. Measured payback belongs in
+   [current-status.md](../current-status.md), rather than in the admission contract.
    Ordinary interpreted calls accumulate in one byte per function in the thread's `Ctx`, then fold
    into the Engine's atomic admission counter in batches of at most 64. A final batch shrinks to the
    remaining threshold, preserving the exact single-thread trigger. Concurrent threads can each

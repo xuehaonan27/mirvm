@@ -12,6 +12,37 @@ use crate::vm::ir::CallRole;
 use crate::vm::semantics::builtin::exec_builtin;
 use crate::vm::unwind::guarding_terminate;
 
+/// Report full batches during execution and keep the final partial batch on return or unwind.
+/// The counter belongs to this invocation, so nested guest calls do not charge their caller.
+struct Iterations<'a> {
+    jit: &'a crate::vm::jit::JitState,
+    func: u32,
+    pending: u32,
+}
+
+impl Iterations<'_> {
+    #[inline]
+    fn back_edge(&mut self) {
+        self.pending += 1;
+        if self.pending == 256 {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.pending != 0 && self.jit.enabled {
+            self.jit.note_iterations(self.func, self.pending);
+        }
+        self.pending = 0;
+    }
+}
+
+impl Drop for Iterations<'_> {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 pub(super) fn run_blocks(
     ctx: *mut Ctx,
     func: u32,
@@ -29,10 +60,11 @@ pub(super) fn run_blocks(
         .and_then(|_| unsafe { &(*ctx).shared.jit }.work.as_ref()?.sample(func));
 
     let mut blk = entry as usize;
-    // Back edges to count before the compile policy hears about them. One atomic per batch keeps the
-    // count off the loop's hot path; the count itself is a local.
-    const ITERATION_BATCH: u32 = 256;
-    let mut iterations = 0u32;
+    let mut iterations = Iterations {
+        jit: unsafe { &(*ctx).shared.jit },
+        func,
+        pending: 0,
+    };
     loop {
         let current = blk;
         let block: &Block = &blocks[blk];
@@ -437,11 +469,78 @@ pub(super) fn run_blocks(
             if let Some(work) = &mut work {
                 work.resume();
             }
-            iterations += 1;
-            if iterations == ITERATION_BATCH {
-                iterations = 0;
-                crate::vm::jit::note_interpreted_iterations(ctx, func, ITERATION_BATCH);
+            iterations.back_edge();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Iterations;
+    use crate::vm::jit::{ITERATION_REQUEST, JitState};
+
+    #[test]
+    fn short_invocations_and_unwinds_accumulate_without_an_early_request() {
+        let mut jit = JitState::new(1);
+        jit.enabled = true;
+        jit.work = None;
+        let (tx, rx) = std::sync::mpsc::channel();
+        *jit.queue.lock().unwrap() = Some(tx);
+        for _ in 0..ITERATION_REQUEST / 255 {
+            let mut iterations = Iterations {
+                jit: &jit,
+                func: 0,
+                pending: 0,
+            };
+            for _ in 0..255 {
+                iterations.back_edge();
             }
+        }
+        assert!(rx.try_recv().is_err());
+        // 257 invocations left 65,535 edges; an unwinding frame contributes the last one.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut iterations = Iterations {
+                jit: &jit,
+                func: 0,
+                pending: 0,
+            };
+            iterations.back_edge();
+            panic!("unwind the interpreted frame");
+        }));
+        assert!(result.is_err());
+        assert_eq!(rx.try_recv().unwrap().func, 0);
+        for _ in 0..1024 {
+            let mut iterations = Iterations {
+                jit: &jit,
+                func: 0,
+                pending: 0,
+            };
+            iterations.back_edge();
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn long_invocation_reports_before_return_and_disabled_jit_never_requests() {
+        for enabled in [true, false] {
+            let mut jit = JitState::new(1);
+            jit.enabled = enabled;
+            jit.work = None;
+            let (tx, rx) = std::sync::mpsc::channel();
+            *jit.queue.lock().unwrap() = Some(tx);
+            let mut iterations = Iterations {
+                jit: &jit,
+                func: 0,
+                pending: 0,
+            };
+            for _ in 0..ITERATION_REQUEST - 1 {
+                iterations.back_edge();
+            }
+            assert!(rx.try_recv().is_err());
+            iterations.back_edge();
+            assert_eq!(rx.try_recv().is_ok(), enabled);
+            drop(iterations);
+            assert!(rx.try_recv().is_err());
         }
     }
 }

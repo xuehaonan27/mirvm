@@ -49,14 +49,14 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   startup case meets its 80 ms ceiling; uncached preparation and the corpus execution gap remain.
   Current measurements belong to [current-status.md](current-status.md). Priorities follow ordinary
   end-to-end cost, in this order:
-  - Prepared startup: bound archives retain thousands of unexecuted std functions. Evaluate a
-    smaller reachable image while preserving indirect targets, immutable ownership and complete
-    validation. Attribute input validation and image loading separately, then measure the complete
-    run together; mutable source trees still require content reads.
-  - Execution payback: flate spends about 54% of user cycles in the guest and 34% in JIT. Expensive
-    functions with few entries can remain interpreted; the loop counter also discards partial
-    256-backedge batches at frame exit. Evaluate own-body work and admission/publication timing,
-    including the cost of observing that work. The four-function first-entry probes do not establish
+  - Prepared startup: a conservative entry/address-taken closure covers every function in the
+    measured small and serde images. Static function pruning alone cannot shrink them. Evaluate
+    denser storage or demand loading with immutable ownership and validation before execution;
+    quantify decoding/verification and publication costs as well as whole-process latency.
+    Attribute input validation separately; mutable source trees still require content reads.
+  - Execution payback: flate spends about 58% of user cycles in the guest and 33% in JIT. Expensive
+    functions with few entries remain interpreted even with complete backedge accounting. Evaluate
+    own-body work and admission/publication timing, including the cost of observing that work. The four-function first-entry probes do not establish
     a default-configuration speedup; avoid a blanket threshold reduction or synchronous compilation.
     Price saved interpretation against compilation, queueing, publication and code growth, retaining
     pre-frame stack checks, return safepoints, unwind metadata and plain/trace isolation. Register

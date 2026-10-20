@@ -52,6 +52,63 @@ fn call_admission_stops_at_the_threshold_without_wrapping() {
 }
 
 #[test]
+fn loop_admission_saturates_and_work_policy_retries_without_overflow() {
+    for enforce in [false, true] {
+        let mut j = JitState::new(1);
+        j.work = Some(super::WorkLedger::new(1, enforce, false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        *j.queue.lock().unwrap() = Some(tx);
+        j.note_iterations(0, super::ITERATION_REQUEST - 1);
+        assert!(rx.try_recv().is_err());
+        j.note_iterations(0, 1);
+        assert_eq!(rx.try_recv().unwrap().func, 0);
+        j.work.as_ref().unwrap().release(0);
+        j.note_iterations(0, super::ITERATION_REQUEST);
+        assert_eq!(rx.try_recv().is_ok(), enforce);
+        j.note_iterations(0, u32::MAX);
+        assert_eq!(
+            j.iterations[0].load(Ordering::Relaxed),
+            if enforce {
+                u32::MAX
+            } else {
+                super::ITERATION_REQUEST
+            }
+        );
+        j.note_iterations(0, u32::MAX);
+        assert_eq!(
+            j.iterations[0].load(Ordering::Relaxed),
+            if enforce {
+                u32::MAX
+            } else {
+                super::ITERATION_REQUEST
+            }
+        );
+    }
+}
+
+#[test]
+fn concurrent_loop_batches_cross_the_request_point_once() {
+    let mut j = JitState::new(1);
+    j.work = None;
+    let (tx, rx) = std::sync::mpsc::channel();
+    *j.queue.lock().unwrap() = Some(tx);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                for _ in 0..super::ITERATION_REQUEST / 128 {
+                    j.note_iterations(0, 128);
+                }
+            });
+        }
+    });
+    assert_eq!(rx.try_iter().count(), 1);
+    assert_eq!(
+        j.iterations[0].load(Ordering::Relaxed),
+        super::ITERATION_REQUEST
+    );
+}
+
+#[test]
 fn concurrent_calls_request_admission_once() {
     let mut j = JitState::new(1);
     j.threshold = 1000;

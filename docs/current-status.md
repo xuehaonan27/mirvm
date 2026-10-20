@@ -264,6 +264,23 @@ The preparation contract's 126 assertions, 43 related scheduler/build-script/con
 all-target/all-feature Clippy and 14 source-boundary checks pass. The complete runtime suite is not
 part of this validation.
 
+Bound-image diagnostics distinguish unexecuted functions from statically unreachable functions.
+The conservative closure starts at the program entry, all address-taken/native callback entries,
+allocator shims and panic cleanup, then follows direct calls and concrete generic call adapters.
+It borrows archived bodies without demand decoding. The measured images have no removable function
+under this rule; retaining every export as a root is not the cause:
+
+| Input | Distinct roots | Reachable / total functions | Metadata bytes | Function archive bytes |
+|---|---:|---:|---:|---:|
+| Small entry / fib(32) | 179 | 9,740 / 9,740 | 3,055,790 | 18,157,428 |
+| Many generic instances | 179 | 9,867 / 9,867 | 3,070,648 | 18,237,328 |
+| serde JSON | 206 | 11,127 / 11,127 | 3,566,028 | 20,906,688 |
+| flate2, 2 KiB | 200 | 10,999 / 10,999 | 3,462,231 | 21,694,332 |
+
+Simple conservative function pruning cannot reduce these images. Denser storage or demand loading
+needs a separate design that preserves immutable ownership and validation before execution. No
+pruning, export filtering, weaker validation or format change is enabled by the census.
+
 A separate cache matrix uses five rotating rounds per workload, with native stdout agreement and
 fixed per-workload heat snapshots. Prepared IR, installed dependencies and OS caches remain. Cold JIT
 starts with an empty machine-code store; warm JIT uses three ordinary prior runs and retains pack
@@ -284,10 +301,12 @@ persistence, without a process-latency gain. A separate diagnostic ledger links 
 205 functions in 47.72 ms. These ledger intervals are instrumented and overlap guest execution;
 they do not partition wall time. A cache hit is not evidence of cheaper execution.
 
-A fresh flate CPU capture contains 5,560 samples over twelve processes with no lost samples. Guest,
-JIT and main-thread shares are 54.44%, 33.76% and 11.66%; the block loop and complex statement
-handler alone consume 28.99% of total user cycles. Sampling uses `cycles:u` at 1999 Hz, DWARF stacks
-and PID-specific JIT maps. It excludes kernel work and I/O/scheduling waits.
+Separate persistence-disabled flate CPU captures contain 5,684 baseline and 5,577 candidate
+samples over fifteen fresh processes each, with no lost samples. Guest / JIT / main-thread shares
+are 56.29% / 33.99% / 9.63% in the baseline and 57.61% / 32.97% / 9.31% in the candidate. The block
+loop and complex statement handler consume 31.38% of candidate user cycles. Total sampled cycles
+are 9.351 / 9.474 billion: the profiles establish no CPU-work reduction. Sampling uses `cycles:u`
+at 1999 Hz, DWARF stacks and PID-specific JIT maps. It excludes kernel work and I/O/scheduling waits.
 
 A diagnostic interpreter census attributes statements and terminators to guest functions. The first
 ordinary flate run executes 8,554,170 such units; these counts are not CPU time. Four functions own
@@ -305,25 +324,43 @@ Across three runs, observed interpreted work after publication of the same funct
 OSR opportunity estimate. Instrumentation changes scheduling. These observations nominate admission
 candidates; they do not establish that compiling them will repay its cost.
 
-Two diagnostic binaries request those four functions on first entry. One waits for publication;
-the other continues interpreting asynchronously. Compilation, selection and waiting costs remain
-inside the engine and process clocks. Ten alternating pairs per flate configuration give baseline /
-probe medians:
+Loop admission retains partial batches on return and unwind, saturates the ordinary counter at
+its request threshold and prevents concurrent duplicate crossings. `short-loop-heat` makes 600
+calls of a 128-iteration loop with the call threshold raised to one million: its native result is
+4,876,800, and it now publishes the loop body where the baseline does not. The ordinary thresholds,
+asynchronous worker, tier selection and disabled-by-default work policy remain unchanged.
 
-| First-entry policy | Persistence | Engine | Complete process | Child CPU |
-|---|---|---:|---:|---:|
-| Wait for publication | Disabled | 100.45 / 102.85 ms | 167.78 / 176.86 ms | 173.02 / 198.70 ms |
-| Wait for publication | Enabled, empty | 123.55 / 124.00 ms | 192.89 / 199.85 ms | 185.34 / 209.28 ms |
-| Continue interpreting | Disabled | 98.70 / 88.00 ms | 169.27 / 154.25 ms | 179.73 / 190.46 ms |
-| Continue interpreting | Enabled, empty | 115.25 / 114.70 ms | 180.82 / 189.55 ms | 195.28 / 186.22 ms |
+A Linux x86_64 release comparison against `29dc40f` uses ten alternating pairs per workload and
+configuration, the lightweight CLI with its matching worker, native stdout agreement, prepared
+images, warm filesystem caches and three priming runs. Per-workload heat snapshots are restored
+outside the clocks. Persistent JIT entries remain populated in the default configuration and are
+disabled in the control. Process measurements are uninstrumented and exclude neither startup nor
+shutdown. Builds, correctness checks and CPU sampling do not overlap them; shared-host load is
+uncontrolled. Medians in milliseconds are baseline / candidate:
 
-Waiting fails to improve either configuration and raises CPU 13–15%. Separate CPU captures show
-25.7% fewer guest user cycles but 25.3% more JIT user cycles; waiting also changes the critical path.
-Asynchronous admission improves all ten no-persistence engine pairs and eight process pairs, at
-6.0% more CPU. With persistence enabled, only five of ten engine/process pairs improve. This batch
-also contains large non-CPU stalls and variation on serde, where none of the four functions is
-selected. It establishes no general admission policy or persistence-enabled speedup. The
-workload-specific selectors remain diagnostic artifacts; production policy is unchanged.
+| Workload | Default JIT process | Change | Persistence disabled process | Change |
+|---|---:|---:|---:|---:|
+| Small entry | 36.84 / 38.50 | +4.5% | 36.92 / 33.42 | -9.5% |
+| fib(32) | 49.16 / 52.54 | +6.9% | 53.21 / 51.84 | -2.6% |
+| Many generic instances | 111.48 / 110.48 | -0.9% | 116.69 / 111.12 | -4.8% |
+| serde JSON | 62.93 / 56.46 | -10.3% | 59.99 / 59.61 | -0.6% |
+| flate2, 2 KiB | 132.22 / 132.14 | -0.1% | 131.04 / 125.46 | -4.3% |
+
+This is an accounting correction, not an established general speedup. Default flate is unchanged;
+its child CPU medians are 120.80 / 119.24 ms. The persistence-disabled flate candidate wins eight of
+ten pairs but child CPU is 154.40 / 155.19 ms. The apparent default serde median improvement has
+only five winning pairs. Small-entry/fib changes reverse direction between configurations. Separate
+no-persistence ledgers each compile 205 functions with identical 20,398-byte body totals;
+`compress_normal`, `init_tree` and `compress_stored` still receive no requests. Body work, not
+backedge count alone, remains the admission question. Workload-specific first-entry selectors also
+fail to establish persistence-enabled payback; they are diagnostic probes, not production policy.
+
+The focused validation has 27 image/iteration/JIT-state unit checks, the short-loop publication
+regression, panic/thread/uncaught-payload outcomes, 29 prepared-launch scenarios, both CLI Clippy
+configurations, the compiler-independent runtime build and 14 source-boundary checks. The
+`main-panic-jit` case exits with the expected 101 but its hard-coded std mangled-symbol pattern
+fails in both baseline and candidate; that assertion is not reported as passing. The full runtime
+suite is outside this validation.
 
 Program-miss profiles retain image absorption's symbol-table copying/hashing, compiler metadata
 allocation and semantic verification. Intermittent non-CPU waits remain unresolved under D7.
