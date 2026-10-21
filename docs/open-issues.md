@@ -54,10 +54,11 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     denser storage or demand loading with immutable ownership and validation before execution;
     quantify decoding/verification and publication costs as well as whole-process latency.
     Attribute input validation separately; mutable source trees still require content reads.
-  - Execution payback: the full 100 KiB flate driver retains about 33.5% of sampled self cycles in
-    interpretation and 7.5% in guest dispatch/C2I transitions. Attribute the owning functions,
-    bytecode operations and frame traffic before choosing the next change. Compiled aggregate
-    extraction and short load helpers remain visible; evaluate scalar promotion with aliasing,
+  - Execution payback: the full 100 KiB flate driver retains about 31.9% of sampled self cycles in
+    interpretation and 3.4% in guest dispatch. Attribute bytecode operations and frame traffic in
+    tree initialization, slice filling, symbol sorting and checksum reduction, separately from
+    active invocations that outlive publication. Compiled aggregate extraction and short load
+    helpers together retain about 17%; evaluate scalar promotion with aliasing,
     stack checks, return safepoints, unwind metadata, cache identity and plain/trace isolation intact.
     Attribute remaining interpreted work and publication
     timing separately: a compiled body cannot replace an active interpreted invocation without OSR.
@@ -66,11 +67,10 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     threshold reduction or synchronous compilation. Register allocation and verification are costs
     to avoid repeating, not checks to disable. Rayon's delayed publication and compiled/interpreted
     transitions need the same accounting. OSR remains deferred.
-  - Persistent JIT payback: the populated store reduces CPU in the 2 KiB flate control without
-    improving its process latency.
-    Attribute selected-pack reads, relocation/finalization and prelink scheduling before changing
-    cache layout. Establish stable heat/tier selection across repeated runs and count hits, misses
-    and refusals. Preserve file identities when seeding a warm-store experiment; copying packs makes
+  - Persistent JIT payback: attribute selected-pack reads, relocation/finalization and prelink
+    scheduling before changing cache layout. Publication can still miss a hot invocation's entry
+    even when the heat order is stable. Quantify tier selection, hits, misses and refusals across
+    repeated runs. Preserve file identities when seeding a warm-store experiment; copying packs makes
     catalogue offsets stale and invalidates the comparison.
   - Locked resolution on preparation misses still decodes full registry version histories.
     Evaluate selective materialization without requiring a reusable launch record.
@@ -165,7 +165,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   (`src/os/macos/`, `src/os_arch/macos_aarch64/`, `src/arch/aarch64/`, selected by the `#[cfg]`
   ladders) with focused runtime and NEON/CRC native differentials, but no dedicated platform
   `Makefile` target or CI gate. Full lifecycle, JIT memory-policy and unwinding coverage remains
-  required before claiming the same baseline.
+  required before claiming the same baseline. Persistent-JIT AArch64 relocations remain incomplete;
+  the full serde JSON control reaches unsupported inline assembly in `zmij::write` on macOS.
 - **E32** `ACCEPTED`: inline-asm setjmp/longjmp captured-frame memory reuse hazard. The capture point
   sits in the asm-stub wrapper frame, and the interpreter frame's synthetic protocol can collide when
   that host stack memory is reused between capture and restore (confirmed by a v2 spike; the boundary

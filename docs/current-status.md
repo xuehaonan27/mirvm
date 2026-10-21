@@ -339,56 +339,79 @@ rustc otherwise disables that pass at LLVM optimization level 0, leaving many it
 arithmetic wrappers as guest calls. Profile check settings remain unchanged. The producer contract
 is in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
 
-A Linux x86_64 release comparison against `4bd9450` uses the full compiler-linked CLI, original
-corpus inputs and native release stdout agreement. Seven alternating pairs retain populated JIT
-entries; five pairs disable persistence. Each measurement starts a fresh process with prepared
-images and warm filesystem caches. Each binary selects its matching installed managed sysroot;
-file identities and integrity validation remain intact. Per-workload heat snapshots are restored
-outside the clocks. Preparation, diagnostic ledgers, builds, tests and sampling are outside timed
-runs. Shared-host scheduling and storage are uncontrolled. Medians in milliseconds are baseline /
-candidate:
+A Linux x86_64 release comparison against `2a380a9` uses the full compiler-linked CLI, original
+corpus inputs and native release stdout agreement on every run. Nine alternating pairs retain
+populated JIT entries and naturally evolving heat records after four warmups per workload/binary;
+five pairs disable persistence and start each run with empty heat. Each measurement starts a fresh
+process with prepared images and warm filesystem caches. Both binaries use the same installed
+managed sysroot. File identities and integrity validation remain intact. Preparation, diagnostic
+ledgers, builds, tests and sampling are outside timed runs. Shared-host scheduling and storage are
+uncontrolled. Medians in milliseconds are baseline / candidate:
 
 | Workload | Default JIT process | Default JIT child CPU | Persistence disabled process |
 |---|---:|---:|---:|
-| Empty program | 36.41 / 47.32 | 28.68 / 24.31 | 55.03 / 47.01 |
-| Corpus fib (0 through 9) | 39.91 / 33.57 | 29.45 / 24.35 | 37.66 / 44.17 |
-| HashMap | 55.46 / 49.76 | 34.84 / 26.93 | 43.06 / 44.25 |
-| Strings | 58.72 / 55.87 | 35.69 / 25.96 | 43.31 / 56.88 |
-| serde JSON | 85.38 / 79.23 | 57.09 / 40.85 | 81.97 / 66.75 |
-| Full flate2, approximately 100 KiB | 1471.17 / 457.43 | 1327.81 / 386.13 | 1492.92 / 455.56 |
+| Empty program | 59.14 / 36.82 | 28.09 / 23.81 | 45.12 / 35.90 |
+| Corpus fib (0 through 9) | 53.78 / 44.66 | 28.55 / 30.05 | 49.90 / 39.13 |
+| HashMap | 45.79 / 48.60 | 32.26 / 30.34 | 40.95 / 54.25 |
+| Strings | 43.42 / 45.52 | 28.02 / 25.51 | 52.81 / 51.81 |
+| serde JSON | 75.44 / 76.19 | 50.80 / 49.03 | 68.32 / 78.88 |
+| Full flate2, approximately 100 KiB | 390.66 / 338.52 | 366.26 / 310.38 | 456.18 / 465.22 |
 
-Full flate2 improves in all seven default pairs and all five persistence-disabled pairs: 3.22x /
-3.28x process speedup, with child CPU reductions of 70.9% / 66.7%. Default ledgers link 542 / 169
-bodies and compile none; linked code falls from 294,885 to 190,671 bytes. Serde wins six of seven
-default process pairs, with 28.4% less child CPU. Small controls have lower CPU medians but mixed
-wall-clock results, including an empty-program regression. The corpus fib is not the fib(32)
-timing case. These results do not establish a universal cold-start or cold-filesystem speedup.
+Full flate2 improves in eight of nine default process pairs and all nine CPU pairs: 13.3% less
+process time and 15.3% less child CPU. With persistence disabled, child CPU changes only from
+501.86 to 496.06 ms, and process latency does not improve. Small controls have mixed wall-clock
+results. The corpus fib is not the fib(32) timing case. These results establish a populated-cache
+execution gain, not a universal first-run or cold-filesystem speedup.
+
+Successful prelinks remain in the next heat order, and an unchanged order is not republished.
+The full-flate order stays at 169 functions across all nine candidate runs; the baseline alternates
+between 61 and 163. A separate instrumented census finds that more than 99.8% of about 2.59 million
+C2I calls already have compiled targets, chiefly scalar comparisons and drop glue. Ordinary direct
+guest calls with cleanup now use the domain's fast slot and existing exception tables. A separate
+default diagnostic run counts 2,396,647 / 3,497 C2I calls and prelinks 163 / 169 functions. Diagnostic
+link/compile intervals overlap guest execution and do not partition wall time.
 
 Separate user-cycle captures cover three fresh full-flate processes per binary at 1999 Hz with
-DWARF stacks and JIT maps: 7,963 / 2,348 samples and no lost samples. The baseline spends 10.3% of
-sampled self cycles in the identity `Range::into_iter` wrapper, with further iterator and arithmetic
-wrappers among its largest entries. Those entries disappear from the candidate's leading costs.
-The candidate spends 33.5% in interpreter functions and 7.5% in guest dispatch/C2I transitions;
-compiled match finding, `Result<[u8; 8], _>::unwrap` and a short integer-reading helper remain
-visible. Two bodies compile in the first candidate capture; the other captures only link entries.
-These samples attribute remaining work; uninstrumented timings establish the speedup.
+DWARF stacks and JIT maps: 2,426 / 2,197 samples, 4.066 / 3.586 billion cycles and no lost samples.
+Interpreter functions account for 32.5% / 31.9% of sampled self cycles; guest dispatch and C2I
+account for 7.0% / 3.4%. The candidate's leading compiled costs are match finding (15.2%),
+`Result<[u8; 8], _>::unwrap` (8.8%) and a short integer-reading helper (8.1%). These samples
+attribute remaining work; uninstrumented timings establish the speedup.
 
-A separate empty-derived-cache install pair, with registry sources and matching sysroots already
-available, prepares full flate in 2.78 / 2.47 seconds and uses 1.53 / 1.42 seconds of child CPU.
-This single pair is a cost check, not a preparation-latency claim. The installed execution closure
-falls from 10,999 to 3,727 functions and from 25.17 to 19.81 MB; the canonical base falls from 20.83
-to 15.66 MB. The MIR-rich sysroot grows from 204.30 to 230.47 MB. Sysroot construction/download is
-outside these install timings.
+The full-input interpreter census distinguishes functions that never request compilation from
+invocations that continue interpreting after publication. Stable unrequested work includes tree
+initialization, slice filling, symbol sorting and checksum reduction; those operation counts are
+not CPU time or proof of compilation payback. Long active invocations can continue interpreting
+millions of operations after their entry is published. OSR remains deferred, so that component
+must be measured separately from admission and queue delay. There is no evidence in this census
+that failed compilation explains the dominant interpreted work.
 
-Focused checks cover scheduler flags, sysroot recipe identity, semantic base profiles, generic
-product validation, main outcome/activation boundaries, and native differentials for inlined
-caller locations, virtual calls, generic assertions, panic cleanup, aggregate ABI and backtraces.
+Five local AArch64 macOS runs before and after the changes observe full-flate medians of
+311.77 / 298.43 ms and child CPU of 367.11 / 354.01 ms; corpus fib observes 25.59 / 25.22 ms.
+These observations are not interleaved controls, and AArch64 persistent-JIT relocation remains
+incomplete. The Linux cache result must not be extrapolated to macOS. Full-flate stdout agrees
+with native; the macOS serde control still stops at an unsupported inline-assembly boundary.
+
+With registry sources and the matching sysroot already available, a separate empty-derived-cache
+install prepares full flate in 2.47 seconds with 1.42 seconds of child CPU. This single observation
+is a preparation cost check. The installed execution closure contains 3,727 functions in 19.81 MB;
+the canonical base is 15.66 MB and the MIR-rich sysroot 230.47 MB. Sysroot construction/download is
+outside that timing.
+
+Cleanup-call validation covers native differentials for unit/scalar/pair/aggregate returns, stack
+arguments and panic cleanup, including cold/warm forced JIT and interpretation. Sixteen focused
+compiler tests pass, including plain/trace slot relocations, stack checks and unwind metadata.
+Linux differentials also cover MIR inlining, the call ABI, catch/unwind and the main panic boundary;
+the cleanup fixture and full flate pass on macOS. The heat regression reproduces lost prelinks and
+unnecessary publication on the respective baselines, then checks retention and unchanged file
+identity across four processes. Formatting, all-target/all-feature Clippy, the platform boundary,
+manifest validation and inventory pass. The full runtime suite is outside this validation.
+
 The generic contract proves actual export/binding coverage under eager interpretation, shared
 interpretation and forced JIT, including layout constants and tracked direct calls. The base
 contract covers byte identity across in-session/isolated preparation, different Termination types,
 allocators, compatible profiles and template-cache reuse. Fresh and restored templates share by
-content before serialization. Formatting, all-target/all-feature Clippy and all 14 source-boundary
-checks pass. The full runtime suite is outside this validation.
+content before serialization.
 
 Program-miss profiles retain image absorption's symbol-table copying/hashing, compiler metadata
 allocation and semantic verification. Intermittent non-CPU waits remain unresolved under D7.
@@ -399,7 +422,7 @@ the function census supply compiler and pre-driver attribution. The
 C2I correctness coverage includes zero/register/stack parameters, zero/one/two return words, high
 callee IDs, both tiers/domains, execution after template release, failure isolation, persisted reload,
 stack checks, unwind and native differentials. The bottleneck experiments check native stdout on
-every measured run; they do not rerun the full runtime suite or change runtime code.
+every measured run. Diagnostic census instrumentation stays outside measured product builds.
 
 Registry index lines decode their schema directly into resolver fields. Object-only visitors reject
 positional arrays; unusual shapes use the value parser to retain tolerant field rules and diagnostics.
