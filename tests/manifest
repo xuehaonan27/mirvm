@@ -260,7 +260,8 @@ vmcall-pure    vmcall  smoke  120  input=programs/vmcall_pure.rs calls=fib(10):5
 vmcall-digest  vmcall  smoke  120  input=programs/vmcall_digest.rs calls=vec_digest(10):155;string_digest(5):14655057013503867354;map_digest(20):2490;box_digest(6):43;enum_digest(7):805;slice_digest(7):284;static_digest(5):913;rawptr_digest(3):84;float_digest(4):4619054945356742656
 vmcall-unwind  vmcall  smoke  120  input=programs/vmcall_unwind.rs calls=catch_digest(3):100010;catch_digest(2):7010;nested_digest(1):77110;nested_digest(2):5110;bounds_digest(1):20;bounds_digest(9):999;msg_digest(42):71;rethrow_digest(1):5503;rethrow_digest(2):1103
 
-# x86 sub-capabilities: the host's own native result is the authority, a missing feature is a SKIP
+# CPU sub-capabilities: the host's own native result is the authority, a missing feature is a SKIP
+aarch64-intrinsics native-diff smoke 120 input=programs/probe_aarch64_intrinsics.rs env=MIRVM_JIT=off variant=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1;MIRVM_NO_JIT_CACHE=1 skip_if=aarch64%20unavailable skip_reason=host%20is%20not%20AArch64 sub_caps=crc
 x86-addcarry     native-diff  smoke  60  input=programs/probe_x86_addcarry.rs calls=add_checksum();sub_checksum()
 x86-xgetbv       native-diff  smoke  60  input=programs/probe_x86_xgetbv.rs skip_if=xgetbv%20unavailable skip_reason=host%20CPUID%20lacks%20XSAVE/OSXSAVE
 x86-simd-insert  native-diff  smoke  60  input=programs/probe_x86_simd_insert.rs skip_if=sse4.1%20unavailable skip_reason=host%20lacks%20SSE4.1

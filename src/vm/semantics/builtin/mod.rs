@@ -18,6 +18,7 @@ use crate::vm::instance::Instance;
 use crate::vm::ir::{Bb, Builtin, BuiltinCallRole, FuncBody, Module, UnwindAction};
 use crate::vm::unwind::engine_abort;
 
+mod aarch64;
 mod alloc;
 mod host;
 mod unwind;
@@ -25,12 +26,12 @@ mod x86_64;
 
 /// Executes one builtin call and returns `(lo, hi)` for the call site's uniform write-back:
 /// a plain scalar lane returns `(r, 0)`, the addcarry/subborrow pair lane returns
-/// `(flag, result)`, and an x86 vector lane has already stored its sret bytes and returns
+/// `(flag, result)`, and a vector lane has already stored its sret bytes and returns
 /// `(0, 0)`.
 ///
 /// `av` holds the call site's already-flattened arguments (a builtin has no leading sret slot)
 /// and `ret_dst` is the true destination address of a `RetDest::Indirect` result (evaluated at
-/// the call site; the sret landing spot for an x86 vector lane).
+/// the call site; the sret landing spot for a vector lane).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_builtin(
     ctx: *mut Ctx,
@@ -78,6 +79,17 @@ pub(crate) fn exec_builtin(
         return (u64::from(flag), result);
     }
     let r = match builtin {
+        Builtin::NeonAddLong { .. } | Builtin::NeonAddPair { .. } => {
+            aarch64::exec_indirect_vector(builtin, av, ret_dst)
+        }
+        Builtin::Aarch64Crc32 { castagnoli, bytes } => unsafe {
+            u64::from(crate::arch::intrinsics::aarch64_crc32(
+                a(0) as u32,
+                a(1),
+                *castagnoli,
+                *bytes,
+            ))
+        },
         // This CPU's own instruction vocabulary, split by where the result has to live.
         Builtin::X86Pshufb128
         | Builtin::X86Pshufb256

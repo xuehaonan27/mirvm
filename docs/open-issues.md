@@ -163,9 +163,9 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 - **E26** `ACCEPTED`: Linux/ELF/x86_64 is the only claimed and tested baseline — it depends on pthread,
   `dlopen`, GNU linking and x86 asm wrappers. macOS/aarch64 is an implemented platform axis
   (`src/os/macos/`, `src/os_arch/macos_aarch64/`, `src/arch/aarch64/`, selected by the `#[cfg]`
-  ladders), but it is unverified: no test, `Makefile` target or CI job names it, the JIT's macOS pair
-  items (`MAP_JIT`, `pthread_jit_write_protect_np`, the code-arena placement rules, the `Arm64Call`
-  veneer) are absent, and per-platform unwinding is unmeasured.
+  ladders) with focused runtime and NEON/CRC native differentials, but no dedicated platform
+  `Makefile` target or CI gate. Full lifecycle, JIT memory-policy and unwinding coverage remains
+  required before claiming the same baseline.
 - **E32** `ACCEPTED`: inline-asm setjmp/longjmp captured-frame memory reuse hazard. The capture point
   sits in the asm-stub wrapper frame, and the interpreter frame's synthetic protocol can collide when
   that host stack memory is reused between capture and restore (confirmed by a v2 spike; the boundary

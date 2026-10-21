@@ -21,6 +21,30 @@ use std::arch::x86_64::{
     _mm512_aesenclast_epi128, _mm512_clmulepi64_epi128, _mm512_loadu_si512, _mm512_storeu_si512,
 };
 
+pub(crate) unsafe fn neon_add_long(
+    _dst: *mut u8,
+    _a: *const u8,
+    _signed: bool,
+    _lane_bytes: u8,
+    _vector_bytes: u8,
+) {
+    unreachable!("this CPU has no NEON pairwise widening instruction")
+}
+
+pub(crate) unsafe fn neon_add_pair(
+    _dst: *mut u8,
+    _a: *const u8,
+    _b: *const u8,
+    _lane_bytes: u8,
+    _vector_bytes: u8,
+) {
+    unreachable!("this CPU has no NEON pairwise addition instruction")
+}
+
+pub(crate) unsafe fn aarch64_crc32(_crc: u32, _value: u64, _castagnoli: bool, _bytes: u8) -> u32 {
+    unreachable!("this CPU has no AArch64 CRC instruction")
+}
+
 /// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
 ///
 /// A single instruction rather than a family: the guest asks for the extended control register

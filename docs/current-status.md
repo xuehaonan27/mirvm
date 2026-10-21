@@ -15,6 +15,8 @@ contracts are its siblings in `docs/designs/`.
   stack depth, `f16`/`f128`, atomic ordering, 128-bit forms, nested DSTs, `volatile`, `dyn` tail
   fields. An exhaustive verifier checks raw IR and immutable archives; internal ownership evidence carries
   validated code into Engine construction without repeating the function walk.
+  AArch64 LLVM builtins cover signed/unsigned NEON pairwise widening sums, integer pairwise sums,
+  and CRC32/CRC32C across their scalar widths; interpreter and JIT share the hardware implementations.
 - **JIT** — method-level Cranelift, on by default (`MIRVM_JIT=off` falls back to pure interpretation).
   The translator is exhaustive over the statement, rvalue and terminator tables: frame model v2 with
   memory operands, the full scalar set, 128-bit and atomics, all ABI shapes, the five call helpers,
@@ -931,7 +933,8 @@ lifecycle/trace gates. The contract and release gates belong to
 What is refused or not yet claimed — not what is planned.
 
 - **Platform**: Linux/ELF/x86_64 is the only claimed and tested baseline; the macOS/aarch64 axis is
-  implemented but no test, `Makefile` target or CI job names it (E26).
+  implemented with focused runtime and intrinsic checks, including the full flate2 workload.
+  It has no dedicated platform `Makefile` target or CI gate (E26).
 - **Arbitrary Rust**: not supported. The corpus holds real projects and a small workload set; those
   are not a continuous gate and do not generalize.
 - **JIT**: no OSR, no deopt, and no within-run tier upgrade — a function's tier is the previous run's

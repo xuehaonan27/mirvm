@@ -396,9 +396,25 @@ pub enum Builtin {
     /// The form `HostSyscall` is rewritten to at the cold-create boundary of a capture-capable Module.
     /// The generic builtin helper recognises it, which keeps session checks out of the ordinary
     /// syscall and JIT paths.
-    /// It is last in the enum so the postcard variant numbers of every existing variant stay
-    /// unchanged.
     HostSyscallTrace,
+    /// NEON signed/unsigned pairwise widening addition. Lane width describes the input;
+    /// the result has half as many lanes, each twice as wide, in the same vector size.
+    NeonAddLong {
+        signed: bool,
+        lane_bytes: u8,
+        vector_bytes: u8,
+    },
+    /// NEON wrapping pairwise integer addition: pairs from the first vector precede
+    /// pairs from the second, with the input lane and vector widths preserved.
+    NeonAddPair {
+        lane_bytes: u8,
+        vector_bytes: u8,
+    },
+    /// AArch64 CRC32/CRC32C update over a scalar of 1, 2, 4 or 8 bytes.
+    Aarch64Crc32 {
+        castagnoli: bool,
+        bytes: u8,
+    },
 }
 
 /// Right-hand operand of Bin128: a 128-bit place, or a scalar of at most 64 bits (the shift amount for

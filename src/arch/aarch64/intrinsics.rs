@@ -1,14 +1,82 @@
-//! This CPU's answer to the `llvm.x86.*` instruction boundary: there is nothing behind it.
-//!
-//! The builtin lane in `src/vm/semantics/builtin` names one body per guest intrinsic through the
-//! ladder in `super::super`, so every target has the same names to call. This CPU has no such
-//! instruction, and a builtin variant is only ever produced by lowering the guest it describes:
-//! this build's guest is not x86_64, so nothing here is reachable.
-//!
-//! The signatures are x86_64's, which is what keeps the two halves of the ladder interchangeable.
-//! A body added there without one here is an unresolved name on this target, so the compiler is
-//! what holds the two lists together. The generic parameters sit in brackets of their own only so
-//! that the macro below can tell them from the argument list; they are emitted verbatim.
+//! AArch64 instructions behind the guest's LLVM intrinsic boundary. Guest and host share
+//! a CPU; optional instructions are reached through the guest's feature detection.
+//! The x86 signatures below are unreachable counterparts for the architecture dispatch.
+
+use std::arch::aarch64 as neon;
+
+// Load every input before storing the result: the guest destination may alias an input.
+// Guest vector slots need not have the host vector type's alignment.
+macro_rules! vector_result {
+    ($dst:ident, $op:ident, $($input:ident),+) => {
+        unsafe {
+            let result = neon::$op($(std::ptr::read_unaligned($input.cast())),+);
+            std::ptr::write_unaligned($dst.cast(), result);
+        }
+    };
+}
+
+/// Reads an 8- or 16-byte vector and writes pairwise sums in lanes twice as wide.
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn neon_add_long(
+    dst: *mut u8,
+    a: *const u8,
+    signed: bool,
+    lane_bytes: u8,
+    vector_bytes: u8,
+) {
+    match (signed, lane_bytes, vector_bytes) {
+        (false, 1, 8) => vector_result!(dst, vpaddl_u8, a),
+        (false, 1, 16) => vector_result!(dst, vpaddlq_u8, a),
+        (false, 2, 8) => vector_result!(dst, vpaddl_u16, a),
+        (false, 2, 16) => vector_result!(dst, vpaddlq_u16, a),
+        (false, 4, 8) => vector_result!(dst, vpaddl_u32, a),
+        (false, 4, 16) => vector_result!(dst, vpaddlq_u32, a),
+        (true, 1, 8) => vector_result!(dst, vpaddl_s8, a),
+        (true, 1, 16) => vector_result!(dst, vpaddlq_s8, a),
+        (true, 2, 8) => vector_result!(dst, vpaddl_s16, a),
+        (true, 2, 16) => vector_result!(dst, vpaddlq_s16, a),
+        (true, 4, 8) => vector_result!(dst, vpaddl_s32, a),
+        (true, 4, 16) => vector_result!(dst, vpaddlq_s32, a),
+        _ => unreachable!("invalid NEON pairwise widening shape"),
+    }
+}
+
+/// Concatenates the wrapping pairwise sums of two vectors of the same shape.
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn neon_add_pair(
+    dst: *mut u8,
+    a: *const u8,
+    b: *const u8,
+    lane_bytes: u8,
+    vector_bytes: u8,
+) {
+    match (lane_bytes, vector_bytes) {
+        (1, 8) => vector_result!(dst, vpadd_u8, a, b),
+        (1, 16) => vector_result!(dst, vpaddq_u8, a, b),
+        (2, 8) => vector_result!(dst, vpadd_u16, a, b),
+        (2, 16) => vector_result!(dst, vpaddq_u16, a, b),
+        (4, 8) => vector_result!(dst, vpadd_u32, a, b),
+        (4, 16) => vector_result!(dst, vpaddq_u32, a, b),
+        (8, 16) => vector_result!(dst, vpaddq_u64, a, b),
+        _ => unreachable!("invalid NEON pairwise addition shape"),
+    }
+}
+
+/// Updates the uncomplemented CRC state, consuming the scalar's low bytes first.
+#[target_feature(enable = "crc")]
+pub(crate) unsafe fn aarch64_crc32(crc: u32, value: u64, castagnoli: bool, bytes: u8) -> u32 {
+    match (castagnoli, bytes) {
+        (false, 1) => neon::__crc32b(crc, value as u8),
+        (false, 2) => neon::__crc32h(crc, value as u16),
+        (false, 4) => neon::__crc32w(crc, value as u32),
+        (false, 8) => neon::__crc32d(crc, value),
+        (true, 1) => neon::__crc32cb(crc, value as u8),
+        (true, 2) => neon::__crc32ch(crc, value as u16),
+        (true, 4) => neon::__crc32cw(crc, value as u32),
+        (true, 8) => neon::__crc32cd(crc, value),
+        _ => unreachable!("invalid AArch64 CRC width"),
+    }
+}
 
 /// One unreachable body per signature, so the refusal reads the same wherever it is written.
 macro_rules! no_such_instruction {
