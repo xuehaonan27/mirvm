@@ -4,19 +4,36 @@
 use super::*;
 
 impl Translator<'_, '_> {
-    /// Inline small constant copies; the backend uses memmove for larger ones. Loading before
-    /// storing preserves overlap, and byte alignment also covers packed guest fields.
+    /// Inline up to four unaligned word accesses, loading everything before storing for overlap.
+    /// The final access ends at `size`, so odd-sized aggregates never read or write past the copy.
     pub(super) fn copy_bytes(&mut self, dst: Value, src: Value, size: u64) {
-        self.b.emit_small_memory_copy(
-            self.module.target_config(),
-            dst,
-            src,
-            size,
-            1,
-            1,
-            false,
-            MemFlagsData::new().with_notrap(),
-        );
+        if size == 0 {
+            return;
+        }
+        if size > 32 {
+            let n = self.b.ins().iconst(types::I64, size as i64);
+            let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
+            self.b.ins().call(fref, &[dst, src, n]);
+            return;
+        }
+        let access = 1 << size.min(8).ilog2();
+        let ty = match access {
+            1 => types::I8,
+            2 => types::I16,
+            4 => types::I32,
+            8 => types::I64,
+            _ => unreachable!(),
+        };
+        let flags = MemFlagsData::new().with_notrap();
+        let values: Vec<_> = (0..size.div_ceil(access))
+            .map(|i| {
+                let off = (i * access).min(size - access) as i32;
+                (self.b.ins().load(ty, flags, src, off), off)
+            })
+            .collect();
+        for (value, off) in values {
+            self.b.ins().store(flags, value, dst, off);
+        }
     }
 
     pub(super) fn stmt(&mut self, st: &Stmt) {
@@ -102,17 +119,20 @@ impl Translator<'_, '_> {
                 elem_size,
                 overlap,
             } => {
-                // The copy/copy_nonoverlapping intrinsics go through memmove: with
-                // overlap that means the same as the interpreter's ptr::copy, and
-                // without overlap the result equals memcpy.
+                // Both intrinsics can use overlap-safe copying. Constant lengths share the
+                // aggregate-copy path; only dynamic or large copies need a runtime call.
                 let _ = overlap;
                 let (d, _) = self.operand(dst);
                 let (s, _) = self.operand(src);
-                let (c, _) = self.operand(count);
-                let es = self.b.ins().iconst(types::I64, *elem_size as i64);
-                let n = self.b.ins().imul(c, es);
-                let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
-                self.b.ins().call(fref, &[d, s, n]);
+                if let Operand::Imm { bits, width } = count {
+                    self.copy_bytes(d, s, (bits & width.mask()).wrapping_mul(*elem_size));
+                } else {
+                    let (c, _) = self.operand(count);
+                    let es = self.b.ins().iconst(types::I64, *elem_size as i64);
+                    let n = self.b.ins().imul(c, es);
+                    let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
+                    self.b.ins().call(fref, &[d, s, n]);
+                }
             }
             Stmt::MemSet {
                 dst,
@@ -826,8 +846,7 @@ impl Translator<'_, '_> {
         let off = self.b.ins().imul(iv, elem_v);
         let p = self.b.ins().iadd(base, off);
         if memmove_elem {
-            let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
-            self.b.ins().call(fref, &[p, val_or_src, elem_v]);
+            self.copy_bytes(p, val_or_src, elem_size);
         } else {
             self.b
                 .ins()

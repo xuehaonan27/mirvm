@@ -63,4 +63,25 @@ fn main() {
         loc = who();
     }
     println!("loc {}:{}:{}", loc.file(), loc.line(), loc.column());
+    check_repeat::<0>();
+    check_repeat::<3>();
+    check_repeat::<9>();
+    check_repeat::<17>();
+    check_repeat::<31>();
+    check_repeat::<32>();
+    check_repeat::<33>();
+    check_repeat::<64>();
+}
+
+#[inline(never)]
+fn repeat<const N: usize>(value: [u8; N]) -> [[u8; N]; 3] {
+    [value; 3]
+}
+
+fn check_repeat<const N: usize>() {
+    let value: [u8; N] = std::array::from_fn(|i| i as u8);
+    let result = repeat(std::hint::black_box(value));
+    for item in result {
+        assert_eq!(item, value);
+    }
 }

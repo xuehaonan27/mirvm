@@ -76,8 +76,9 @@ A compiled frame is Cranelift's business — this contract defines only its call
 unwind info. Scalar locals stay in SSA unless their storage is addressed: dereferencing a pointer
 reads its value and does not by itself require a stack slot. Compiled frame memory starts
 uninitialized, just like the interpreted operand region; guest writes initialize the values a legal
-program reads. Fixed-size copies preserve overlap and byte alignment, with small copies emitted as
-loads and stores and larger copies delegated to `memmove`.
+program reads. Fixed-size copies, including constant-length copy intrinsics and repeated elements,
+preserve overlap and byte alignment. Copies up to 32 bytes use at most four loads followed by their
+stores, with every access contained in the copied range; larger or dynamic copies use `memmove`.
 
 An interpreted frame's size is dynamic (it depends on the function's local count and types) while
 Rust locals are fixed-size, so guest locals cannot be inlined into the native stack. Instead each

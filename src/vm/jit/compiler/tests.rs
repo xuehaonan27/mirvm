@@ -391,58 +391,120 @@ fn dereferenced_pointer_slots_stay_in_ssa_unless_their_address_escapes() {
 
 #[test]
 fn constant_copies_preserve_overlap_alignment_and_artifact_reloading() {
-    for size in [0, 1, 3, 8, 16, 24, 32, 33, 64] {
-        let mut probe = body("constant_copy", Terminator::Return);
-        probe.frame_size = 16;
-        probe.params = [0, 8]
-            .map(|off| {
-                ParamAbi::Scalar(Slot {
-                    off,
+    for size in (0..=33).chain([64]) {
+        for (count, elem_size) in [
+            (None, 1),
+            (
+                Some(Operand::Imm {
+                    bits: size,
                     width: Width::W64,
-                })
-            })
-            .into();
-        let pointer = |off| ir::PlaceExpr {
-            base: ir::PlaceBase::Local(off),
-            steps: vec![ir::PlaceStep::Deref].into(),
-        };
-        probe.blocks[0].stmts.push(Stmt::Copy {
-            dst: pointer(0),
-            src: pointer(8),
-            size,
-        });
-        let shared = Shared::new(ir::Module {
-            funcs: vec![probe].into(),
-            ..ir::Module::default()
-        });
-        let mut compiler = test_compiler(&shared, CodeDomain::Plain);
-        compiler.reload = true;
-        compiler.compile(0);
-        let entry = compiler
-            .last_entry
-            .as_ref()
-            .expect("copy body was captured");
-        let entry = artifact::Entry::decode(&entry.encode().unwrap()).unwrap();
-        let ordinals = artifact::Ordinals::of(&shared.module.funcs[0]).unwrap();
-        let linked = artifact::link(&entry, &[JitSymbolRole::FastBody], |target| match target {
-            artifact::Target::Named(name) => imports::whitelist()
-                .get(name.as_ref())
-                .map(|addr| *addr as u64),
-            target => artifact::target_value(&shared, 0, &ordinals, target),
-        })
-        .expect("copy body links from its artifact");
-        let copy: extern "C" fn(*mut u8, *const u8) =
-            unsafe { std::mem::transmute(linked.entry(JitSymbolRole::FastBody).unwrap() as usize) };
-        for (src, dst) in [(1, 2), (2, 1), (1, 1), (1, 73)] {
-            let mut actual = std::array::from_fn::<_, 160, _>(|i| i as u8);
-            let mut expected = actual;
-            expected.copy_within(src..src + size as usize, dst);
-            copy(unsafe { actual.as_mut_ptr().add(dst) }, unsafe {
-                actual.as_ptr().add(src)
-            });
-            assert_eq!(actual, expected, "copy size={size}, src={src}, dst={dst}");
+                }),
+                1,
+            ),
+            (
+                Some(Operand::Imm {
+                    bits: size,
+                    width: Width::W8,
+                }),
+                2,
+            ),
+            (
+                Some(Operand::Slot(Slot {
+                    off: 16,
+                    width: Width::W64,
+                })),
+                1,
+            ),
+        ] {
+            let bytes = size * elem_size;
+            let dynamic = matches!(count, Some(Operand::Slot(_)));
+            for tier in [Tier::Baseline, Tier::Optimized] {
+                let mut probe = body("constant_copy", Terminator::Return);
+                probe.frame_size = 24;
+                probe.params = [0, 8, 16]
+                    .map(|off| {
+                        ParamAbi::Scalar(Slot {
+                            off,
+                            width: Width::W64,
+                        })
+                    })
+                    .into();
+                let pointer = |off| ir::PlaceExpr {
+                    base: ir::PlaceBase::Local(off),
+                    steps: vec![ir::PlaceStep::Deref].into(),
+                };
+                probe.blocks[0].stmts.push(match &count {
+                    None => Stmt::Copy {
+                        dst: pointer(0),
+                        src: pointer(8),
+                        size: size as u32,
+                    },
+                    Some(count) => Stmt::MemCopy {
+                        dst: Operand::Slot(Slot {
+                            off: 0,
+                            width: Width::W64,
+                        }),
+                        src: Operand::Slot(Slot {
+                            off: 8,
+                            width: Width::W64,
+                        }),
+                        count: count.clone(),
+                        elem_size,
+                        overlap: true,
+                    },
+                });
+                let shared = Shared::new(ir::Module {
+                    funcs: vec![probe].into(),
+                    ..ir::Module::default()
+                });
+                let mut compiler = Compiler::with_tier(&shared, CodeDomain::Plain, tier);
+                compiler.jit_cache = false;
+                compiler.reload = true;
+                compiler.compile(0);
+                let entry = compiler
+                    .last_entry
+                    .as_ref()
+                    .expect("copy body was captured");
+                let entry = artifact::Entry::decode(&entry.encode().unwrap()).unwrap();
+                let fast = entry.symbol(JitSymbolRole::FastBody).unwrap();
+                let calls_memmove = fast.relocs.iter().any(
+                    |r| matches!(&r.target, artifact::Target::Named(name) if &**name == "memmove"),
+                );
+                assert_eq!(
+                    calls_memmove,
+                    dynamic || bytes > 32,
+                    "{tier:?} copy count={count:?}, elem_size={elem_size}"
+                );
+                let ordinals = artifact::Ordinals::of(&shared.module.funcs[0]).unwrap();
+                let linked =
+                    artifact::link(&entry, &[JitSymbolRole::FastBody], |target| match target {
+                        artifact::Target::Named(name) => imports::whitelist()
+                            .get(name.as_ref())
+                            .map(|addr| *addr as u64),
+                        target => artifact::target_value(&shared, 0, &ordinals, target),
+                    })
+                    .expect("copy body links from its artifact");
+                let copy: extern "C" fn(*mut u8, *const u8, u64) = unsafe {
+                    std::mem::transmute(linked.entry(JitSymbolRole::FastBody).unwrap() as usize)
+                };
+                for (src, dst) in [(1, 2), (2, 1), (1, 1), (1, 137)] {
+                    let mut actual = std::array::from_fn::<_, 272, _>(|i| i as u8);
+                    let mut expected = actual;
+                    expected.copy_within(src..src + bytes as usize, dst);
+                    copy(
+                        unsafe { actual.as_mut_ptr().add(dst) },
+                        unsafe { actual.as_ptr().add(src) },
+                        size,
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "{tier:?} copy count={count:?}, elem_size={elem_size}, src={src}, dst={dst}"
+                    );
+                }
+                // Registered unwind records refer to the module's code for the rest of the process.
+                std::mem::forget(compiler);
+            }
         }
-        std::mem::forget(compiler);
     }
 }
 

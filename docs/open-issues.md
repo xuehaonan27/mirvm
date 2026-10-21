@@ -48,21 +48,25 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 - **E40** `OPEN`: guest execution remains substantially slower than native. The focused `fib32`
   startup case meets its 80 ms ceiling; uncached preparation and the corpus execution gap remain.
   Current measurements belong to [current-status.md](current-status.md). Priorities follow ordinary
-  end-to-end cost, in this order:
+  end-to-end attribution for the selected workload:
   - Prepared startup: a conservative entry/address-taken closure covers every function in the
     measured small and serde images. Static function pruning alone cannot shrink them. Evaluate
     denser storage or demand loading with immutable ownership and validation before execution;
     quantify decoding/verification and publication costs as well as whole-process latency.
     Attribute input validation separately; mutable source trees still require content reads.
-  - Execution payback: flate spends about 58% of user cycles in the guest and 33% in JIT. Expensive
-    functions with few entries remain interpreted even with complete backedge accounting. Evaluate
-    own-body work and admission/publication timing, including the cost of observing that work. The four-function first-entry probes do not establish
-    a default-configuration speedup; avoid a blanket threshold reduction or synchronous compilation.
-    Price saved interpretation against compilation, queueing, publication and code growth, retaining
-    pre-frame stack checks, return safepoints, unwind metadata and plain/trace isolation. Register
-    allocation and verification are costs to avoid repeating, not checks to disable. Rayon's delayed
-    publication and compiled/interpreted transitions need the same accounting. OSR remains deferred.
-  - Persistent JIT payback: the populated store reduces flate CPU without improving process latency.
+  - Execution payback: the full 100 KiB flate driver with populated JIT entries spends about 97%
+    of user cycles in the guest. Short compiled functions retain substantial call and frame-local
+    aggregate traffic after fixed-size copy lowering. Evaluate scalar promotion and selective
+    inlining from those costs, preserving aliasing, stack checks, return safepoints, unwind metadata,
+    cache identity and plain/trace isolation. Attribute remaining interpreted work and publication
+    timing separately: a compiled body cannot replace an active interpreted invocation without OSR.
+    Reduced-input compilation profiles are not a substitute for the full workload. Price saved
+    interpretation against compilation, queueing, publication and code growth; avoid a blanket
+    threshold reduction or synchronous compilation. Register allocation and verification are costs
+    to avoid repeating, not checks to disable. Rayon's delayed publication and compiled/interpreted
+    transitions need the same accounting. OSR remains deferred.
+  - Persistent JIT payback: the populated store reduces CPU in the 2 KiB flate control without
+    improving its process latency.
     Attribute selected-pack reads, relocation/finalization and prelink scheduling before changing
     cache layout. Establish stable heat/tier selection across repeated runs and count hits, misses
     and refusals. Preserve file identities when seeding a warm-store experiment; copying packs makes
