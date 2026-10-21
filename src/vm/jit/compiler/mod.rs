@@ -264,6 +264,9 @@ pub(super) fn worker(
             };
             if optimized.load_cached(*func, body) || baseline.load_cached(*func, body) {
                 prelinked += 1;
+                // A linked body no longer reaches the interpretation counter. Retain it in
+                // the next order so later requests cannot erase the reusable hot set.
+                observed.push(*func);
             }
         }
         if prelinked != 0 {
@@ -357,7 +360,7 @@ pub(super) fn worker(
             }
         }
     }
-    // The order requests arrived in is this program's heat order for the next run.
+    // Retain successful prelinks, followed by newly requested functions in arrival order.
     heat.write(&observed);
     // Whatever a batch still holds is worth a file: the next session can only reuse what is in the
     // store, and a worker that exits with entries staged would lose them.

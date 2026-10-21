@@ -284,6 +284,10 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    so the first call into a hot function finds a published entry instead of enqueueing a compile. The
    wave goes through the ordinary load path, so a stale or unreadable entry is a miss exactly as it is
    there, and `fib32-jit-cache` requires the warm run to prelink and count it.
+   The next order retains successful prelinks before newly requested functions, deduplicated by id.
+   A linked function bypasses interpretation counters, so absence from the request queue does not
+   establish that it went cold. Failed prelinks are not carried forward unless requested again.
+   `jit-heat-reuse` covers partial new demand and subsequent reuse across four processes.
    Tiers are built as the mechanism §2.6 asks for: one Engine runs one compiler per tier (each with its
    own ISA, module and jit-key, both publishing into the same slots), the pre-link wave prefers a stored
    optimized entry for a hot function and falls back to the baseline one, and the *request* a function
