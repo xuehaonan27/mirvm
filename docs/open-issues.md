@@ -54,11 +54,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     denser storage or demand loading with immutable ownership and validation before execution;
     quantify decoding/verification and publication costs as well as whole-process latency.
     Attribute input validation separately; mutable source trees still require content reads.
-  - Execution payback: the full 100 KiB flate driver with populated JIT entries spends about 97%
-    of user cycles in the guest. Short compiled functions retain substantial call and frame-local
-    aggregate traffic after fixed-size copy lowering. Evaluate scalar promotion and selective
-    inlining from those costs, preserving aliasing, stack checks, return safepoints, unwind metadata,
-    cache identity and plain/trace isolation. Attribute remaining interpreted work and publication
+  - Execution payback: the full 100 KiB flate driver retains about 33.5% of sampled self cycles in
+    interpretation and 7.5% in guest dispatch/C2I transitions. Attribute the owning functions,
+    bytecode operations and frame traffic before choosing the next change. Compiled aggregate
+    extraction and short load helpers remain visible; evaluate scalar promotion with aliasing,
+    stack checks, return safepoints, unwind metadata, cache identity and plain/trace isolation intact.
+    Attribute remaining interpreted work and publication
     timing separately: a compiled body cannot replace an active interpreted invocation without OSR.
     Reduced-input compilation profiles are not a substitute for the full workload. Price saved
     interpretation against compilation, queueing, publication and code growth; avoid a blanket
@@ -252,6 +253,9 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   target dir is still not delivered. Schedule on real need.
 - **D7** `OPEN`: change frontend/base preparation at the boundaries identified in
   [frontend-boundary.md](designs/frontend-boundary.md):
+  - Canonicalize explicitly selected managed sysroot paths consistently with their registered
+    generation. A symlinked store parent can leave compiler input paths outside the canonical
+    prefix used to discover std roots, causing fresh base preparation to miss panic cleanup.
   - Explain the prepared-base setup regression with separate measurements of canonical-symbol
     lookup and first-program native materialization; a cold-build gain does not establish a gain
     when the base is already present.

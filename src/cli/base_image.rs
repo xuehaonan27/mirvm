@@ -85,8 +85,8 @@ pub(super) fn build_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
         "--crate-type=bin".to_string(),
         "--sysroot".to_string(),
         sysroot,
-        crate::cargoless::schedule::GUEST_MIR_OPT_ARG.to_string(),
     ];
+    rustc_args.extend(crate::cargoless::schedule::GUEST_MIR_ARGS.map(str::to_owned));
     // Thread count must not change the canonical root traversal or the published bytes.
     rustc_args.extend(argv);
     let mut callbacks = BaseBuildCallbacks {

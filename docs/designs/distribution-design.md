@@ -172,6 +172,14 @@ runtime closure into MIRVM bytecode, frozen data and binding recipes. The base i
 std instantiations and contains no portable promise for JIT machine code. Its roots, format and
 identity are owned by [startup-cache-design.md](startup-cache-design.md#std-base-loading).
 
+Guest MIR production uses MIR optimization level 2 with ordinary MIR inlining explicitly enabled;
+the pinned rustc otherwise disables that inliner at LLVM optimization level 0. This applies to the
+managed sysroot, target dependency and library metadata, canonical base preparation and plain
+scripts. Host build scripts and proc-macros keep their host recipes, and Cargo root runner arguments
+keep Cargo's profile. Debug assertions and overflow checks remain profile-controlled. The sysroot
+recipe includes both MIR flags; crate products include their ordered compiler arguments and build
+identity. Inlined bodies therefore enter existing content identities before bytecode publication.
+
 For every advertised target and default semantic profile, a release bundles or fetches a matching
 MIR sysroot generation and base artifact. The release manifest binds their content digests to the
 MIRVM build, target/ABI and profile. The installed sysroot goes through the managed-generation

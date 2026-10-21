@@ -102,7 +102,7 @@ impl Drop for MainBoundaryGuard {
     }
 }
 
-/// Execute the standard main catch call marked by the IR. The boundary records the activation
+/// Execute the standard runtime entry marked by the IR. The boundary records the activation
 /// number of the current Engine entry; signal handlers or native thunk re-entries receive a
 /// different number and cannot borrow the outer boundary to claim a main panic.
 pub(crate) fn call_main_panic_boundary<R>(ctx: *mut Ctx, f: impl FnOnce() -> R) -> R {

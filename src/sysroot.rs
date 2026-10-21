@@ -338,6 +338,10 @@ fn build_recipe() -> String {
         "da{} oc{} opt{}\n",
         p.debug_assertions as u8, p.overflow_checks as u8, p.opt_level
     );
+    for f in crate::cargoless::schedule::GUEST_MIR_ARGS {
+        key.push_str(f);
+        key.push('\n');
+    }
     for f in sysroot_rustflags() {
         key.push_str(&f);
         key.push('\n');
@@ -676,6 +680,9 @@ mod tests {
         assert!(!v.starts_with(crate::options::build::BUILD_ID));
         assert!(v.contains("da0 oc1 opt0"));
         assert!(v.contains("-Zforce-unstable-if-unmarked"));
+        for flag in crate::cargoless::schedule::GUEST_MIR_ARGS {
+            assert!(v.lines().any(|line| line == flag));
+        }
         // Same source and tree, so the value is deterministic
         assert_eq!(stamp_value().unwrap(), v);
     }

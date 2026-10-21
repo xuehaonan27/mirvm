@@ -328,7 +328,21 @@ fn restore_call<'tcx>(tcx: TyCtxt<'tcx>, mir: &mir::Body<'tcx>, block: u32) -> O
         .terminator();
     let span = term.source_info.span;
     let (ty, location) = match &term.kind {
-        mir::TerminatorKind::Call { func, .. } => (func.ty(&mir.local_decls, tcx), None),
+        mir::TerminatorKind::Call { func, fn_span, .. } => {
+            let ty = func.ty(&mir.local_decls, tcx);
+            (
+                ty,
+                super::call_location(
+                    tcx,
+                    mir,
+                    ty,
+                    mir::SourceInfo {
+                        span: *fn_span,
+                        ..term.source_info
+                    },
+                ),
+            )
+        }
         mir::TerminatorKind::Drop { place, .. } => (
             Ty::new_fn_def(
                 tcx,
@@ -349,7 +363,7 @@ fn restore_call<'tcx>(tcx: TyCtxt<'tcx>, mir: &mir::Body<'tcx>, block: u32) -> O
                     tcx.require_lang_item(panic, span),
                     ty::GenericArgs::empty(),
                 ),
-                Some(span),
+                Some(mir.caller_location_span(term.source_info, None, tcx, |span| span)),
             )
         }
         _ => return None,
@@ -471,6 +485,8 @@ mod tests {
         let mut template = template();
         assert!(template.validate(0, 1, 2).is_some());
         template.bindings[0] = Binding::Size(0);
+        assert!(template.validate(0, 1, 2).is_none());
+        template.bindings[0] = Binding::Align(0);
         assert!(template.validate(0, 1, 2).is_none());
         template.bindings[0] = Binding::Const(1, Width::W64);
         assert!(template.validate(0, 1, 2).is_none());

@@ -97,7 +97,7 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) next_fn: ir::FuncId,
     /// Base exported material: non-foreign statics materialized in this session (DefId, frozen-area address)
     pub(crate) static_defs: Vec<(rustc_hir::def_id::DefId, u64)>,
-    /// Intrinsic call site in the fixed std startup chain, at the outer call boundary and final execution catch.
+    /// Physical runtime entry and the intrinsic that catches user main, derived from std MIR.
     pub(crate) main_catch_site: Option<MainCatchSite<'tcx>>,
 }
 

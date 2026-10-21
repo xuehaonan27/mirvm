@@ -214,6 +214,7 @@ struct LowerCx<'tcx, 'a> {
     instance: Instance<'tcx>,
     /// This function's def_id (used for asm_target_features queries during inline asm register allocation)
     def_id: rustc_hir::def_id::DefId,
+    mir: &'a Body<'tcx>,
     frame: FrameLayout<'tcx>,
     linker: &'a mut Linker<'tcx>,
     /// &Location slot when this function is #[track_caller] (read by forwarding and the caller_location intrinsic)
@@ -650,22 +651,29 @@ impl<'tcx> LowerCx<'tcx, '_> {
             .unwrap_or_else(|_| "?".into())
     }
 
-    /// Hidden trailing argument when the callee requires_caller_location: forward from this frame or synthesize at the call site.
+    fn caller_location(&mut self, source_info: mir::SourceInfo) -> Result<Operand, Error> {
+        let caller = self.caller_loc_off.map(|off| {
+            Ok(Operand::Slot(Slot {
+                off,
+                width: Width::W64,
+            }))
+        });
+        self.mir
+            .caller_location_span(source_info, caller, self.tcx, |span| {
+                self.linker.caller_location_imm(span)
+            })
+    }
+
+    /// Inlined scopes determine whether to forward the hidden argument or use a call-site constant.
     fn caller_loc_arg(
         &mut self,
         callee: &Instance<'tcx>,
-        span: rustc_span::Span,
+        source_info: mir::SourceInfo,
     ) -> Result<Option<Operand>, Error> {
         if !callee.def.requires_caller_location(self.tcx) {
             return Ok(None);
         }
-        Ok(Some(match self.caller_loc_off {
-            Some(off) => Operand::Slot(Slot {
-                off,
-                width: Width::W64,
-            }), // forward
-            None => self.linker.caller_location_imm(span)?,
-        }))
+        self.caller_location(source_info).map(Some)
     }
 
     /// 128-bit operand -> place expression (Bytes channel; scalar constants are materialized).
@@ -1872,6 +1880,7 @@ pub(crate) fn lower_instance<'tcx>(
         typing_env,
         instance,
         def_id: instance.def_id(),
+        mir: &body,
         frame,
         linker,
         caller_loc_off,

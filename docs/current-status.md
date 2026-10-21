@@ -332,38 +332,61 @@ calls of a 128-iteration loop with the call threshold raised to one million: its
 4,876,800, and it now publishes the loop body where the baseline does not. The ordinary thresholds,
 asynchronous worker, tier selection and disabled-by-default work policy remain unchanged.
 
-A Linux x86_64 release comparison of fixed-copy code generation against `8a3b4b7` uses the full
-compiler-linked CLI, original corpus inputs and native release stdout agreement. Seven alternating
-pairs retain populated JIT entries; five pairs disable persistence. Each measurement starts a fresh
-process with prepared images and warm filesystem caches. Per-workload heat snapshots are restored
-outside the clocks. Preparation, diagnostic ledgers, builds, tests and sampling are outside the timed
+Guest MIR production explicitly enables ordinary inlining at MIR optimization level 2. The pinned
+rustc otherwise disables that pass at LLVM optimization level 0, leaving many iterator, pointer and
+arithmetic wrappers as guest calls. Profile check settings remain unchanged. The producer contract
+is in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
+
+A Linux x86_64 release comparison against `4bd9450` uses the full compiler-linked CLI, original
+corpus inputs and native release stdout agreement. Seven alternating pairs retain populated JIT
+entries; five pairs disable persistence. Each measurement starts a fresh process with prepared
+images and warm filesystem caches. Each binary selects its matching installed managed sysroot;
+file identities and integrity validation remain intact. Per-workload heat snapshots are restored
+outside the clocks. Preparation, diagnostic ledgers, builds, tests and sampling are outside timed
 runs. Shared-host scheduling and storage are uncontrolled. Medians in milliseconds are baseline /
 candidate:
 
 | Workload | Default JIT process | Default JIT child CPU | Persistence disabled process |
 |---|---:|---:|---:|
-| Empty program | 53.91 / 53.74 | 28.14 / 28.75 | 53.31 / 39.67 |
-| Corpus fib (0 through 9) | 40.05 / 53.89 | 28.65 / 28.86 | 52.49 / 37.92 |
-| HashMap | 42.87 / 53.50 | 33.07 / 33.39 | 61.19 / 46.00 |
-| Strings | 49.70 / 64.40 | 33.68 / 35.25 | 57.63 / 59.47 |
-| serde JSON | 97.58 / 98.58 | 52.55 / 57.68 | 89.76 / 144.19 |
-| Full flate2, approximately 100 KiB | 1496.71 / 1323.98 | 1341.13 / 1211.32 | 1482.60 / 1489.17 |
+| Empty program | 36.41 / 47.32 | 28.68 / 24.31 | 55.03 / 47.01 |
+| Corpus fib (0 through 9) | 39.91 / 33.57 | 29.45 / 24.35 | 37.66 / 44.17 |
+| HashMap | 55.46 / 49.76 | 34.84 / 26.93 | 43.06 / 44.25 |
+| Strings | 58.72 / 55.87 | 35.69 / 25.96 | 43.31 / 56.88 |
+| serde JSON | 85.38 / 79.23 | 57.09 / 40.85 | 81.97 / 66.75 |
+| Full flate2, approximately 100 KiB | 1471.17 / 457.43 | 1327.81 / 386.13 | 1492.92 / 455.56 |
 
-Full flate2 improves in all seven default-persistence pairs, reducing the process median by 11.5%
-and child CPU by 9.7%. Disabled persistence has no established latency gain: child CPU falls from
-1509.55 to 1472.06 ms, but the candidate wins only two of five process pairs. Separate default
-ledgers link the same 542 bodies and compile none; total linked code is 295,385 / 294,885 bytes.
-Short-program results show no consistent improvement. The corpus fib is not the fib(32) timing
-case; its default CPU is effectively unchanged while process latency rises. Scheduling/storage
-outliers reach hundreds of milliseconds in both versions. No broad cold-start speedup is claimed.
+Full flate2 improves in all seven default pairs and all five persistence-disabled pairs: 3.22x /
+3.28x process speedup, with child CPU reductions of 70.9% / 66.7%. Default ledgers link 542 / 169
+bodies and compile none; linked code falls from 294,885 to 190,671 bytes. Serde wins six of seven
+default process pairs, with 28.4% less child CPU. Small controls have lower CPU medians but mixed
+wall-clock results, including an empty-program regression. The corpus fib is not the fib(32)
+timing case. These results do not establish a universal cold-start or cold-filesystem speedup.
 
-Focused checks cover all copy lengths from 0 through 33 bytes plus a larger fallback, scaled and
-dynamic intrinsic counts, both overlap directions, unaligned addresses, both JIT tiers and execution
-from reloaded artifacts. Artifact relocations establish that small constant copies do not call
-`memmove`. Linux x86_64 and macOS aarch64 pass these checks and the native ABI differential with
-threshold-one synchronous JIT, including odd-sized aggregate arguments, returns and array repeats.
-Linux release all-target/all-feature Clippy, formatting and the affected source-boundary checks
-pass. The full runtime suite is outside this validation.
+Separate user-cycle captures cover three fresh full-flate processes per binary at 1999 Hz with
+DWARF stacks and JIT maps: 7,963 / 2,348 samples and no lost samples. The baseline spends 10.3% of
+sampled self cycles in the identity `Range::into_iter` wrapper, with further iterator and arithmetic
+wrappers among its largest entries. Those entries disappear from the candidate's leading costs.
+The candidate spends 33.5% in interpreter functions and 7.5% in guest dispatch/C2I transitions;
+compiled match finding, `Result<[u8; 8], _>::unwrap` and a short integer-reading helper remain
+visible. Two bodies compile in the first candidate capture; the other captures only link entries.
+These samples attribute remaining work; uninstrumented timings establish the speedup.
+
+A separate empty-derived-cache install pair, with registry sources and matching sysroots already
+available, prepares full flate in 2.78 / 2.47 seconds and uses 1.53 / 1.42 seconds of child CPU.
+This single pair is a cost check, not a preparation-latency claim. The installed execution closure
+falls from 10,999 to 3,727 functions and from 25.17 to 19.81 MB; the canonical base falls from 20.83
+to 15.66 MB. The MIR-rich sysroot grows from 204.30 to 230.47 MB. Sysroot construction/download is
+outside these install timings.
+
+Focused checks cover scheduler flags, sysroot recipe identity, semantic base profiles, generic
+product validation, main outcome/activation boundaries, and native differentials for inlined
+caller locations, virtual calls, generic assertions, panic cleanup, aggregate ABI and backtraces.
+The generic contract proves actual export/binding coverage under eager interpretation, shared
+interpretation and forced JIT, including layout constants and tracked direct calls. The base
+contract covers byte identity across in-session/isolated preparation, different Termination types,
+allocators, compatible profiles and template-cache reuse. Fresh and restored templates share by
+content before serialization. Formatting, all-target/all-feature Clippy and all 14 source-boundary
+checks pass. The full runtime suite is outside this validation.
 
 Program-miss profiles retain image absorption's symbol-table copying/hashing, compiler metadata
 allocation and semantic verification. Intermittent non-CPU waits remain unresolved under D7.
@@ -687,7 +710,9 @@ selection branches, Clone failure, a subsequent witness failure and a destructor
 return; value identity, alignment and drop
 order agree with native. Direct JIT calls write scalar/pair results to either slots or memory
 destinations through the same writeback path. Indirect calls, unsupported constant/aggregate
-operations and caller-location bindings retain eager fallback; an invalid unentered instantiation is
+operations and functions requiring an incoming caller-location argument retain eager fallback.
+Tracked direct calls bind source-location constants through the MIR inlined-scope chain; layout
+constants bind both size and alignment, including over-aligned ZSTs. An invalid unentered instantiation is
 rejected before entry. Eager interpretation, shared interpretation and synchronous JIT agree with
 native output, including concurrent entries, recursive calls, native qsort callbacks and fork in a
 separate single-threaded invocation. Each reloads its bound image without re-entering the frontend.

@@ -9,6 +9,7 @@ pub(super) enum Binding {
     Size(u32),
     Field(u32, u32),
     Const(u32, Width),
+    Align(u32),
 }
 
 pub(super) struct Layout {
@@ -137,7 +138,9 @@ impl Template {
         }
         for binding in &self.bindings {
             match binding {
-                Binding::Size(index) | Binding::Field(index, _) if *index as usize >= layouts => {
+                Binding::Size(index) | Binding::Align(index) | Binding::Field(index, _)
+                    if *index as usize >= layouts =>
+                {
                     return None;
                 }
                 Binding::Const(index, _) if *index as usize >= generic_args => return None,

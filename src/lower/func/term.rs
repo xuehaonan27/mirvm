@@ -150,13 +150,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     other => other.panic_function(),
                 };
-                pargs.push(match self.caller_loc_off {
-                    Some(off) => Operand::Slot(Slot {
-                        off,
-                        width: Width::W64,
-                    }),
-                    None => self.linker.caller_location_imm(term.source_info.span)?,
-                });
+                pargs.push(self.caller_location(term.source_info)?);
                 let def_id = self.tcx.require_lang_item(lang_item, term.source_info.span);
                 let callee = self.linker.func_id(Instance::mono(self.tcx, def_id));
                 // synthesize: panic block (diverging Call -> Unreachable landing)
@@ -287,7 +281,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     // For #[track_caller], Location takes fn_span (the callee name segment);
                     // cg_ssa `SourceInfo { span: fn_span, ..terminator.source_info }`
                     // isomorphic to cg_ssa; using the whole call expression span skews line/column.
-                    let loc_arg = self.caller_loc_arg(&inst, *fn_span)?;
+                    let loc_arg = self.caller_loc_arg(
+                        &inst,
+                        mir::SourceInfo {
+                            span: *fn_span,
+                            ..term.source_info
+                        },
+                    )?;
                     let rust_call = fn_ty.fn_sig(self.tcx).skip_binder().abi()
                         == rustc_abi::ExternAbi::RustCall;
                     return self.lower_virtual_call(
@@ -307,7 +307,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     destination,
                     *target,
                     *unwind,
-                    term.source_info.span,
+                    term.source_info,
                 )? {
                     return Ok(res);
                 }
@@ -328,7 +328,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 // The hidden trailing argument for #[track_caller] (forwarded or synthesized at the
                 // call site); span takes fn_span (see the Virtual branch note above).
-                let loc_arg = self.caller_loc_arg(&inst, *fn_span)?;
+                let loc_arg = self.caller_loc_arg(
+                    &inst,
+                    mir::SourceInfo {
+                        span: *fn_span,
+                        ..term.source_info
+                    },
+                )?;
                 // Linker triple resolution: an ordinary function / intrinsic fallback extends the
                 // worklist; a foreign item resolves to an engine primitive, a link stub, or a Trap.
                 let callee = self.linker.resolve_call(inst)?;

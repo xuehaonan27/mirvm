@@ -79,7 +79,10 @@ fn profile(args: &[String]) -> Vec<String> {
                             | "debuginfo"
                             | "strip"
                             | "codegen-units"
-                    ) | ("-Z", "threads" | "no-codegen" | "mir-opt-level")
+                    ) | (
+                        "-Z",
+                        "threads" | "no-codegen" | "mir-opt-level" | "inline-mir"
+                    )
                 ) {
                     out.push(format!("{flag}{value}"));
                 }
@@ -518,6 +521,7 @@ mod tests {
             "-C",
             "overflow-checks=no",
             "-Zmir-opt-level=2",
+            "-Zinline-mir=yes",
             "--cfg",
             "feature=\"one\"",
             "--target=target",
@@ -531,6 +535,8 @@ mod tests {
             "-Coverflow-checks=no",
             "-Z",
             "mir-opt-level=2",
+            "-Z",
+            "inline-mir=no",
             "--cfg=feature=\"one\"",
             "--target",
             "target",

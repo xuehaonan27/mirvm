@@ -81,9 +81,14 @@ Numbered rules:
   first; the outer owner settles last, in stack order.
 - **C12** A real `main` panic is consumed by guest `lang_start_internal`, so it must not be classified
   after leaving the Engine. Lowering locates the catch wrapping user `main` uniquely from the pinned
-  std's MIR call graph and freezes it as `CallRole::MainPanicBoundary`; interpreter and JIT both claim
-  the immediately following first-level `catch_unwind` and write it into this `run_main`'s LIFO state.
-  An executable module must have exactly one such boundary whose unwind action is `Continue`, and IR
+  std's MIR call graph, source scopes and reified callback definitions. A physical call in the
+  common runtime callback is `CallRole::MainPanicBoundary`; only the proven inner intrinsic is
+  `MainPanicCatcher`, including when catch wrappers have been inlined. The boundary is independent
+  of the user's `Termination` type, so the shared base contributes it exactly once. Interpreter and
+  JIT claim that intrinsic under the boundary's activation and write it into this `run_main`'s LIFO
+  state. The outer runtime catch and payload
+  cleanup catches remain ordinary catches. An executable module must have exactly one boundary
+  with `Continue` unwind and one main catcher, and IR
   serialization, image merging and per-function package verification all preserve and re-check it. If
   the pinned std changes shape, lowering and verification must fail loudly rather than fall back to
   function names or guessing 101.
@@ -139,8 +144,9 @@ cleanup.
 Engine execution exits are structured: `RunOutcome::Returned(value)` for a normal return,
 `RunOutcome::GuestPanic` for an uncaught guest panic, and a `RunError` carrying `RunErrorKind` for a
 missing entry or export, or an engine fault. A real `main` panic never leaves guest std, which is why
-`MainPanicBoundary` marks the exact catch in the pinned startup chain and each `run_main` records it in
-its own state stack; the CLI still maps `GuestPanic` to 101, but a normal `main` returning 101 is no
+`MainPanicBoundary` guards a common runtime call and `MainPanicCatcher` identifies the exact user-main
+catch in the pinned startup chain. Each `run_main` records it in its own state stack; the CLI still
+maps `GuestPanic` to 101, but a normal `main` returning 101 is no
 longer the same library API result. Host Rust panic and a C++ foreign exception stay distinct from
 both: the former continues unchanged, the latter may cross the whole `C-unwind` Engine and be caught by
 an outer C++ typed catch.

@@ -420,6 +420,11 @@ fn copy_slice<T: Copy>(values: &[T], target: *mut T) -> usize {
 }
 
 #[inline(never)]
+fn layout_constants<T>(_: *const T) -> (usize, usize) {
+    (size_of::<T>(), align_of::<T>())
+}
+
+#[inline(never)]
 fn fixed_field<T>(pair: &(*const T, usize)) -> usize {
     pair.1
 }
@@ -560,6 +565,9 @@ fn check_fork() {
 }
 
 fn main() {
+    assert_eq!(layout_constants(std::ptr::null::<[u8; 9]>()), (9, 1));
+    assert_eq!(layout_constants(std::ptr::null::<u64>()), (8, 8));
+    assert_eq!(layout_constants(std::ptr::null::<AlignedZst>()), (0, 64));
     if std::env::args().nth(1).as_deref() == Some("fork") {
         check_fork();
         println!("shared fork agrees");

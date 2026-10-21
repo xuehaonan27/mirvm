@@ -73,7 +73,7 @@ The lookup key includes build identity, sysroot stamp and the semantic compiler 
 flags are normalized to their effective defaults so scripts and Cargo's explicit dev defaults
 share a base. Target/layout flags, cfg and remaps affecting imported sysroot source locations remain
 in the profile. Program identity, native inputs, debug output, codegen partitioning, thread count
-and MIR optimization level do not partition it. MIR optimization is a producer choice with the same
+and MIR optimization/inlining flags do not partition it. MIR optimization is a producer choice with the same
 runtime semantics; the layer key also includes the whole-file content digest, so a rebuilt base
 with different bodies or ids invalidates every consumer of the old absolute layout.
 

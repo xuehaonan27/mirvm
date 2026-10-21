@@ -651,15 +651,15 @@ pub(super) fn run_main(
             .to_string(),
         None => crate::sysroot::ensure_sysroot()?.display().to_string(),
     };
-    let rustc_args = vec![
+    let mut rustc_args = vec![
         "mirvm".to_string(),
         input.clone(),
         format!("--edition={edition}"),
         "--crate-type=bin".to_string(),
         "--sysroot".to_string(),
         sysroot,
-        crate::cargoless::schedule::GUEST_MIR_OPT_ARG.to_string(),
     ];
+    rustc_args.extend(crate::cargoless::schedule::GUEST_MIR_ARGS.map(str::to_owned));
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
     Ok(run_driver(

@@ -21,6 +21,7 @@ use rustc_middle::{
 #[derive(Default)]
 pub(super) struct Templates<'tcx> {
     exports: FxHashMap<DefId, Option<Export<'tcx>>>,
+    instructions: FxHashMap<[u8; 32], std::sync::Arc<GenericTemplate>>,
     products: FxHashMap<CrateNum, products::Products>,
     timing: Timing,
 }
@@ -132,7 +133,8 @@ impl<'tcx> Templates<'tcx> {
         if let Some(started) = started {
             self.timing.restore += started.elapsed();
         }
-        let exported = match cached {
+        let publish = cached.is_none() && allow_export;
+        let mut exported = match cached {
             Some(template) => {
                 if template.is_some() {
                     self.timing.hits += 1;
@@ -166,13 +168,6 @@ impl<'tcx> Templates<'tcx> {
                     self.timing.rejected += 1;
                     self.timing.reject += elapsed;
                 }
-                let started = crate::options::timing().then(std::time::Instant::now);
-                if let Some(products) = &mut products {
-                    products.insert(tcx, instance, template.as_ref());
-                }
-                if let Some(started) = started {
-                    self.timing.store += started.elapsed();
-                }
                 if crate::diag::prints(crate::diag::Severity::Debug) {
                     crate::diag_debug!(
                         Lower,
@@ -188,6 +183,25 @@ impl<'tcx> Templates<'tcx> {
                 template
             }
         };
+        // Archive serialization shares Arc targets. Fresh exports and restored products must
+        // agree on that sharing, or identical std bodies produce different base bytes.
+        if let Some(export) = &mut exported {
+            let instructions = &mut export.template.instructions;
+            *instructions = self
+                .instructions
+                .entry(instructions.identity())
+                .or_insert_with(|| instructions.clone())
+                .clone();
+        }
+        if publish {
+            let started = crate::options::timing().then(std::time::Instant::now);
+            if let Some(products) = &mut products {
+                products.insert(tcx, instance, exported.as_ref());
+            }
+            if let Some(started) = started {
+                self.timing.store += started.elapsed();
+            }
+        }
         self.exports.insert(def, exported);
     }
 
@@ -257,6 +271,7 @@ impl<'tcx> Export<'tcx> {
             .iter()
             .map(|binding| match *binding {
                 Binding::Size(index) => Some(u64::from(layouts[index as usize].size)),
+                Binding::Align(index) => Some(u64::from(layouts[index as usize].align)),
                 Binding::Field(index, field) => {
                     let ty = instance.instantiate_mir_and_normalize_erasing_regions(
                         tcx,
@@ -339,6 +354,21 @@ struct Call<'tcx> {
     ty: Ty<'tcx>,
     location: Option<rustc_span::Span>,
     block: u32,
+}
+
+fn call_location<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    mir: &mir::Body<'tcx>,
+    ty: Ty<'tcx>,
+    source: mir::SourceInfo,
+) -> Option<rustc_span::Span> {
+    let ty::FnDef(def, args) = *ty.kind() else {
+        return None;
+    };
+    Instance::new_raw(def, args)
+        .def
+        .requires_caller_location(tcx)
+        .then(|| mir.caller_location_span(source, None, tcx, |span| span))
 }
 
 pub(super) struct Bound<'tcx> {
@@ -855,6 +885,31 @@ impl<'tcx> Exporter<'tcx> {
                 {
                     return self.binding(Binding::Const(param.index, width), width);
                 }
+                let property = match c.const_ {
+                    mir::Const::Unevaluated(value, _) if value.promoted.is_none() => {
+                        Some((value.def, value.args))
+                    }
+                    mir::Const::Ty(_, value) => match value.kind() {
+                        ty::ConstKind::Alias(_, alias) => {
+                            alias.kind.opt_def_id().map(|def| (def, alias.args))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some((def, args)) = property {
+                    let binding = if Some(def) == self.tcx.lang_items().size_const() {
+                        Some(Binding::Size as fn(u32) -> Binding)
+                    } else if Some(def) == self.tcx.lang_items().align_const() {
+                        Some(Binding::Align as fn(u32) -> Binding)
+                    } else {
+                        None
+                    };
+                    if let Some(binding) = binding {
+                        let index = layout_index(&mut self.layouts, args.type_at(0))?;
+                        return self.binding(binding(index), width);
+                    }
+                }
                 let value = c.const_.try_to_scalar_int()?;
                 Some(Operand::Imm {
                     bits: u64::try_from(value.to_bits(value.size())).ok()?,
@@ -1192,7 +1247,12 @@ impl<'tcx> Exporter<'tcx> {
                     mir::AssertKind::Overflow(..) => (msg.panic_function(), Vec::new()),
                     _ => return None,
                 };
-                let span = block.terminator().source_info.span;
+                let span = self.mir.caller_location_span(
+                    block.terminator().source_info,
+                    None,
+                    self.tcx,
+                    |span| span,
+                );
                 let def = self.tcx.require_lang_item(panic, span);
                 let unwind = unwind_action(*unwind);
                 let callee = self.call(
@@ -1233,6 +1293,7 @@ impl<'tcx> Exporter<'tcx> {
                 destination,
                 target: Some(target),
                 unwind,
+                fn_span,
                 ..
             } => {
                 let fn_ty = func.ty(&self.mir.local_decls, self.tcx);
@@ -1292,7 +1353,15 @@ impl<'tcx> Exporter<'tcx> {
                     let callee = self.call(
                         Call {
                             ty: fn_ty,
-                            location: None,
+                            location: call_location(
+                                self.tcx,
+                                self.mir,
+                                fn_ty,
+                                mir::SourceInfo {
+                                    span: *fn_span,
+                                    ..block.terminator().source_info
+                                },
+                            ),
                             block: block_index,
                         },
                         abi,

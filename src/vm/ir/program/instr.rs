@@ -513,7 +513,7 @@ pub enum SwitchDiscr {
 }
 
 /// Role of a direct guest call in the startup chain. Almost every call is `Normal`; the one
-/// `catch_unwind` call that wraps user `main` is marked `MainPanicBoundary` during lowering, so the
+/// runtime entry surrounding the user `main` catch is marked `MainPanicBoundary` during lowering, so the
 /// Engine can still keep a structured result after guest std has consumed the exception.
 #[derive(
     Clone,

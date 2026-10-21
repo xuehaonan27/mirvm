@@ -59,7 +59,7 @@ for mode, settings in [
         assert "generic template exported: backwards\n" in log, log
         assert "generic template fallback: clone_and_unwind\n" in log, log
         for definition, count in [("slice_len", 3), ("slice_identity", 3), ("slice_data", 3),
-                                  ("copy_slice", 3), ("fixed_field", 3), ("fixed_ref", 3),
+                                  ("copy_slice", 3), ("layout_constants", 3), ("fixed_field", 3), ("fixed_ref", 3),
                                   ("witness", 3), ("clone_reference", 1), ("destroy", 2),
                                   ("index_ref", 4), ("index_mut", 4), ("array_ref", 5),
                                   ("nested_ref", 4), ("matrix_ref", 6), ("first_or", 4),
@@ -76,12 +76,13 @@ for mode, settings in [
             assert log.count("generic template exported: " + definition + "\n") == 1, definition
             bound = [line for line in log.splitlines()
                      if "generic template bound:" in line
+                     and str(len(source.stem)) + source.stem in line
                      and re.search(r"(?<!\d)" + str(len(definition)) + re.escape(definition), line)]
             assert len(bound) == count and len(set(bound)) == count, (definition, bound)
         assert "generic template fallback: indirect\n" in log, log
         assert "generic template exported: caller_location\n" in log, log
-        assert not any("generic template bound:" in line and "caller_location" in line
-                       for line in log.splitlines())
+        assert sum("generic template bound:" in line and "caller_location" in line
+                   for line in log.splitlines()) == 1
     else:
         assert "generic template " not in log, log
     warm = run(mode + "-warm", [mirvm, "run", source], settings)

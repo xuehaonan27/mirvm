@@ -8,23 +8,15 @@ use crate::cargoless::resolve::{ResolvePlan, Unit, UnitClass};
 
 use super::Layout;
 
-/// The MIR level every session that lowers guest code compiles at.
-///
-/// The engine's cost is dominated by what a *block* costs it -- a safe point, a block dispatch and a
-/// slot access each -- and rustc's debug default leaves MIR at level 1, where almost nothing is
-/// inlined, so a guest loop is many tiny blocks instead of a few. MIR optimization is
-/// semantics-preserving (rustc relies on it for -O2/3), so this does not make the engine disagree
-/// with the Cargo track, which stays the authority and keeps Cargo's own profile; it changes how many
-/// blocks the engine executes. Measured through the corpus drivers: 12-16% fewer retired instructions
-/// and 33-42% less wall time. A build-time constant, never an input, so a session's key cannot be
-/// shared across two levels.
-pub(crate) const GUEST_MIR_OPT_ARG: &str = "-Zmir-opt-level=2";
+/// Optimize the MIR that is installed for execution without changing profile check semantics.
+/// At MIR level 2, rustc otherwise disables ordinary inlining when LLVM optimization is off.
+pub(crate) const GUEST_MIR_ARGS: [&str; 2] = ["-Zmir-opt-level=2", "-Zinline-mir=yes"];
 
 /// The three profile flags. debug-assertions and overflow-checks enter MIR semantics, so a
 /// mismatch with cargo's dev profile would show up as a differential drift.
 ///
 /// `lowered` marks the recipes whose MIR the engine executes: a target dependency's rlib and the
-/// root package's lib target. Those get `GUEST_MIR_OPT_ARG`. The bin session keeps the shape the
+/// root package's lib target. Those get `GUEST_MIR_ARGS`. The bin session keeps the shape the
 /// Cargo track's runner has (the same `MirvmCallbacks` path serves both, and the Cargo track is the
 /// authority), and a host-side recipe's MIR is never lowered here at all.
 fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags, lowered: bool) {
@@ -38,7 +30,7 @@ fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags, lowered: bool) {
         a.push(format!("opt-level={}", p.opt_level));
     }
     if lowered {
-        a.push(GUEST_MIR_OPT_ARG.into());
+        a.extend(GUEST_MIR_ARGS.map(str::to_owned));
     }
 }
 

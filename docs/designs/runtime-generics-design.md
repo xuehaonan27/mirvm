@@ -43,8 +43,10 @@ Construction writes fields from unprojected locals distinct from the destination
 scalar constants, into a local destination. Aliasing projections, enum/union construction and unsized tails retain eager
 lowering. Return and parameter ABIs still come from the complete concrete aggregate layout.
 
-Bounds and integer-overflow assertions branch to the guest panic lang item with the original source location and unwind
-action. Index strides read type-size bindings through ordinary IR; address temporaries remain live
+Bounds and integer-overflow assertions branch to the guest panic lang item with the source location
+resolved through inlined scopes and the original unwind action. Inlined `size_of` and `align_of`
+constants bind the concrete layout's size and alignment through compiler lang items. Index strides
+read type-size bindings through ordinary IR; address temporaries remain live
 through every operand of a statement or terminator and are reused only after it completes. Slice
 patterns preserve metadata while selecting from the front, from the end or a subslice. Collection
 still performs required instance validation before export. The owned template carries ordinary IR
@@ -56,7 +58,9 @@ setting without entering the exporter.
 
 The execution prototype supports this architecture, not a whole-program speedup claim. Its real
 MIR exporter handles an opaque-pointee copy loop, and its witness/unwind experiments use native
-Rust callbacks. General caller-location ABIs remain outside the admitted subset.
+Rust callbacks. Non-tracked templates can call tracked direct callees using source-location
+constants; fresh export and restored call recipes use the same inlined-scope resolution. Functions
+requiring an incoming caller-location argument retain eager lowering.
 Production rollout must be measured on the existing serde, flate and generic-matrix workloads
 with prepared dependencies and std.
 
@@ -148,7 +152,9 @@ this identity. Changing template semantics requires changing the fragment encodi
 build and product generation checks still apply. This identity names reusable instructions, never
 a guest function address or its concrete entry.
 
-Function archives retain the 32-byte identity alongside each template object. Their enclosing
+Fresh exports and restored products intern instructions by content before publication. This gives
+archive serialization the same sharing topology on either path and preserves byte-identical std
+bases. Function archives retain the 32-byte identity alongside each template object. Their enclosing
 product's integrity and generation checks cover those bytes; the loader consumes trusted executable
 products under the existing native-address safety contract. Borrowed validation still checks the
 template's dictionary arity and accesses, admitted vocabulary, concrete local storage, call ordinals

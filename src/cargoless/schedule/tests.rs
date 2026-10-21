@@ -352,6 +352,9 @@ fn dep_args_carry_key_flags_and_window_shaped_extra_filename() {
     assert!(a.windows(2).any(|w| w[0] == "--sysroot" && w[1] == "/sys"));
     assert!(a.iter().any(|x| x == "-Zalways-encode-mir"));
     assert!(a.iter().any(|x| x == "-Zno-codegen"));
+    for flag in super::GUEST_MIR_ARGS {
+        assert!(a.iter().any(|x| x == flag), "missing {flag}");
+    }
     // dev profile default: debug-assertions and overflow-checks on, no opt-level
     assert!(
         a.windows(2)

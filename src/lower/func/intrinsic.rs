@@ -77,7 +77,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
-        span: rustc_span::Span,
+        source_info: mir::SourceInfo,
     ) -> Result<Option<(Vec<Stmt>, Terminator)>, Error> {
         let InstanceKind::Intrinsic(def_id) = inst.def else {
             return Ok(None);
@@ -567,16 +567,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             "caller_location" => {
-                // Location::caller(): when this function is track_caller, read the hidden
-                // trailing arg slot; otherwise synthesize from the intrinsic call site (rare; the caller chain usually tracks to the bottom)
                 let (dst_p, w) = self.place_scalar(destination)?;
-                let op = match self.caller_loc_off {
-                    Some(off) => Operand::Slot(Slot {
-                        off,
-                        width: Width::W64,
-                    }),
-                    None => self.linker.caller_location_imm(span)?,
-                };
+                let op = self.caller_location(source_info)?;
                 vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
                     rv: Rvalue::Use(op),
