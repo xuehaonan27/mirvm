@@ -113,9 +113,16 @@ impl Heat {
             return;
         }
         let mut seen = std::collections::BTreeSet::new();
-        let body = observed
+        let order: Vec<_> = observed
             .iter()
-            .filter(|id| seen.insert(**id))
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect();
+        if order == self.order {
+            return;
+        }
+        let body = order
+            .iter()
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join("\n");

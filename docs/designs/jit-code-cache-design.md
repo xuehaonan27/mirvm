@@ -287,7 +287,8 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    The next order retains successful prelinks before newly requested functions, deduplicated by id.
    A linked function bypasses interpretation counters, so absence from the request queue does not
    establish that it went cold. Failed prelinks are not carried forward unless requested again.
-   `jit-heat-reuse` covers partial new demand and subsequent reuse across four processes.
+   An unchanged deduplicated order is not republished. `jit-heat-reuse` covers partial new demand,
+   subsequent reuse and unchanged file identity across four processes.
    Tiers are built as the mechanism §2.6 asks for: one Engine runs one compiler per tier (each with its
    own ISA, module and jit-key, both publishing into the same slots), the pre-link wave prefers a stored
    optimized entry for a hot function and falls back to the baseline one, and the *request* a function

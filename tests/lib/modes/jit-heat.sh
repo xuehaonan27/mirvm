@@ -45,6 +45,7 @@ assert before < after, f"prelinked heat lost or new demand absent: {before} -> {
 CHECK
     [ "$?" = 0 ] || { bad "$CASE_NAME (partial demand erased prelinked heat)"; return 1; }
 
+    stat -c '%i %y' "$home"/cache/package-heat/*.order >"$TMP/identity.before"
     run_export second_warm "$second" || return 1
     run_export first_warm "$first" || return 1
     cmp -s "$TMP/first.out" "$TMP/first_warm.out" \
@@ -53,5 +54,8 @@ CHECK
     cat "$home"/cache/package-heat/*.order >"$TMP/final.order"
     cmp -s "$TMP/second.order" "$TMP/final.order" \
         || { bad "$CASE_NAME (repeated reuse changed heat order)"; return 1; }
+    stat -c '%i %y' "$home"/cache/package-heat/*.order >"$TMP/identity.after"
+    cmp -s "$TMP/identity.before" "$TMP/identity.after" \
+        || { bad "$CASE_NAME (unchanged heat was republished)"; return 1; }
     ok "$CASE_NAME (prelinks and new demand retained across four processes)"
 }
