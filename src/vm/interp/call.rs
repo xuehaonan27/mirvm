@@ -168,12 +168,11 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
 
     // The frame guard always restores the operand region; the surrounding raw catch picks the
     // cleanup from the actual exception identity.
-    // Push the shadow frame with a synthetic IP for this FuncId: an opaque, non-executable
-    // token used only as a backtrace IP, never dereferenced as code.
+    // Keep the function identity until a backtrace needs a symbolizable address.
     let shadow_marker = 0u8;
     unsafe {
         (*ctx).shadow.push(crate::vm::ctx::ShadowFrame {
-            ip: crate::vm::backtrace::func_synth_ip(ctx, func),
+            func,
             cfa: &shadow_marker as *const u8 as u64,
         })
     };

@@ -47,8 +47,8 @@ pub struct Ctx {
     /// (0 = not materialized; first visit heap-allocates + copies the template). Guest dtors run
     /// first via the pthread-key thunk; instance memory is freed only in Ctx's final teardown round.
     pub tls: Vec<u64>,
-    /// Active interpreted frames. IP is consumed by the guest unwinder; CFA is the location of this
-    /// interpreted call on the host stack. The backtrace uses CFA to merge interpreted frames with
+    /// Active interpreted frames. FuncId is resolved to a symbol address only during backtrace
+    /// capture; CFA is the location of this interpreted call on the host stack and merges it with
     /// JIT real-machine frames read by the system unwinder into a single call sequence. Pushed on
     /// enter and popped on FrameGuard::drop (same lifetime as depth, unwind-safe).
     pub shadow: Vec<ShadowFrame>,
@@ -66,7 +66,7 @@ unsafe impl Send for Ctx {}
 
 #[derive(Clone, Copy)]
 pub struct ShadowFrame {
-    pub ip: u64,
+    pub func: u32,
     pub cfa: u64,
 }
 

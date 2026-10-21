@@ -5,9 +5,7 @@
 //! callback retains only a small tombstone after close, never the Module.
 
 use std::collections::HashMap;
-#[cfg(test)]
-use std::sync::OnceLock;
-use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
 use super::super::ir::Module;
 use super::activation::activate;
@@ -18,8 +16,7 @@ use super::signals::{
 use super::thread_ctx::{CTX_KEY, CtxSlot, ThreadContexts};
 
 /// Read-only after publication: built by `ctx::load` during the load phase, then read lock-free by
-/// every thread during execution. `thunks` is the one exception -- its entries are materialized on
-/// demand during execution, so that cache carries its own `Mutex`.
+/// every thread during execution. State materialized during execution has its own synchronization.
 pub struct Shared {
     pub id: u64,
     pub module: Module,
@@ -27,9 +24,8 @@ pub struct Shared {
     /// native images. Process state lives here rather than in the artifact, which stays a
     /// self-contained description.
     pub instance: super::super::instance::Instance,
-    /// The Engine's symbol carriers, built from the artifact when it is loaded: process state
-    /// lives here rather than in the artifact, which stays a self-contained description.
-    pub symbols: super::super::backtrace::Symbols,
+    /// Published on the first backtrace and retained until all Engine executions have ended.
+    pub symbols: OnceLock<Result<super::super::backtrace::Symbols, crate::error::Error>>,
     pub thunks: super::super::thunks::ThunkCache,
     /// Code domain this Engine's activations use. Chosen once,
     /// when the Engine is created, and then held for every activation of this
@@ -586,7 +582,7 @@ impl Engine {
         // facts it cannot prove: validity/lifetime of embedded host pointers
         // and agreement of native ABI descriptions with their real callees.
         super::super::verify::module(&module, &instance)?;
-        Self::try_new(Shared::try_new(module, instance)?)
+        Self::try_new(Shared::new_loaded(module, instance))
     }
 
     /// Consume bytecode verification evidence from the immutable artifact loader.
@@ -598,7 +594,7 @@ impl Engine {
         artifact: super::super::archive::VerifiedArtifact,
     ) -> Result<Self, crate::error::Error> {
         let (module, instance) = artifact.into_parts();
-        Self::try_new(Shared::try_new(module, instance)?)
+        Self::try_new(Shared::new_loaded(module, instance))
     }
 
     pub(crate) fn shared(&self) -> &Arc<Shared> {

@@ -2,10 +2,10 @@
 //!
 //! Everything `Shared` holds is fixed here, once, before the first thread can read it. This
 //! Engine's code domain is decided from the telemetry session -- and only a recording domain gets
-//! the rewritable host-syscall form -- function names are filled in, and the backtrace symbols and
-//! JIT tiering state are built over the final function list. The instance is either materialized
-//! from the artifact or handed over by the command-line load phase, which owns the process state
-//! an artifact cannot describe.
+//! the rewritable host-syscall form -- function names and JIT tiering state are built over the final
+//! function list. Backtrace symbol publication is deferred until a stack capture needs it.
+//! The instance is either materialized from the artifact or handed over by the command-line load
+//! phase, which owns the process state an artifact cannot describe.
 //!
 //! The constructors stay `Shared::new*` because that is the name every embedding and test call site
 //! uses; what the load step hands over to is `engine`'s lifetime.
@@ -23,20 +23,11 @@ impl Shared {
     pub(crate) fn new(module: Module) -> Self {
         let instance = Instance::materialize(&module)
             .unwrap_or_else(|error| panic!("Engine Shared initialization failed: {error}"));
-        Self::try_new(module, instance)
-            .unwrap_or_else(|error| panic!("Engine Shared initialization failed: {error}"))
+        Self::new_loaded(module, instance)
     }
 
     /// Publish a Module together with the instance the load phase built for it.
-    pub(crate) fn new_loaded(module: Module, instance: Instance) -> Self {
-        Self::try_new(module, instance)
-            .unwrap_or_else(|error| panic!("Engine Shared initialization failed: {error}"))
-    }
-
-    pub(crate) fn try_new(
-        mut module: Module,
-        instance: Instance,
-    ) -> Result<Self, crate::error::Error> {
+    pub(crate) fn new_loaded(mut module: Module, instance: Instance) -> Self {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         // One fact, decided once: whether a session is armed now fixes this
         // Engine's code domain for its whole lifetime.
@@ -49,14 +40,13 @@ impl Shared {
             super::super::jit::CodeDomain::Plain
         };
         module.ensure_function_names();
-        let symbols = super::super::backtrace::Symbols::materialize(&module)?;
         let jit = super::super::jit::JitState::new(module.funcs.len());
         let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(Shared {
+        Shared {
             id,
             module,
             instance,
-            symbols,
+            symbols: std::sync::OnceLock::new(),
             thunks: super::super::thunks::ThunkCache::default(),
             domain,
             jit,
@@ -65,6 +55,14 @@ impl Shared {
             ctx_slots: Mutex::new(Vec::new()),
             fork_baseline_threads: std::sync::atomic::AtomicUsize::new(0),
             fork_baseline_pid: std::sync::atomic::AtomicI32::new(0),
-        })
+        }
+    }
+
+    pub(crate) fn backtrace_symbols(
+        &self,
+    ) -> Result<&super::super::backtrace::Symbols, &crate::error::Error> {
+        self.symbols
+            .get_or_init(|| super::super::backtrace::Symbols::materialize(&self.module))
+            .as_ref()
     }
 }

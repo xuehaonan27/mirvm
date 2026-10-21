@@ -58,8 +58,12 @@ pub(super) fn exec(
             mem_read(a(0), Width::W64)
         }
         Builtin::UnwindGetCfa => mem_read(a(0) + 8, Width::W64),
-        // A synthetic IP is the function entry, so return ip itself (the enclosing fn start).
-        Builtin::UnwindFindEnclosing => a(0),
+        Builtin::UnwindFindEnclosing => unsafe { (*ctx).shared }
+            .symbols
+            .get()
+            .and_then(|symbols| symbols.as_ref().ok())
+            .and_then(|symbols| symbols.enclosing_ip(a(0)))
+            .unwrap_or(a(0)),
         // rust_try: a raw unwinder catch. Only a guest panic owned by the current Engine
         // calls catch_fn(data, exc) and returns 1; foreign or host exceptions keep unwinding.
         Builtin::CatchUnwind => {

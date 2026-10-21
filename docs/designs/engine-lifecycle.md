@@ -26,6 +26,12 @@
 6. **Reclamation never races guest code.** An Engine's memory, images and compiled code are released
    only when no thread is inside guest code, and that is the entire reason reclamation waits.
 
+Backtrace symbol images are Engine-owned, published once on the first capture and retained until
+reclamation. Interpreted shadow frames keep function identities; capture resolves those identities
+and JIT frames into stable symbol addresses before invoking guest callbacks. Concurrent captures
+share publication, and a retained backtrace can resolve its addresses after its captured calls return.
+Execution that never captures a backtrace does not construct, sign or load a symbol image.
+
 ## 2. Holds
 
 An Engine must not be finalized while any of these is outstanding.

@@ -38,12 +38,6 @@ fn fallback_func_ip(func: u32) -> u64 {
     crate::os_arch::addrspace::FUNC_IP_BASE + (func as u64) * 64
 }
 
-/// The instruction-pointer token for `func`: the address the symbol image published, when there
-/// is one.
-pub(crate) fn func_synth_ip(ctx: *mut Ctx, func: u32) -> u64 {
-    unsafe { (*ctx).shared }.symbols.ip_of(func)
-}
-
 #[repr(C)]
 struct GuestUnwindContext {
     ip: u64,
@@ -70,6 +64,11 @@ extern "C" fn collect_host_frame(ctx: unwind::Context, arg: unwind::Context) -> 
 /// callback only ever sees a controlled guest context, never engine host frames.
 pub(crate) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
     let shared = unsafe { (*ctx).shared };
+    // Complete publication before invoking guest callbacks, which may capture another backtrace.
+    // Captured IPs stay valid until the Engine releases its symbol image.
+    let symbols = shared
+        .backtrace_symbols()
+        .unwrap_or_else(|error| super::unwind::engine_abort(&error.to_string()));
     let mut host: Vec<HostFrame> = Vec::new();
     unsafe {
         unwind::backtrace(
@@ -81,12 +80,13 @@ pub(crate) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
     // The callback may re-enter the guest and change the live stack, so snapshot everything
     // first. The x86_64 stack grows down, so a smaller CFA is an inner frame; a JIT guest call
     // registers only its fast body, so wrapper frames never appear twice.
+    // Return PCs must be inside the symbol: resolvers subtract one byte to find the call site.
     let mut frames: Vec<GuestUnwindContext> = unsafe {
         (*ctx)
             .shadow
             .iter()
             .map(|frame| GuestUnwindContext {
-                ip: frame.ip,
+                ip: symbols.ip_of(frame.func) + 1,
                 cfa: frame.cfa,
             })
             .collect()
@@ -96,7 +96,7 @@ pub(crate) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
             .jit
             .guest_func_at(frame.ip.saturating_sub(1))
             .map(|func| GuestUnwindContext {
-                ip: func_synth_ip(ctx, func),
+                ip: symbols.ip_of(func) + 1,
                 cfa: frame.cfa,
             })
     }));
@@ -153,6 +153,11 @@ impl Symbols {
             .unwrap_or_else(|| fallback_func_ip(func))
     }
 
+    pub(crate) fn enclosing_ip(&self, ip: u64) -> Option<u64> {
+        let offset = ip.checked_sub(*self.ips.first()?)?;
+        self.ips.get(offset as usize / SLOT).copied()
+    }
+
     #[cfg(test)]
     fn image_handle(&self) -> usize {
         self.image.as_ref().unwrap().handle()
@@ -162,6 +167,77 @@ impl Symbols {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::ctx::{Engine, Shared};
+    use crate::vm::ir::{Block, FuncBody, RetAbi, Terminator};
+
+    fn named_module(name: &str) -> Module {
+        let mut module = Module {
+            funcs: vec![FuncBody {
+                shared: None,
+                frame_size: 0,
+                frame_align: 1,
+                ret: RetAbi::Zst,
+                params: Vec::new(),
+                caller_loc_off: None,
+                blocks: vec![Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Return,
+                }],
+                name: name.into(),
+            }]
+            .into(),
+            ..Module::default()
+        };
+        module.exports.insert(name.into(), 0);
+        module
+    }
+
+    #[test]
+    fn ordinary_execution_leaves_symbol_publication_uninitialized() {
+        let engine = Engine::new(Shared::new(named_module("no_backtrace")));
+        assert!(engine.shared().symbols.get().is_none());
+        unsafe { crate::vm::interp::run_export(&engine, "no_backtrace", &[]) }.unwrap();
+        assert!(engine.shared().symbols.get().is_none());
+        engine.close();
+    }
+
+    #[test]
+    fn concurrent_captures_share_stable_symbol_addresses() {
+        let shared = Shared::new(named_module("mirvm_concurrent_backtrace"));
+        assert!(shared.symbols.get().is_none());
+        let ready = std::sync::Barrier::new(4);
+        let addresses = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        ready.wait();
+                        shared.backtrace_symbols().unwrap().ip_of(0)
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_ne!(addresses[0], fallback_func_ip(0));
+        assert!(addresses.iter().all(|address| *address == addresses[0]));
+        let symbols = shared.backtrace_symbols().unwrap();
+        assert_eq!(symbols.ip_of(0), addresses[0]);
+        assert_eq!(
+            crate::os::dll::sym(symbols.image_handle(), c"mirvm_concurrent_backtrace"),
+            addresses[0] as usize
+        );
+    }
+
+    #[test]
+    fn failed_publication_is_retained_for_subsequent_captures() {
+        let shared = Shared::new(named_module("invalid\0name"));
+        let first = shared.backtrace_symbols().unwrap_err();
+        let second = shared.backtrace_symbols().unwrap_err();
+        assert!(std::ptr::eq(first, second));
+        assert!(first.to_string().contains("NUL"));
+    }
 
     #[test]
     fn in_memory_elf_exports_function_names_at_indexed_addresses() {
@@ -179,6 +255,7 @@ mod tests {
         {
             let mut info = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
             let ip = symbols.ip_of(index as u32);
+            assert_eq!(symbols.enclosing_ip(ip + 1), Some(ip));
             let ok = unsafe { libc::dladdr(ip as *const libc::c_void, info.as_mut_ptr()) };
             assert_ne!(ok, 0);
             let info = unsafe { info.assume_init() };
@@ -195,5 +272,7 @@ mod tests {
                 symbols.ip_of(index as u32) as usize
             );
         }
+        assert_eq!(symbols.enclosing_ip(0), None);
+        assert_eq!(symbols.enclosing_ip(symbols.ip_of(1) + SLOT as u64), None);
     }
 }

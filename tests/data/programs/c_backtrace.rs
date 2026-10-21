@@ -5,7 +5,7 @@
 // vary per run, symbol names depend on debuginfo), so the oracle uses invariants: (1) capture
 // succeeds (status=Captured) (2) non-empty (3) **depth is reflected truthfully** (deeper call
 // site -> more frames). native and mirvm both satisfy these and print the same deterministic
-// line; mirvm's synthesized IPs stay honest <unknown> and are never faked, so text is not diffed.
+// line. Captured addresses must remain symbolizable after the capturing function returns.
 #![feature(backtrace_frames)]
 use std::backtrace::{Backtrace, BacktraceStatus};
 use std::hint::black_box;
@@ -20,8 +20,14 @@ fn deep(n: u32) -> usize {
     }
 }
 
+#[inline(never)]
 fn named_frame_present() -> bool {
-    format!("{:?}", Backtrace::force_capture()).contains("c_backtrace::deep")
+    format!("{:?}", Backtrace::force_capture()).contains("c_backtrace::named_frame_present")
+}
+
+#[inline(never)]
+fn retained_capture() -> Backtrace {
+    black_box(Backtrace::force_capture())
 }
 
 fn main() {
@@ -38,5 +44,13 @@ fn main() {
         "recursion depth is not reflected in shadow frames: {shallow} -> {deeper}"
     );
     assert!(named_frame_present(), "guest function name is not symbolized by the standard backtrace");
+    let retained = retained_capture();
+    let workers: Vec<_> = (0..4)
+        .map(|_| std::thread::spawn(|| format!("{:?}", retained_capture())))
+        .collect();
+    for worker in workers {
+        assert!(worker.join().unwrap().contains("c_backtrace::retained_capture"));
+    }
+    assert!(format!("{retained:?}").contains("c_backtrace::retained_capture"));
     println!("backtrace: captured, named, non-empty, depth reflected (+30 frames)");
 }
