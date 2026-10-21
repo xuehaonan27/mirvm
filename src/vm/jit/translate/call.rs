@@ -7,6 +7,49 @@
 use super::*;
 
 impl Translator<'_, '_> {
+    /// Prepare a direct guest call through this domain's fast slot. The compiler installs
+    /// a C2I trampoline before publishing a caller whose callee is still interpreted.
+    /// Both ordinary and cleanup calls check headroom before entering the callee prologue.
+    pub(super) fn direct_callee(
+        &mut self,
+        callee: ir::FuncId,
+        nargs: usize,
+    ) -> Option<(Value, cranelift_codegen::ir::Signature)> {
+        let body = self.shared.module.funcs.header(callee as usize).unwrap();
+        let abi = callee_abi(body).filter(|abi| abi.nparams == nargs)?;
+        let func = self.site(Site::Func(callee), u64::from(callee));
+        let need = self.site(
+            Site::StackNeed(callee),
+            super::super::guard::required_headroom(body),
+        );
+        super::super::guard::emit(
+            self.module,
+            self.b,
+            self.domain,
+            func,
+            need,
+            self.stack_guard,
+            self.stack_overflow,
+        );
+        let slot = &self.shared.jit.slots_for(self.domain).slots_fast[callee as usize]
+            as *const std::sync::atomic::AtomicU64 as u64;
+        let addr = self.site(
+            Site::Slot {
+                domain: self.domain,
+                func: callee,
+            },
+            slot,
+        );
+        let entry = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 0);
+        let mut sig = self.module.make_signature();
+        sig.params.resize(nargs, AbiParam::new(types::I64));
+        sig.returns.resize(abi.nrets, AbiParam::new(types::I64));
+        Some((entry, sig))
+    }
+
     /// Call a helper whose `out` parameter is 16 bytes: capture `(lo, hi)` in a
     /// stack slot and store it back into `dst`.
     pub(super) fn call_out128(&mut self, name: &str, args: &[Value], dst: &ir::PlaceExpr) {

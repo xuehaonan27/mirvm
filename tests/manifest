@@ -219,6 +219,7 @@ jit_builtin_probe  native-diff  fast  120  input=programs/jit_builtin_probe.rs
 jit_call_probe  native-diff  fast  120  input=programs/jit_call_probe.rs
 jit_foreign_probe  native-diff  fast  120  input=programs/jit_foreign_probe.rs
 jit_unwind_probe  native-diff  fast  120  input=programs/jit_unwind_probe.rs
+jit-cleanup-calls native-diff fast 120 input=programs/jit_cleanup_calls.rs env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 variant=MIRVM_JIT=off
 main_outcome_probe  native-diff  fast  120  input=programs/main_outcome_probe.rs
 nested_dst_probe  native-diff  fast  120  input=programs/nested_dst_probe.rs
 noreturn_ud2  native-diff  fast  120  input=programs/noreturn_ud2.rs

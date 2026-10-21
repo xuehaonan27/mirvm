@@ -1187,3 +1187,60 @@ fn compiled_call_checks_the_callees_frame_before_entering_it() {
         std::mem::forget(compiler);
     }
 }
+
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn cleanup_call_artifacts_use_domain_slots_and_keep_unwind_metadata() {
+    for domain in [CodeDomain::Plain, CodeDomain::Trace] {
+        let mut caller = body(
+            "cleanup_caller",
+            Terminator::Call {
+                callee: 1,
+                args: Vec::new(),
+                ret: RetDest::Ignore,
+                target: 1,
+                unwind: UnwindAction::Cleanup(2),
+                role: ir::CallRole::Normal,
+            },
+        );
+        caller.blocks.push(ir::Block {
+            stmts: Vec::new(),
+            term: Terminator::Resume,
+        });
+        let shared = Shared::new(ir::Module {
+            funcs: vec![caller, body("callee", Terminator::Return)].into(),
+            ..Default::default()
+        });
+        let mut compiler = test_compiler(&shared, domain);
+        compiler.reload = true;
+        compiler.compile(0);
+        assert_ne!(
+            shared.jit.slots_for(domain).slots[0].load(Ordering::Acquire),
+            0
+        );
+        assert_ne!(
+            shared.jit.slots_for(domain).slots_fast[1].load(Ordering::Acquire),
+            0
+        );
+        let entry = compiler
+            .last_entry
+            .as_ref()
+            .expect("captured cleanup caller");
+        let fast = entry.symbol(JitSymbolRole::FastBody).unwrap();
+        assert!(fast.lsda.is_some());
+        assert!(fast.relocs.iter().any(|r| matches!(
+            r.target,
+            artifact::Target::Slot { domain: d, func: artifact::Ref::Ordinal(_) } if d == domain
+        )));
+        assert!(
+            fast.relocs
+                .iter()
+                .any(|r| matches!(r.target, artifact::Target::StackNeed(_)))
+        );
+        assert!(!fast.relocs.iter().any(|r| matches!(
+            &r.target,
+            artifact::Target::Named(name) if name.as_ref() == "mirvm_c2i"
+        )));
+        std::mem::forget(compiler);
+    }
+}

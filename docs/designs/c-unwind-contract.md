@@ -56,8 +56,12 @@ Numbered rules:
 - **C4** MIR `UnwindAction::Terminate` outranks the callee's ABI. Direct foreign calls and native
   function pointers must both pass the terminate guard, and no exception may cross a guest plain C
   wrapper.
-- **C5** JIT `try_call` is terminatory; its return value comes from the `TryCallRet` block parameter on
-  the normal branch, never from the instruction's results.
+- **C5** JIT `try_call` and `try_call_indirect` are terminatory; return values come from `TryCallRet`
+  block parameters on the normal branch, never from the instruction's results. Ordinary direct
+  guest calls with cleanup use the calling domain's fast slot when the callee ABI permits it, with
+  a callee stack-headroom check before entry. The slot may hold compiled code or a C2I trampoline;
+  both use the same exception table and exception classification. Other calls retain the packed
+  helper boundary.
 - **C6** Cleanup treats every exception source alike and must not skip Drop under a C++ exception just
   to recognize guest panics only.
 - **C7** Guest panic and engine fault use MIRVM-owned exception classes, and catch sites classify the

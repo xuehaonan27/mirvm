@@ -71,10 +71,28 @@ impl Translator<'_, '_> {
                 }
                 match unwind {
                     UnwindAction::Cleanup(bb) => {
-                        // try_call: `normal` is the ok block (write back, then jump to target) and
-                        // exception-table tag 0 goes to pad(TryCallExn(0)). Every case goes through
-                        // c2i-try_call because that is the one authoritative implementation; a PLT
-                        // try_call_indirect is left as a possible optimization.
+                        if matches!(role, ir::CallRole::Normal)
+                            && let Some((entry, sig)) = self.direct_callee(*callee, av.len())
+                        {
+                            let nrets = sig.returns.len();
+                            let (et, ok, pad) = self.prepare_cleanup(sig);
+                            self.b.ins().try_call_indirect(entry, &av, et);
+                            self.enter_cleanup_continuation(pad, *bb, ok, blocks);
+                            let lo = if nrets >= 1 {
+                                self.b.block_params(ok)[0]
+                            } else {
+                                self.b.ins().iconst(types::I64, 0)
+                            };
+                            let hi = if nrets >= 2 {
+                                self.b.block_params(ok)[1]
+                            } else {
+                                self.b.ins().iconst(types::I64, 0)
+                            };
+                            self.write_ret(ret, lo, hi);
+                            self.b.ins().jump(blocks[*target as usize], &[]);
+                            return;
+                        }
+                        // A call outside the fast ABI retains the packed helper boundary.
                         let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             (av.len().max(1) * 8) as u32,
@@ -161,64 +179,16 @@ impl Translator<'_, '_> {
                             let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
                             self.write_ret(ret, lo, hi);
                         } else {
-                            let cb = self.shared.module.funcs.header(*callee as usize).unwrap();
-                            let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
-                            if let Some(cabi) = plt {
-                                // Compiled slots point to bodies. Check before entering the callee's
-                                // prologue; packed boundary entries perform their own check.
-                                let fv = self.site(Site::Func(*callee), u64::from(*callee));
-                                let need = self.site(
-                                    Site::StackNeed(*callee),
-                                    super::super::guard::required_headroom(cb),
-                                );
-                                super::super::guard::emit(
-                                    self.module,
-                                    self.b,
-                                    self.domain,
-                                    fv,
-                                    need,
-                                    self.stack_guard,
-                                    self.stack_overflow,
-                                );
-                                // Hot path: indirect through the PLT's memory -- load
-                                // slots_fast[callee], then call_indirect. The shape is
-                                // constant, and the trampoline-to-fast upgrade is invisible to
-                                // the call site. The slot array is the one for this body's
-                                // domain: a trace body only ever resolves trace slots, a plain
-                                // body only plain slots.
-                                let slot_addr = &self.shared.jit.slots_for(self.domain).slots_fast
-                                    [*callee as usize]
-                                    as *const std::sync::atomic::AtomicU64
-                                    as i64;
-                                let ap = self.site(
-                                    Site::Slot {
-                                        domain: self.domain,
-                                        func: *callee,
-                                    },
-                                    slot_addr as u64,
-                                );
-                                let fp =
-                                    self.b
-                                        .ins()
-                                        .load(types::I64, MemFlagsData::trusted(), ap, 0);
-                                let sig = {
-                                    let mut s = self.module.make_signature();
-                                    for _ in 0..av.len() {
-                                        s.params.push(AbiParam::new(types::I64));
-                                    }
-                                    for _ in 0..cabi.nrets {
-                                        s.returns.push(AbiParam::new(types::I64));
-                                    }
-                                    s
-                                };
+                            if let Some((fp, sig)) = self.direct_callee(*callee, av.len()) {
+                                let nrets = sig.returns.len();
                                 let sigref = self.b.import_signature(sig);
                                 let call = self.b.ins().call_indirect(sigref, fp, &av);
-                                let lo = if cabi.nrets >= 1 {
+                                let lo = if nrets >= 1 {
                                     self.b.inst_results(call)[0]
                                 } else {
                                     self.b.ins().iconst(types::I64, 0)
                                 };
-                                let hi = if cabi.nrets >= 2 {
+                                let hi = if nrets >= 2 {
                                     self.b.inst_results(call)[1]
                                 } else {
                                     self.b.ins().iconst(types::I64, 0)
