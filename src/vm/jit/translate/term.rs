@@ -153,6 +153,11 @@ impl Translator<'_, '_> {
                         self.b.ins().jump(blocks[*target as usize], &[]);
                     }
                     UnwindAction::Continue => {
+                        if let Some((lo, hi)) = self.inline_leaf(&av) {
+                            self.write_ret(ret, lo, hi);
+                            self.b.ins().jump(blocks[*target as usize], &[]);
+                            return;
+                        }
                         if matches!(role, ir::CallRole::MainPanicBoundary) {
                             let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
                                 StackSlotKind::ExplicitSlot,

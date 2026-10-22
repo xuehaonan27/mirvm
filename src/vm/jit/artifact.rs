@@ -25,7 +25,7 @@ use super::state::{CodeDomain, JitSymbolRole};
 use super::{Body, SigPart};
 
 /// Encoding version, part of what an entry's bytes mean.
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 
 pub(crate) use crate::arch::code::Reloc as Kind;
 
@@ -215,6 +215,8 @@ pub(crate) struct JitKey {
     pub isa: String,
     /// The code domain: one namespace per vmctx regime, so a T→R flip cannot reuse the other's code.
     pub domain: CodeDomain,
+    /// Canonical leaf bodies selected in caller block order; changing a leaf invalidates the caller.
+    pub inlined: Vec<[u8; 32]>,
 }
 
 impl JitKey {
@@ -233,6 +235,7 @@ impl JitKey {
             options: lines(isa.flags().iter().collect()),
             isa: lines(isa.isa_flags()),
             domain,
+            inlined: Vec::new(),
         }
     }
 

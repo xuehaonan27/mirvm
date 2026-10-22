@@ -22,7 +22,7 @@ use super::*;
 /// First byte of the encoded fragment: a change to the canonical form itself (a new reference site,
 /// a different ordinal rule) must invalidate every fragment id, and hashing the version is what
 /// makes that automatic instead of a remembered migration.
-pub const ENCODING_VERSION: u8 = 2;
+pub const ENCODING_VERSION: u8 = 3;
 
 /// What one ordinal of a canonical body stands for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -122,6 +122,7 @@ pub(crate) fn stored_canonical(mut body: FuncBody) -> Result<Stored, crate::erro
         .map(|shared| {
             let bytes = encode_template(&shared.template)?;
             shared.template = std::sync::Arc::new(GenericTemplate::new(GenericInstructions {
+                prepared: Default::default(),
                 dictionary: 0,
                 binding_count: 0,
                 blocks: Vec::new(),
@@ -616,6 +617,8 @@ mod tests {
     fn body_with(term: Terminator) -> FuncBody {
         FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,

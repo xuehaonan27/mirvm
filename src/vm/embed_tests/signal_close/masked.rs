@@ -94,6 +94,8 @@ fn signal_nested_module() -> Module {
     });
     let nested = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,

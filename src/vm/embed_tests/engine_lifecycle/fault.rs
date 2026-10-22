@@ -34,6 +34,8 @@ unsafe extern "C-unwind" fn nested_engine_entry() {
 fn guest_panic_with_cleanup_function() -> FuncBody {
     FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -93,6 +95,8 @@ fn foreign_fault_traversal_module(owner_fault_thunk: u64) -> Module {
     let catch_addr = 0xc002;
     let outer = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Scalar(result),
@@ -136,6 +140,8 @@ fn foreign_fault_traversal_module(owner_fault_thunk: u64) -> Module {
     };
     let try_body = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,

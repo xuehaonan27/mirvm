@@ -82,6 +82,8 @@ fn cross_engine_signal_reinstaller_module() -> Module {
 
     let installer = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Scalar(old),

@@ -18,6 +18,8 @@
 pub mod frag;
 mod op;
 mod place;
+pub(crate) mod prepared;
+pub use prepared::{ArchivedPrepared, Operation, Prepared};
 mod program;
 
 // The vocabulary and the instruction families live in child modules; re-export them so every
@@ -809,6 +811,8 @@ mod tests {
     fn capture_rewrite_changes_only_plain_host_syscalls() {
         let body = |name: &str, builtin| FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 0,
             frame_align: 1,
             ret: RetAbi::Zst,

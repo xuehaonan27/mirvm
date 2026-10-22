@@ -38,6 +38,8 @@ fn start_module(thread: *mut ThreadId, marker: &AtomicU64) -> Module {
     let start_sig = sig(vec![FfiKind::Ptr], FfiKind::Ptr, Vec::new());
     let spawn = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -89,6 +91,8 @@ fn start_module(thread: *mut ThreadId, marker: &AtomicU64) -> Module {
     };
     let start = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Scalar(ret),

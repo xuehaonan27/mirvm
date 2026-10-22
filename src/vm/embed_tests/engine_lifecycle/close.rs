@@ -40,6 +40,8 @@ fn foreign_closed_traversal_module(owner_thunk: u64) -> Module {
     let mut module = Module {
         funcs: vec![FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,

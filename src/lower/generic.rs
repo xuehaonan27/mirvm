@@ -541,6 +541,8 @@ impl<'tcx> Exporter<'tcx> {
             template: Template {
                 body: FuncBody {
                     shared: None,
+                    prepared: Default::default(),
+                    objects: Vec::new(),
                     frame_size: cx.frame_size,
                     frame_align: cx.frame_align,
                     ret,
@@ -551,6 +553,7 @@ impl<'tcx> Exporter<'tcx> {
                 },
                 instructions: std::sync::Arc::new(
                     GenericTemplate::new(GenericInstructions {
+                        prepared: Default::default(),
                         dictionary,
                         binding_count: u32::try_from(cx.bindings.len()).ok()?,
                         blocks,

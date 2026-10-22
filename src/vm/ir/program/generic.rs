@@ -47,10 +47,12 @@ pub struct GenericInstructions {
     pub dictionary: u32,
     pub binding_count: u32,
     pub blocks: Vec<Block>,
+    pub prepared: Prepared,
 }
 
 impl GenericTemplate {
-    pub fn new(code: GenericInstructions) -> Result<Self, crate::error::Error> {
+    pub fn new(mut code: GenericInstructions) -> Result<Self, crate::error::Error> {
+        code.prepared = Prepared::new(&code.blocks, Some(code.dictionary));
         let mut template = Self {
             identity: [0; 32],
             code,
@@ -203,6 +205,7 @@ impl FuncBody {
             .collect();
         initialize.append(&mut body.blocks[0].stmts);
         body.blocks[0].stmts = initialize;
+        body.prepared = Prepared::new(&body.blocks, None);
         body
     }
 }
@@ -234,6 +237,8 @@ pub(crate) fn test_generic_body(value: u64) -> FuncBody {
         width: Width::W64,
     };
     FuncBody {
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 24,
         frame_align: 8,
         ret: RetAbi::Scalar(slot(8)),
@@ -244,6 +249,7 @@ pub(crate) fn test_generic_body(value: u64) -> FuncBody {
         shared: Some(Box::new(SharedBody {
             template: Arc::new(
                 GenericTemplate::new(GenericInstructions {
+                    prepared: Default::default(),
                     dictionary: 16,
                     binding_count: 1,
                     blocks: vec![Block {

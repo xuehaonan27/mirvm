@@ -7,6 +7,8 @@ fn libc_error_probe(name: &str, builtin: Builtin, args: Vec<Operand>) -> FuncBod
     let errno = word(8);
     FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Pair(result, errno),

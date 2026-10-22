@@ -194,6 +194,12 @@ impl Template {
             let layout = &layouts[local.layout as usize];
             let off = reserve(&mut body.frame_size, layout.size, layout.align)?;
             body.frame_align = body.frame_align.max(layout.align);
+            if layout.size != 0 {
+                body.objects.push(FrameObject {
+                    off,
+                    size: layout.size,
+                });
+            }
             locals.push(FrameLocal {
                 pointer: local.pointer,
                 off,

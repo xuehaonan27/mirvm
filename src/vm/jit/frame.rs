@@ -23,6 +23,8 @@ use super::*;
 #[derive(Default)]
 pub(super) struct FrameMap {
     ranges: Vec<(u32, u32)>,
+    objects: Vec<ir::FrameObject>,
+    accesses: Vec<(u32, u32)>,
     /// A live ZST address in a zero-byte frame: with `fsz == 0`, `&Local(0)` is a
     /// legal one-past-the-end ZST address that the interval model cannot express,
     /// so the frame is forced to materialize at size 1.
@@ -34,6 +36,7 @@ impl FrameMap {
         Self {
             ranges: vec![(0, size)],
             force: true,
+            ..Self::default()
         }
     }
     fn add(&mut self, a: u32, b: u32) {
@@ -42,8 +45,80 @@ impl FrameMap {
         }
     }
     pub(super) fn contains(&self, off: u32) -> bool {
-        self.ranges.iter().any(|&(a, b)| a <= off && off < b)
+        let index = self.ranges.partition_point(|&(a, _)| a <= off);
+        index != 0 && off < self.ranges[index - 1].1
     }
+    fn scalar(&mut self, slot: Slot) {
+        self.accesses
+            .push((slot.off, slot.off.saturating_add(slot.width.bytes())));
+    }
+
+    fn escaped_range(&self, off: u32, pos: u32, frame_size: u32) -> (u32, u32) {
+        let index = self.objects.partition_point(|object| object.off <= off);
+        if index != 0 {
+            let object = self.objects[index - 1];
+            let end = object.off + object.size;
+            if off < end && pos >= object.off && pos <= end {
+                return (object.off, end);
+            }
+        }
+        (0, frame_size)
+    }
+
+    pub(super) fn ssa_offsets(&self) -> Vec<u32> {
+        self.accesses
+            .iter()
+            .filter_map(|&(off, _)| (!self.contains(off)).then_some(off))
+            .collect()
+    }
+
+    fn finish(&mut self) {
+        self.accesses.sort_unstable();
+        self.accesses.dedup();
+        // Different-width or overlapping views must share bytes, not independent SSA variables.
+        for pair in self.accesses.windows(2) {
+            if pair[1].0 < pair[0].1 {
+                self.ranges.push((pair[0].0, pair[0].1.max(pair[1].1)));
+            }
+        }
+        self.ranges.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for &(start, end) in &self.ranges {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        self.ranges = merged;
+        // A byte channel can touch the middle of a scalar whose first byte is outside it.
+        let extra: Vec<_> = self
+            .accesses
+            .iter()
+            .copied()
+            .filter(|&(start, end)| {
+                let index = self.ranges.partition_point(|&(a, _)| a < end);
+                index != 0 && self.ranges[index - 1].1 > start
+            })
+            .collect();
+        self.ranges.extend(extra);
+        self.ranges.sort_unstable();
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for &(start, end) in &self.ranges {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        self.ranges = merged;
+        self.objects.clear();
+    }
+
     /// Whether the frame needs a stack slot; a zero-byte frame still does when
     /// `force` is set.
     pub(super) fn needs_frame(&self) -> bool {
@@ -71,12 +146,23 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
     ///   run time, so conservatively cover `[pos, fsz)`;
     /// - steps exhausted: cover `[pos, pos+n)` or `[pos, fsz)` per the extent.
     fn scan_place(out: &mut FrameMap, pe: &ir::PlaceExpr, extent: Extent, fsz: u32) {
+        for step in &pe.steps {
+            match step {
+                ir::PlaceStep::IndexScaled { idx, .. } => out.scalar(*idx),
+                ir::PlaceStep::VTableAlignOffset { meta, .. } => scan_op(out, meta, fsz),
+                _ => {}
+            }
+        }
         let ir::PlaceBase::Local(base) = pe.base else {
             return;
         };
         // Dereferencing a pointer reads its value, not the address of its slot. The translator
         // reads that value through read_slot, which also handles a slot another place has escaped.
         if matches!(pe.steps.first(), Some(ir::PlaceStep::Deref)) {
+            out.scalar(Slot {
+                off: base,
+                width: Width::W64,
+            });
             return;
         }
         let mut pos: i64 = base as i64;
@@ -90,15 +176,16 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                 }
                 ir::PlaceStep::IndexScaled { .. } | ir::PlaceStep::VTableAlignOffset { .. } => {
                     let p = pos.clamp(0, fsz as i64) as u32;
-                    out.add(p, fsz);
+                    let (start, end) = out.escaped_range(base, p, fsz);
+                    out.add(start, end);
                     return;
                 }
             }
         }
         let p = pos.clamp(0, fsz as i64) as u32;
-        let end = match extent {
-            Extent::Bytes(n) => p.saturating_add(n).min(fsz),
-            Extent::Escape => fsz,
+        let (p, end) = match extent {
+            Extent::Bytes(n) => (p, p.saturating_add(n).min(fsz)),
+            Extent::Escape => out.escaped_range(base, p, fsz),
         };
         // An address taken at the very end of the frame (`p == fsz`) produces the
         // degenerate interval `(fsz, fsz)`, which `FrameMap::add` drops through its
@@ -121,16 +208,28 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
     fn scan_op(out: &mut FrameMap, op: &Operand, fsz: u32) {
         match op {
             Operand::Mem { expr, width } => {
-                scan_place(out, expr, Extent::Bytes(width.bytes()), fsz)
+                if let Some(off) = expr.local_offset() {
+                    out.scalar(Slot { off, width: *width });
+                } else {
+                    scan_place(out, expr, Extent::Bytes(width.bytes()), fsz);
+                }
             }
             Operand::AddrOf(expr) => scan_place(out, expr, Extent::Escape, fsz),
             Operand::SubImm { base, .. } => scan_op(out, base, fsz),
-            Operand::Slot(_) | Operand::Imm { .. } | Operand::AddrImm(_) => {}
+            Operand::Slot(slot) => out.scalar(*slot),
+            Operand::Imm { .. } | Operand::AddrImm(_) => {}
         }
     }
     fn scan_sp(out: &mut FrameMap, sp: &ScalarPlace, fsz: u32) {
-        if let ScalarPlace::Mem { expr, width } = sp {
-            scan_place(out, expr, Extent::Bytes(width.bytes()), fsz);
+        match sp {
+            ScalarPlace::Slot(slot) => out.scalar(*slot),
+            ScalarPlace::Mem { expr, width } => {
+                if let Some(off) = expr.local_offset() {
+                    out.scalar(Slot { off, width: *width });
+                } else {
+                    scan_place(out, expr, Extent::Bytes(width.bytes()), fsz);
+                }
+            }
         }
     }
     fn scan_ret(out: &mut FrameMap, r: &RetDest, fsz: u32) {
@@ -223,7 +322,34 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
     fn rep_ext(count: &u64, elem_size: &u64) -> Extent {
         Extent::Bytes(count.saturating_mul(*elem_size).min(u32::MAX as u64) as u32)
     }
-    let mut out = FrameMap::default();
+    let mut out = FrameMap {
+        objects: body.objects.clone(),
+        ..FrameMap::default()
+    };
+    for param in &body.params {
+        match param {
+            ParamAbi::Scalar(slot) => out.scalar(*slot),
+            ParamAbi::Pair(a, b) => {
+                out.scalar(*a);
+                out.scalar(*b);
+            }
+            _ => {}
+        }
+    }
+    match &body.ret {
+        RetAbi::Scalar(slot) => out.scalar(*slot),
+        RetAbi::Pair(a, b) => {
+            out.scalar(*a);
+            out.scalar(*b);
+        }
+        _ => {}
+    }
+    if let Some(off) = body.caller_loc_off {
+        out.scalar(Slot {
+            off,
+            width: Width::W64,
+        });
+    }
     // ABI flattening puts two ranges on the frame: each Indirect parameter's byte
     // interval, which is the prologue memmove destination, and an indirect
     // return's ret_off interval, which is the Return memmove source.
@@ -258,8 +384,21 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                 // interval on the frame; recording only the base would promote the
                 // slots inside the interval to SSA and miscompile.
                 Stmt::Copy { dst, src, size } => {
-                    scan_place(&mut out, dst, Extent::Bytes(*size), fsz);
-                    scan_place(&mut out, src, Extent::Bytes(*size), fsz);
+                    if let Some((dst, src)) = scalar_copy(dst, src, *size) {
+                        for offset in (0..*size).step_by(8) {
+                            out.scalar(Slot {
+                                off: dst + offset,
+                                width: Width::W64,
+                            });
+                            out.scalar(Slot {
+                                off: src + offset,
+                                width: Width::W64,
+                            });
+                        }
+                    } else {
+                        scan_place(&mut out, dst, Extent::Bytes(*size), fsz);
+                        scan_place(&mut out, src, Extent::Bytes(*size), fsz);
+                    }
                 }
                 Stmt::RepeatScalar {
                     dst,
@@ -657,5 +796,18 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
             out.add(*off, (*off).saturating_add(8).min(fsz));
         }
     }
+    out.finish();
     out
+}
+
+/// Small frame copies use simultaneous scalar reads followed by writes, preserving memmove overlap.
+pub(super) fn scalar_copy(
+    dst: &ir::PlaceExpr,
+    src: &ir::PlaceExpr,
+    size: u32,
+) -> Option<(u32, u32)> {
+    if size == 0 || size > 64 || !size.is_multiple_of(8) {
+        return None;
+    }
+    Some((dst.local_offset()?, src.local_offset()?))
 }

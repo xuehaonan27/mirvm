@@ -121,7 +121,7 @@ publish), in a `cache/jit/` family. One entry: header (jit-key material for exac
 machine-code bytes, relocation table, unwind material — the Cranelift `UnwindInfo` CFA program plus
 the LSDA body with its code-relative landing-pad map; CIE and FDE are synthesized at load, so no
 absolute survives in the stored form. Entry integrity is BLAKE3-verified on read, like every blob.
-Encoding version 4 stores fast-body and packed symbols, their alignment, and the C2I templates
+Encoding version 5 stores fast-body and packed symbols, their alignment, and the C2I templates
 needed by direct callees. The packed symbol includes the boundary stack check. Previous encodings
 are refused and recompiled. AArch64 calls use checked branch immediates or adjacent veneers; page
 and low-page instruction relocations are checked and patched by the CPU layer.
@@ -183,6 +183,13 @@ stays below `speed`'s: only the JIT cache dropped, the cold readings did not reg
 rayon, whose sort is thousands of small functions and whose compilation happens on the worker thread,
 pays more instructions for the extra codegen while its wall time does not move — and that is exactly the
 reading that says a JIT-on instruction count cannot judge a policy that changes what gets compiled.
+
+A selected inlined leaf contributes its canonical fragment identity to the caller's jit-key,
+in caller block order. Selection is bounded and deterministic after concrete binding. Loading
+recomputes the same plan before lookup; changing a leaf selects a different cache key even when
+the caller's own fragment is unchanged. Inline eligibility excludes nested calls, so this dependency
+set is complete rather than a truncated traversal. Artifact body references still name the
+original caller's statements and blocks.
 
 ### 2.7 Collection
 

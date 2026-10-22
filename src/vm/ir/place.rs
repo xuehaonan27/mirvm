@@ -250,3 +250,20 @@ impl Operand {
         }
     }
 }
+
+impl PlaceExpr {
+    /// An address wholly inside the current frame, without following a pointer or dynamic index.
+    pub(crate) fn local_offset(&self) -> Option<u32> {
+        let PlaceBase::Local(base) = self.base else {
+            return None;
+        };
+        let mut offset = i64::from(base);
+        for step in &self.steps {
+            let PlaceStep::Offset(delta) = step else {
+                return None;
+            };
+            offset = offset.checked_add(i64::from(*delta))?;
+        }
+        u32::try_from(offset).ok()
+    }
+}

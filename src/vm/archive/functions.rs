@@ -128,6 +128,8 @@ impl Functions {
         }
         let body = self.body(index);
         FuncBody {
+            objects: owned(&body.objects),
+            prepared: owned(&body.prepared),
             frame_size: body.frame_size,
             frame_align: body.frame_align,
             ret: owned(&body.ret),
@@ -300,6 +302,8 @@ mod tests {
         let body = FuncBody {
             shared: None,
             name: "indirect".into(),
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 16,
             frame_align: 8,
             ret: RetAbi::Zst,
@@ -355,6 +359,8 @@ mod tests {
         use crate::vm::ir::*;
         let body = FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,

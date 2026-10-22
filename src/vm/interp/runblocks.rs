@@ -57,6 +57,10 @@ pub(super) fn run_blocks(
     let module: &Module = unsafe { &(*ctx).shared.module };
     let instance: &Instance = unsafe { &(*ctx).shared.instance };
     let blocks = body.code();
+    let (prepared, dictionary) = match &body.shared {
+        Some(shared) => (&shared.template.prepared, shared.values.as_slice()),
+        None => (&body.prepared, &[][..]),
+    };
     let mut work = body
         .shared
         .as_ref()
@@ -72,8 +76,16 @@ pub(super) fn run_blocks(
     loop {
         let current = blk;
         let block: &Block = &blocks[blk];
-        for stmt in &block.stmts {
-            exec_stmt(ctx, base, stmt);
+        if let Some(operations) = prepared.block(blk) {
+            for op in operations {
+                if !op.execute(base, &prepared.constants, dictionary) {
+                    exec_stmt(ctx, base, &block.stmts[op.a as usize]);
+                }
+            }
+        } else {
+            for stmt in &block.stmts {
+                exec_stmt(ctx, base, stmt);
+            }
         }
         let term = body.term(block);
         if let Some(sample) = &mut work {

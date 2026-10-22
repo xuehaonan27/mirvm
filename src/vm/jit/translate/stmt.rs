@@ -40,24 +40,7 @@ impl Translator<'_, '_> {
         match st {
             Stmt::Assign { dst, rv } => {
                 let v = self.rvalue(rv);
-                match dst {
-                    ScalarPlace::Slot(s) => {
-                        let s = *s;
-                        self.def_slot(s, v);
-                    }
-                    ScalarPlace::Mem { expr, width } => {
-                        // Memory destination: mask, narrow, store -- the same as the
-                        // interpreter's mem_write.
-                        let a = self.place_addr(expr);
-                        let masked = self.mask_val(v, *width);
-                        let n = if *width == Width::W64 {
-                            masked
-                        } else {
-                            self.b.ins().ireduce(Self::narrow_ty(*width), masked)
-                        };
-                        self.b.ins().store(MemFlagsData::trusted(), n, a, 0);
-                    }
-                }
+                self.write_scalar_place(dst, v);
             }
             Stmt::AssignOverflow {
                 op,
@@ -78,6 +61,27 @@ impl Translator<'_, '_> {
                 self.def_slot(sf, flag);
             }
             Stmt::Copy { dst, src, size } => {
+                if let Some((dst, src)) = super::super::frame::scalar_copy(dst, src, *size) {
+                    let values: Vec<_> = (0..*size)
+                        .step_by(8)
+                        .map(|offset| {
+                            self.read_slot(Slot {
+                                off: src + offset,
+                                width: Width::W64,
+                            })
+                        })
+                        .collect();
+                    for (offset, value) in (0..*size).step_by(8).zip(values) {
+                        self.write_slot(
+                            Slot {
+                                off: dst + offset,
+                                width: Width::W64,
+                            },
+                            value,
+                        );
+                    }
+                    return;
+                }
                 let d = self.place_addr(dst);
                 let s = self.place_addr(src);
                 self.copy_bytes(d, s, u64::from(*size));

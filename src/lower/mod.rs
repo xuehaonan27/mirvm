@@ -1259,6 +1259,8 @@ mod tests {
     fn body_with(term: ir::Terminator, stmts: Vec<ir::Stmt>) -> ir::FuncBody {
         ir::FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 0,
             frame_align: 1,
             ret: ir::RetAbi::Zst,

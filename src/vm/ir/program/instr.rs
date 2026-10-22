@@ -730,6 +730,9 @@ pub struct Block {
 #[archive(check_bytes)]
 pub struct FuncBody {
     pub shared: Option<Box<super::SharedBody>>,
+    /// Disjoint local allocations. Missing coverage conservatively retains frame-wide aliasing.
+    pub objects: Vec<FrameObject>,
+    pub prepared: crate::vm::ir::Prepared,
     pub frame_size: u32,
     pub frame_align: u32,
     /// Return channel (_0).
@@ -742,4 +745,21 @@ pub struct FuncBody {
     pub blocks: Vec<Block>,
     /// Symbol name, used for diagnostics.
     pub name: Box<str>,
+}
+
+/// One nonempty local allocation, before field offsets are folded into scalar slots.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+pub struct FrameObject {
+    pub off: u32,
+    pub size: u32,
 }

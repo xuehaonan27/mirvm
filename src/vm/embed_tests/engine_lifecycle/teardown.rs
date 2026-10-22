@@ -138,6 +138,8 @@ fn constructor_faulting_masked_reraise_module(
     let count = word(0);
     let signal_handler = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -208,6 +210,8 @@ fn constructor_faulting_masked_reraise_module(
     };
     let install_and_raise = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,

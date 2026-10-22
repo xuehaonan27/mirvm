@@ -202,6 +202,10 @@ impl Translator<'_, '_> {
                 self.write_slot(s, v);
             }
             ScalarPlace::Mem { expr, width } => {
+                if let Some(off) = expr.local_offset() {
+                    self.write_slot(Slot { off, width: *width }, v);
+                    return;
+                }
                 let a = self.place_addr(expr);
                 let masked = self.mask_val(v, *width);
                 let n = if *width == Width::W64 {

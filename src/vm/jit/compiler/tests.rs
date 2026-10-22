@@ -289,6 +289,8 @@ fn trace_domain_compiles_a_pinned_syscall_body() {
 pub(super) fn body(name: &str, first: Terminator) -> ir::FuncBody {
     ir::FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -688,6 +690,8 @@ fn a_compiled_body_runs_from_its_artifact() {
     };
     let body = ir::FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: ir::RetAbi::Scalar(slot()),
@@ -813,6 +817,8 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
         };
         ir::FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 16,
             frame_align: 8,
             ret: ir::RetAbi::Zst,
@@ -953,6 +959,8 @@ fn an_indirect_native_signature_is_recorded_and_replayed() {
     };
     let funcs = vec![ir::FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: ir::RetAbi::Zst,
@@ -1245,4 +1253,181 @@ fn cleanup_call_artifacts_use_domain_slots_and_keep_unwind_metadata() {
         )));
         std::mem::forget(compiler);
     }
+}
+
+#[test]
+fn frame_objects_bound_escape_and_overlapping_scalar_views_stay_coherent() {
+    let slot = |off, width| Slot { off, width };
+    let place = |off| ir::PlaceExpr {
+        base: ir::PlaceBase::Local(off),
+        steps: Box::new([]),
+    };
+    let mut probe = body("escape", Terminator::Return);
+    probe.frame_size = 40;
+    probe.objects = vec![
+        ir::FrameObject { off: 0, size: 16 },
+        ir::FrameObject { off: 16, size: 24 },
+    ];
+    probe.blocks[0].stmts = vec![Stmt::Assign {
+        dst: ScalarPlace::Slot(slot(24, Width::W64)),
+        rv: ir::Rvalue::Ref(place(8)),
+    }];
+    let frame = analyze_frame(&probe);
+    assert!(frame.contains(8));
+    assert!(!frame.contains(16));
+    assert!(!frame.contains(24));
+    probe.objects.clear();
+    assert!(analyze_frame(&probe).contains(24));
+
+    probe.blocks[0].stmts = vec![
+        Stmt::Assign {
+            dst: ScalarPlace::Slot(slot(0, Width::W64)),
+            rv: ir::Rvalue::Use(Operand::Imm {
+                bits: 123,
+                width: Width::W64,
+            }),
+        },
+        Stmt::Assign {
+            dst: ScalarPlace::Mem {
+                expr: place(3),
+                width: Width::W16,
+            },
+            rv: ir::Rvalue::Use(Operand::Imm {
+                bits: 456,
+                width: Width::W16,
+            }),
+        },
+    ];
+    let frame = analyze_frame(&probe);
+    assert!(frame.contains(0));
+    assert!(frame.contains(3));
+}
+
+#[test]
+fn promoted_frame_copies_preserve_overlap_and_mixed_width_accesses() {
+    for (src, dst, size) in [(0, 8, 24), (8, 0, 24), (0, 0, 32), (0, 32, 32)] {
+        for mixed in [false, true] {
+            let slot = |off| Slot {
+                off,
+                width: Width::W64,
+            };
+            let place = |off| ir::PlaceExpr {
+                base: ir::PlaceBase::Local(off),
+                steps: Box::new([]),
+            };
+            let mut probe = body("copy", Terminator::Return);
+            probe.frame_size = 64;
+            probe.ret = RetAbi::Pair(slot(dst), slot(dst + size - 8));
+            for off in (0..64).step_by(8) {
+                probe.blocks[0].stmts.push(Stmt::Assign {
+                    dst: ScalarPlace::Slot(slot(off)),
+                    rv: ir::Rvalue::Use(Operand::Imm {
+                        bits: u64::from(off) + 100,
+                        width: Width::W64,
+                    }),
+                });
+            }
+            if mixed {
+                probe.blocks[0].stmts.push(Stmt::Assign {
+                    dst: ScalarPlace::Mem {
+                        expr: place(src + 1),
+                        width: Width::W16,
+                    },
+                    rv: ir::Rvalue::Use(Operand::Imm {
+                        bits: 0x1234,
+                        width: Width::W16,
+                    }),
+                });
+            }
+            probe.blocks[0].stmts.push(Stmt::Copy {
+                dst: place(dst),
+                src: place(src),
+                size,
+            });
+            assert_eq!(analyze_frame(&probe).needs_frame(), mixed);
+            let mut module = ir::Module {
+                funcs: vec![probe].into(),
+                ..Default::default()
+            };
+            module.exports.insert("copy".into(), 0);
+            let engine = crate::vm::ctx::Engine::new(Shared::new(module));
+            let expected = unsafe { crate::vm::interp::run_export(&engine, "copy", &[]) }.unwrap();
+            let mut compiler = test_compiler(engine.shared(), CodeDomain::Plain);
+            compiler.reload = true;
+            compiler.compile(0);
+            assert_ne!(engine.shared().jit.slots[0].load(Ordering::Acquire), 0);
+            assert_eq!(
+                unsafe { crate::vm::interp::run_export(&engine, "copy", &[]) }.unwrap(),
+                expected
+            );
+            std::mem::forget(compiler);
+        }
+    }
+}
+
+#[test]
+fn leaf_inlining_uses_private_ssa_and_keys_the_bound_callee_content() {
+    let slot = |off| Slot {
+        off,
+        width: Width::W64,
+    };
+    let mut caller = body(
+        "caller",
+        Terminator::Call {
+            callee: 1,
+            args: vec![Operand::Slot(slot(0))],
+            ret: RetDest::Scalar(ScalarPlace::Slot(slot(8))),
+            target: 1,
+            unwind: UnwindAction::Continue,
+            role: ir::CallRole::Normal,
+        },
+    );
+    caller.frame_size = 16;
+    caller.params = vec![ParamAbi::Scalar(slot(0))];
+    caller.ret = RetAbi::Pair(slot(0), slot(8));
+    let mut keys = Vec::new();
+    for value in [7, 17] {
+        let mut leaf = body("leaf", Terminator::Return);
+        leaf.blocks.truncate(1);
+        leaf.frame_size = 16;
+        leaf.params = vec![ParamAbi::Scalar(slot(0))];
+        leaf.ret = RetAbi::Scalar(slot(8));
+        leaf.blocks[0].stmts = vec![Stmt::Assign {
+            dst: ScalarPlace::Slot(slot(8)),
+            rv: ir::Rvalue::IntBin {
+                op: IntBinOp::Add,
+                signed: false,
+                a: Operand::Slot(slot(0)),
+                b: Operand::Imm {
+                    bits: value,
+                    width: Width::W64,
+                },
+            },
+        }];
+        let mut module = ir::Module {
+            funcs: vec![caller.clone(), leaf].into(),
+            ..Default::default()
+        };
+        module.exports.insert("caller".into(), 0);
+        let engine = crate::vm::ctx::Engine::new(Shared::new(module));
+        let expected = unsafe { crate::vm::interp::run_export(&engine, "caller", &[100]) }.unwrap();
+        let mut compiler = test_compiler(engine.shared(), CodeDomain::Plain);
+        compiler.reload = true;
+        compiler.compile(0);
+        let entry = compiler.last_entry.as_ref().unwrap();
+        assert_eq!(entry.jit.inlined.len(), 1);
+        let plan = super::super::inline::Plan::for_body(
+            engine.shared(),
+            &engine.shared().module.funcs[0],
+            true,
+        );
+        assert_eq!(entry.jit.inlined, plan.dependencies);
+        keys.push(entry.jit.digest());
+        assert_eq!(
+            unsafe { crate::vm::interp::run_export(&engine, "caller", &[100]) }.unwrap(),
+            expected
+        );
+        std::mem::forget(compiler);
+    }
+    assert_ne!(keys[0], keys[1]);
 }

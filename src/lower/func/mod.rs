@@ -36,6 +36,8 @@ use intrinsic::*;
 pub fn trap_body(name: &str, reason: &str) -> ir::FuncBody {
     ir::FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 0,
         frame_align: 1,
         ret: RetAbi::Zst,
@@ -1935,6 +1937,17 @@ pub(crate) fn lower_instance<'tcx>(
 
     Ok(ir::FuncBody {
         shared: None,
+        prepared: ir::Prepared::new(&blocks, None),
+        objects: cx
+            .frame
+            .locals
+            .iter()
+            .filter(|local| local.size != 0)
+            .map(|local| ir::FrameObject {
+                off: local.off,
+                size: local.size as u32,
+            })
+            .collect(),
         frame_size: cx.frame.size,
         frame_align: cx.frame.align,
         ret,

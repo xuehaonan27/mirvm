@@ -47,6 +47,8 @@ fn loop_body(generic: bool) -> ir::FuncBody {
     };
     let mut body = ir::FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 128,
         frame_align: 64,
         ret: RetAbi::Pair(slot(8), byte),
@@ -133,6 +135,7 @@ fn loop_body(generic: bool) -> ir::FuncBody {
         body.shared = Some(Box::new(ir::SharedBody {
             template: std::sync::Arc::new(
                 ir::GenericTemplate::new(ir::GenericInstructions {
+                    prepared: Default::default(),
                     dictionary: 96,
                     binding_count: 1,
                     blocks: std::mem::take(&mut body.blocks),

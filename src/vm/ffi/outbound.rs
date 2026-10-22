@@ -587,6 +587,8 @@ mod tests {
         };
         let callback = FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 32,
             frame_align: 8,
             ret: RetAbi::Scalar(callback_ret),
@@ -641,6 +643,8 @@ mod tests {
         };
         let outer = FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Scalar(outer_ret),

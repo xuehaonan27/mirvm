@@ -76,6 +76,7 @@ impl std::fmt::Display for RunError {
 
 mod call;
 mod place;
+mod prepared;
 mod runblocks;
 mod rvalue;
 mod stmt;
@@ -290,6 +291,8 @@ mod tests {
         };
         let pinned = FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Scalar(value),
@@ -340,6 +343,8 @@ mod tests {
         let mut module = Module::default();
         module.funcs.push(FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 0,
             frame_align: 1,
             ret: RetAbi::Zst,
@@ -373,6 +378,8 @@ mod tests {
         let mut module = Module::default();
         module.funcs.push(FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 16,
             frame_align: 8,
             ret: RetAbi::Pair(lo, hi),

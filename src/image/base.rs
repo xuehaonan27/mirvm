@@ -444,6 +444,8 @@ mod tests {
             funcs: vec![FuncBody {
                 shared: None,
                 name: "std_body".into(),
+                prepared: Default::default(),
+                objects: Vec::new(),
                 frame_size: 0,
                 frame_align: 1,
                 ret: RetAbi::Zst,

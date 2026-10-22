@@ -1,7 +1,7 @@
 //! Lowering from `ir::FuncBody` to Cranelift IR: slot SSA (the invariant that a
 //! slot value is always I64, zero-extended up to the slot's declared width) +
 //! place evaluation + the three large stmt/rvalue/terminator matches + the
-//! call-helper family + `clif_rmw_op`/`collect_ssa_offs`. Semantics must be
+//! call-helper family + `clif_rmw_op`. Semantics must be
 //! bit-for-bit identical to the interpreter (an identity mirror).
 //!
 //! The `Translator` struct, `build` and the two free functions live here; the
@@ -15,6 +15,7 @@ use super::frame::FrameMap;
 use super::*;
 
 mod call;
+mod inline;
 mod numeric;
 mod place;
 mod rvalue;
@@ -23,6 +24,7 @@ mod term;
 mod value;
 
 pub(super) struct Translator<'a, 'b> {
+    pub(super) inlining: &'a super::inline::Plan,
     pub(super) shared: &'a Shared,
     /// The function being built: a site's symbol carries it, so one function's relocation list maps
     /// back onto that function's sites.
@@ -223,6 +225,9 @@ impl Translator<'_, '_> {
                 (self.site(Site::Frozen(*addr), runtime), Width::W64)
             }
             Operand::Mem { expr, width } => {
+                if let Some(off) = expr.local_offset() {
+                    return (self.read_slot(Slot { off, width: *width }), *width);
+                }
                 let a = self.place_addr(expr);
                 let v = self
                     .b
@@ -260,8 +265,7 @@ impl Translator<'_, '_> {
         self.b.switch_to_block(entry);
         // Give SSA construction a definition on every predecessor. Valid MIR initializes every
         // value it reads; frame memory, like the interpreter's operand region, stays uninitialized.
-        let mut offs: Vec<u32> = Vec::new();
-        collect_ssa_offs(body, &self.frame_offs, &mut offs);
+        let offs = self.frame_offs.ssa_offsets();
         let zero = self.b.ins().iconst(types::I64, 0);
         for off in offs {
             let var = self.var(off);
@@ -436,120 +440,5 @@ pub(super) fn clif_rmw_op(op: ir::RmwOp) -> cranelift_codegen::ir::AtomicRmwOp {
         ir::RmwOp::Min => C::Smin,
         ir::RmwOp::UMax => C::Umax,
         ir::RmwOp::UMin => C::Umin,
-    }
-}
-
-/// Collect the SSA candidate slot offsets used for 0-definition: every referenced
-/// Slot minus the frame set.
-pub(super) fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: &mut Vec<u32>) {
-    let mut push = |s: &Slot| {
-        if !frame_offs.contains(s.off) && !out.contains(&s.off) {
-            out.push(s.off);
-        }
-    };
-    let op = |o: &Operand, push: &mut dyn FnMut(&Slot)| {
-        if let Operand::Slot(s) = o {
-            push(s);
-        }
-    };
-    if let RetAbi::Scalar(s) = &body.ret {
-        push(s);
-    }
-    if let RetAbi::Pair(lo, hi) = &body.ret {
-        push(lo);
-        push(hi);
-    }
-    for p in &body.params {
-        match p {
-            ParamAbi::Scalar(s) => push(s),
-            ParamAbi::Pair(lo, hi) => {
-                push(lo);
-                push(hi);
-            }
-            _ => {}
-        }
-    }
-    for blk in &body.blocks {
-        for st in &blk.stmts {
-            match st {
-                Stmt::Assign { dst, rv } => {
-                    if let ScalarPlace::Slot(s) = dst {
-                        push(s);
-                    }
-                    use ir::Rvalue as R;
-                    match rv {
-                        R::Use(a)
-                        | R::NotBits(a)
-                        | R::NotBool(a)
-                        | R::Neg(a)
-                        | R::Cast { a, .. }
-                        | R::BitUn { a, .. } => op(a, &mut push),
-                        R::IntBin { a, b, .. }
-                        | R::IntCmp { a, b, .. }
-                        | R::IntCmp3 { a, b, .. }
-                        | R::PtrDiff { a, b, .. }
-                        | R::UMax { a, b } => {
-                            op(a, &mut push);
-                            op(b, &mut push);
-                        }
-                        R::NicheDiscr { tag, .. } => op(tag, &mut push),
-                        R::PtrOffset { ptr, count, .. } => {
-                            op(ptr, &mut push);
-                            op(count, &mut push);
-                        }
-                        _ => {}
-                    }
-                }
-                Stmt::AssignOverflow {
-                    a,
-                    b,
-                    dst_val,
-                    dst_flag,
-                    ..
-                } => {
-                    op(a, &mut push);
-                    op(b, &mut push);
-                    if let ScalarPlace::Slot(s) = dst_val {
-                        push(s);
-                    }
-                    if let ScalarPlace::Slot(s) = dst_flag {
-                        push(s);
-                    }
-                }
-                // Scalar Operand slots of the SIMD family; vector places live in frame memory and
-                // are not listed here.
-                Stmt::SimdSplat { val, .. } => op(val, &mut push),
-                Stmt::SimdExtractDyn { idx, dst, .. } => {
-                    op(idx, &mut push);
-                    if let ScalarPlace::Slot(s) = dst {
-                        push(s);
-                    }
-                }
-                Stmt::SimdInsertDyn { idx, val, .. } => {
-                    op(idx, &mut push);
-                    op(val, &mut push);
-                }
-                Stmt::SimdSelectBitmask { mask, .. } => op(mask, &mut push),
-                Stmt::SimdMaskedLoad { base, .. } | Stmt::SimdMaskedStore { base, .. } => {
-                    op(base, &mut push)
-                }
-                _ => {}
-            }
-        }
-        match &blk.term {
-            Terminator::SwitchInt {
-                discr: SwitchDiscr::Scalar(o),
-                ..
-            } => op(o, &mut push),
-            Terminator::Call { args, ret, .. } => {
-                for a in args {
-                    op(a, &mut push);
-                }
-                if let RetDest::Scalar(ScalarPlace::Slot(s)) = ret {
-                    push(s);
-                }
-            }
-            _ => {}
-        }
     }
 }

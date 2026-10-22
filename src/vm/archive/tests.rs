@@ -7,6 +7,8 @@ fn module() -> Module {
             .map(|index| FuncBody {
                 shared: None,
                 name: format!("body{index}").into(),
+                prepared: Default::default(),
+                objects: Vec::new(),
                 frame_size: 8,
                 frame_align: 8,
                 ret: RetAbi::Scalar(Slot {
@@ -188,6 +190,8 @@ fn header_queries_preserve_lazy_bodies_across_archive_parts() {
         .enumerate()
         .map(|(i, ret)| FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 128,
             frame_align: 64,
             ret,
@@ -464,5 +468,42 @@ fn single_use_address_checks_match_reusable_images_and_rebinding() {
                     .is_err()
             );
         }
+    }
+}
+
+#[test]
+fn prepared_operations_are_verified_against_archived_semantics() {
+    for bad in 0..5 {
+        let mut module = module();
+        let mut bodies = Vec::new();
+        module.funcs.drain_into(&mut bodies);
+        let body = &mut bodies[0];
+        body.blocks[0].stmts.push(Stmt::Assign {
+            dst: ScalarPlace::Slot(Slot {
+                off: 0,
+                width: Width::W64,
+            }),
+            rv: Rvalue::Use(Operand::Imm {
+                bits: 17,
+                width: Width::W64,
+            }),
+        });
+        body.prepared = Prepared::new(&body.blocks, None);
+        match bad {
+            0 => {}
+            1 => body.prepared.ops[0].dst = 8,
+            2 => body.prepared.constants[0] = 18,
+            3 => body.prepared.offsets[1] = 0,
+            4 => body.prepared.ops[0].code = 255,
+            _ => unreachable!(),
+        }
+        module.funcs = bodies.into();
+        let instance = Instance::default();
+        let owned = crate::vm::verify::module(&module, &instance).map_err(|e| e.to_string());
+        let archived = load_once(&module, &instance)
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        assert_eq!(owned, archived);
+        assert_eq!(owned.is_ok(), bad == 0);
     }
 }

@@ -3,6 +3,8 @@ use super::*;
 fn body(term: Terminator) -> FuncBody {
     FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 8,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -408,4 +410,24 @@ fn accepts_guest_panic_cleanup_across_base_and_delta() {
             asm: 0,
         })
         .unwrap();
+}
+
+#[test]
+fn frame_objects_must_be_disjoint_nonempty_and_inside_the_frame() {
+    for objects in [
+        vec![FrameObject { off: 0, size: 0 }],
+        vec![FrameObject { off: 4, size: 8 }],
+        vec![
+            FrameObject { off: 0, size: 8 },
+            FrameObject { off: 4, size: 4 },
+        ],
+    ] {
+        let mut function = body(Terminator::Return);
+        function.objects = objects;
+        let artifact = Artifact::new(Module {
+            funcs: vec![function].into(),
+            ..Default::default()
+        });
+        assert!(artifact.verify().is_err());
+    }
 }

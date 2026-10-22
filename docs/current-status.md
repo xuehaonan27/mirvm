@@ -223,7 +223,7 @@ compile finalizes its body, packed entry and missing C2I trampolines together. C
 reused by flattened ABI shape within each compiler. The
 [JIT design](designs/jit-code-cache-design.md#25-load-time-linking-and-publication) owns template
 isolation, relocation, publication, failure handling and scratch lifetimes. Guest ABI, verification,
-optimization levels and admission thresholds are unchanged. C2I templates are persisted in artifact encoding 4. The independent loader batches mappings and
+optimization levels and admission thresholds are unchanged. C2I templates are persisted in artifact encoding 5. The independent loader batches mappings and
 unwind registration, supports AArch64 instruction relocations and synchronizes instruction fetch
 before publishing code. Compiler tiers are constructed only for code-generation requests.
 Five alternating fresh-process pairs with installed inputs and populated code stores put the full

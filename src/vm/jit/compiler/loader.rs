@@ -56,10 +56,19 @@ impl<'a> Loader<'a> {
         let body = self.shared.module.funcs.get(func as usize)?;
         let ordinals = artifact::Ordinals::of(body)?;
         let key = &self.keys[usize::from(tier == Tier::Optimized)];
+        let mut material = key.value.clone();
+        material.inlined =
+            super::super::inline::Plan::for_body(self.shared, body, tier == Tier::Optimized)
+                .dependencies;
+        let digest = if material.inlined.is_empty() {
+            key.digest
+        } else {
+            material.digest()
+        };
         let index = self
             .index
             .get_or_insert_with(crate::store::jit::Index::load);
-        let bytes = match index.lookup(&crate::store::jit::key(&ordinals.fragment(), &key.digest)) {
+        let bytes = match index.lookup(&crate::store::jit::key(&ordinals.fragment(), &digest)) {
             crate::store::jit::Lookup::Entry(bytes) => bytes,
             crate::store::jit::Lookup::Absent => {
                 helpers::cache_miss();
@@ -75,7 +84,7 @@ impl<'a> Loader<'a> {
         };
         let entry = artifact::Entry::decode(&bytes).ok().filter(|entry| {
             entry.fragment == ordinals.fragment()
-                && entry.jit == key.value
+                && entry.jit == material
                 && entry.symbols.len() == 2
                 && entry.symbol(JitSymbolRole::FastBody).is_some()
                 && entry.symbol(JitSymbolRole::Packed).is_some()

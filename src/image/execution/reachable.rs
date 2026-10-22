@@ -132,6 +132,8 @@ mod tests {
         let mut bodies: Vec<_> = (0..17)
             .map(|id| FuncBody {
                 shared: None,
+                prepared: Default::default(),
+                objects: Vec::new(),
                 frame_size: 0,
                 frame_align: 1,
                 ret: RetAbi::Zst,

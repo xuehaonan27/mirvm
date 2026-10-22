@@ -20,10 +20,31 @@ impl<'a> Verifier<'a> {
                 )
             ));
         }
+        let mut previous = 0u64;
+        for object in body.objects.iter() {
+            let end = u64::from(object.off) + u64::from(object.size);
+            if object.size == 0
+                || u64::from(object.off) < previous
+                || end > u64::from(body.frame_size)
+            {
+                return Err(crate::fail!(Engine, "invalid or overlapping frame objects"));
+            }
+            previous = end;
+        }
         if body.code().is_empty() {
             return Err(crate::fail!(Engine, "has no basic blocks"));
         }
         self.shared(body)?;
+        let (prepared, dictionary) = match body.shared.as_ref() {
+            Some(shared) => (&shared.template.prepared, Some(shared.template.dictionary)),
+            None => (&body.prepared, None),
+        };
+        if !prepared.matches(body.code(), dictionary) {
+            return Err(crate::fail!(
+                Engine,
+                "prepared operations differ from semantic bytecode"
+            ));
+        }
         self.ret_abi(body, &body.ret)?;
         for (i, param) in body.params.iter().enumerate() {
             self.param_abi(body, param)

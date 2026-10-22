@@ -1062,6 +1062,8 @@ mod tests {
     fn body_with_sites(tls: TlsId, static_addr: u64, callee: FuncId, addr_imm: u64) -> FuncBody {
         FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,
@@ -1101,6 +1103,8 @@ mod tests {
     fn asm_body(stub: AsmStubId) -> FuncBody {
         FuncBody {
             shared: None,
+            prepared: Default::default(),
+            objects: Vec::new(),
             frame_size: 8,
             frame_align: 8,
             ret: RetAbi::Zst,

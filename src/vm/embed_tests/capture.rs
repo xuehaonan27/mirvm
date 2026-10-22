@@ -37,6 +37,8 @@ fn host_syscall_module(builtin: Builtin, nr: i64, args: &[u64]) -> Module {
     }));
     export_module(FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Pair(result, errno),

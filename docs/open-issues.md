@@ -99,12 +99,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 - **P1** `APPROVED`: execute the runtime optimization work in this order. OSR activation transfer
   is implemented and is not a prerequisite still awaiting construction.
-  2. Preserve local-object boundaries for frame analysis; scalarize nonescaping aggregates and
-     inline bounded direct calls after concrete binding. Preserve observable addresses, cleanup,
-     OSR state correspondence and transitive code-cache identity.
-  3. Prepare a compact interpreter execution plan for common operations. Resolve layout-independent
-     work during preparation and concrete layout work once at binding; retain a shared semantic
-     reference and the block/frame correspondence required for OSR.
   4. Add a genuinely cheaper baseline compiler with bounded local optimization, retaining the
      optimizing backend for selected hot code. Verify both architecture ABIs, unwind, safepoints,
      and live-frame entry before making it a default tier.

@@ -40,6 +40,8 @@ fn exit_signal_tsd_module(marker: &AtomicU64) -> Module {
     let mut module = tsd_module(marker, false);
     let attach = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 0,
         frame_align: 1,
         ret: RetAbi::Zst,
@@ -53,6 +55,8 @@ fn exit_signal_tsd_module(marker: &AtomicU64) -> Module {
     };
     let handler = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,

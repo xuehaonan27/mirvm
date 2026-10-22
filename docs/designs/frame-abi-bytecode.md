@@ -8,12 +8,12 @@
 
 ## 1. Contract
 
-1. **One activation, one native frame.** Every guest call activation maps to exactly one native stack
-   frame, so interp↔compiled calls are native calls and unwind walks a single stack. This is the
-   Model A property the JIT depends on.
+1. **Native call stack.** Interp↔compiled calls are native calls and unwind walks one native stack.
+   Bounded inlining may eliminate a scalar leaf activation that has no cleanup or nested calls;
+   every remaining activation has its own native frame.
 2. **Guest locals are orthogonal to JIT interop.** Interop requires only that call activity — control
-   flow and unwind — sit on the native stack. Compiled code never reads an interpreted frame's
-   locals, and cross-function traffic uses only the calling convention.
+   flow and unwind — sit on the native stack. Cross-function traffic uses the calling convention.
+   An OSR continuation borrows its own activation's interpreted locals until that activation exits.
 3. **Interpreted-frame locals live in the slaved operand region.** Each thread owns one operand
    region, slaved to `interp_frame` recursion (LIFO, in step with entry and exit); it is never
    suspended independently, because mirvm has no coroutines.
@@ -45,6 +45,27 @@
     VM core talks only to the trait. Distribution is a multi-target fat `.mirvm` artifact; a single
     artifact that runs on any target is rejected, and a missing triple is reported as
     "unsupported platform".
+
+### Local-object identity and scalar promotion
+
+A body retains sorted, disjoint `FrameObject { off, size }` ranges for nonempty typed locals.
+Concrete generic bindings append their allocated object ranges. Verification rejects overlap,
+empty ranges and ranges outside the frame; missing coverage requires conservative aliasing.
+Taking an object's address retains that object's reachable suffix in memory, without retaining
+unrelated later locals. Dynamic projections outside known coverage use the frame-wide fallback.
+
+Scalar slot and constant local-place accesses share one analysis. Different-width or overlapping
+views remain memory-backed, including a byte channel that intersects the middle of a scalar.
+Nonescaping frame copies of 8–64 bytes in whole words become scalar reads followed by scalar
+writes. All source words are read before any write, preserving overlap. OSR uses the borrowed
+frame and keeps every slot in memory; promotion never changes its pointer identity or block map.
+
+Optimized ordinary entries may inline nonempty single-block leaves with at most 16 scalar
+statements and a 64-statement caller budget. Parameters and returns must use scalar words;
+address escape, indirect aggregate ABI, cleanup calls and body-pointer helpers are excluded.
+The leaf receives private SSA variables, retaining the caller's frame and original block map.
+Headroom checks and entry/return safepoints remain. The persistent-code design owns dependency
+identity for these decisions.
 
 ## 2. Model
 
@@ -166,6 +187,18 @@ position that needs Drop, interned constants, and intrinsics marked as builtins 
 
 ### 2.7 Execution
 
+Preparation also emits a fixed 16-byte operation for each common scalar assignment, with block
+offsets and a literal pool. Operations carry frame offsets, widths and arithmetic codes instead
+of recursively decoding operands during execution. Unsupported statements retain their original
+block-local statement index and execute through the semantic interpreter. The verifier checks
+each operation against that semantic statement, including literals and block boundaries, directly
+on archived bytes before execution. An empty plan selects the reference walk.
+
+Generic templates share the same operation stream across instances. Dictionary operands read the
+instance's already-bound values; they do not follow the dictionary pointer in the live frame.
+Concrete specialization prepares its resolved body once. Both paths retain the semantic blocks,
+terminators and frame offsets, so cleanup and OSR use the same activation state.
+
 ```rust
 // one call = one interpreted frame (on the native stack)
 fn interp_frame(body: &BytecodeBody, args: Args, region: &mut OperandRegion) -> Value {
@@ -189,7 +222,7 @@ fn interp_frame(body: &BytecodeBody, args: Args, region: &mut OperandRegion) -> 
 }
 ```
 
-Pure Rust and tree-walking: `reserve`/`restore` implement the slaved region, a compiled callee goes
+The compact and semantic interpreters share the slaved region through `reserve`/`restore`; a compiled callee goes
 through a native call, an interpreted callee through recursion, and a foreign callee through the
 `os::` boundary.
 

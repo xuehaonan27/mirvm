@@ -40,6 +40,8 @@ mod lsda_probe;
 mod reloc;
 pub(crate) use reloc::{Body, SigPart, Site};
 #[cfg(feature = "cranelift")]
+mod inline;
+#[cfg(feature = "cranelift")]
 mod translate;
 #[cfg(feature = "cranelift")]
 mod unwind;

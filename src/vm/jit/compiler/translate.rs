@@ -379,6 +379,12 @@ impl<'a> Compiler<'a> {
         body: &ir::FuncBody,
         abi: CalleeAbi,
     ) -> Option<(ClifFuncId, PendingJitSymbol)> {
+        let inlining = super::super::inline::Plan::for_body(
+            self.shared,
+            body,
+            self.tier == Tier::Optimized && !self.osr,
+        );
+        self.jit_key.inlined = inlining.dependencies.clone();
         let sig = self.fast_sig(abi);
         let id = self
             .module
@@ -422,6 +428,7 @@ impl<'a> Compiler<'a> {
                 )))
             };
             let mut tr = Translator {
+                inlining: &inlining,
                 shared: self.shared,
                 func,
                 values: &self.values,

@@ -8,6 +8,8 @@ fn faulting_masked_reraise_module() -> Module {
     let count = word(0);
     let handler = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,
@@ -107,6 +109,8 @@ fn mask_restored_faulting_signal_owner_module() -> Module {
     let count = word(0);
     let handler = FuncBody {
         shared: None,
+        prepared: Default::default(),
+        objects: Vec::new(),
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Zst,

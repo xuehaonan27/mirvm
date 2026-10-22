@@ -174,6 +174,8 @@ mod tests {
         let mut module = Module {
             funcs: vec![FuncBody {
                 shared: None,
+                prepared: Default::default(),
+                objects: Vec::new(),
                 frame_size: 0,
                 frame_align: 1,
                 ret: RetAbi::Zst,
