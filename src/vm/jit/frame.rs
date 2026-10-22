@@ -30,6 +30,12 @@ pub(super) struct FrameMap {
 }
 
 impl FrameMap {
+    pub(super) fn borrowed(size: u32) -> Self {
+        Self {
+            ranges: vec![(0, size)],
+            force: true,
+        }
+    }
     fn add(&mut self, a: u32, b: u32) {
         if a < b {
             self.ranges.push((a, b));

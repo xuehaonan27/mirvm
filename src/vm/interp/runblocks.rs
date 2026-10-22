@@ -22,11 +22,13 @@ struct Iterations<'a> {
 
 impl Iterations<'_> {
     #[inline]
-    fn back_edge(&mut self) {
+    fn back_edge(&mut self) -> bool {
         self.pending += 1;
         if self.pending == 256 {
             self.flush();
+            return true;
         }
+        false
     }
 
     fn flush(&mut self) {
@@ -50,6 +52,7 @@ pub(super) fn run_blocks(
     base: usize,
     edge: &Cell<Option<Bb>>,
     entry: Bb,
+    allow_osr: bool,
 ) -> Exit {
     let module: &Module = unsafe { &(*ctx).shared.module };
     let instance: &Instance = unsafe { &(*ctx).shared.instance };
@@ -466,10 +469,17 @@ pub(super) fn run_blocks(
                 work.pause();
             }
             crate::vm::ctx::drain_pending_signals(ctx);
+            if iterations.back_edge()
+                && allow_osr
+                && edge.get().is_none()
+                && let Some((lo, hi)) =
+                    crate::vm::jit::try_enter_osr(ctx, func, body, base, blk as Bb)
+            {
+                return Exit::Ret(lo, hi);
+            }
             if let Some(work) = &mut work {
                 work.resume();
             }
-            iterations.back_edge();
         }
     }
 }

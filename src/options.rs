@@ -270,6 +270,8 @@ entries! {
     user jit_threshold env("MIRVM_JIT_THRESHOLD")  default("1000")           => reads(u32, |o| o.jit_threshold);
     /// Compile on the enqueueing thread and fail loudly; makes a forced threshold observable.
     user jit_sync      env("MIRVM_JIT_SYNC")       default("off")            => reads(bool, |o| o.jit_sync);
+    /// Transfer hot interpreted loops into compiled continuations.
+    user jit_osr       env("MIRVM_JIT_OSR")        default("on")             => reads(bool, |o| o.jit_osr);
     /// Print JIT helper frequency statistics at process exit.
     user jit_stats     env("MIRVM_JIT_STATS")      default("off")            => reads(bool, |o| o.jit_stats);
     /// Compiler worker used by the CLI build without compiler linkage.
@@ -578,6 +580,7 @@ struct Options {
     target_dir: PathBuf,
     jit_threshold: u32,
     jit_sync: bool,
+    jit_osr: bool,
     jit_stats: bool,
     cargo_locked: bool,
     timing: bool,
@@ -636,6 +639,8 @@ impl Options {
                 .filter(|&threshold| threshold > 0)
                 .unwrap_or(1000),
             jit_sync: flag("jit_sync"),
+            jit_osr: raw("jit_osr")
+                .is_none_or(|value| !matches!(value.as_str(), "" | "0" | "off" | "false")),
             jit_stats: flag("jit_stats"),
             cargo_locked: flag("cargo_locked"),
             timing: flag("timing"),
@@ -1135,6 +1140,7 @@ mod tests {
         let _ = super::sysroot();
         let _ = super::jit();
         let _ = super::jit_threshold();
+        let _ = super::jit_osr();
         let _ = super::jit_sync();
         let _ = super::jit_stats();
         let _ = super::cargo_locked();

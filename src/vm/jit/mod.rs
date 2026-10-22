@@ -19,6 +19,8 @@
 
 mod state;
 pub use state::*;
+mod osr;
+pub(crate) use osr::try_enter_osr;
 
 #[cfg(feature = "cranelift")]
 mod admit;

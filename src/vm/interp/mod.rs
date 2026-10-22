@@ -327,7 +327,7 @@ mod tests {
         let base = super::region_reserve(ctx, pinned.frame_size, pinned.frame_align);
         let edge = std::cell::Cell::new(None);
         assert!(matches!(
-            super::runblocks::run_blocks(ctx, 0, &pinned, base, &edge, 0),
+            super::runblocks::run_blocks(ctx, 0, &pinned, base, &edge, 0, false),
             super::Exit::Ret(17, 0)
         ));
         super::call::run_cleanup(ctx, 0, &pinned, base, 2);

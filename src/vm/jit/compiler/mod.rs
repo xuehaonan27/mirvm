@@ -113,9 +113,10 @@ struct Compiler<'a> {
     values: std::sync::Arc<reloc::Values>,
     /// The sites of the body being compiled, in emission order.
     sites: reloc::Sites,
-    /// Which optimization level this compiler builds at: part of the jit-key, and the only thing that
-    /// distinguishes the two compilers one Engine runs.
+    /// Which optimization level this compiler builds at; ordinary entries include it in the jit-key.
     tier: Tier,
+    /// A separate module keeps continuation signatures and relocation names out of ordinary code.
+    osr: bool,
     /// The functions this compiler published. Compilation is once per tier, so a second request for a
     /// tier that already answered is a no-op while the *other* tier's answer is an upgrade.
     published: std::collections::HashSet<u32>,
@@ -157,6 +158,7 @@ pub(crate) use lsda::*;
 
 mod c2i;
 mod imports;
+mod osr;
 mod symbols;
 mod trace;
 mod translate;
@@ -238,6 +240,7 @@ pub(super) fn worker(
     // whichever was published last.
     let mut baseline = Compiler::with_tier(&shared, domain, Tier::Baseline);
     let mut optimized = Compiler::with_tier(&shared, domain, Tier::Optimized);
+    let mut osr = None;
     // Before a single request is served: link what the store holds for the functions the last run found
     // hot. A stored optimized entry wins, because that is the tier the function is about to be asked
     // for; otherwise the baseline entry is linked and the upgrade threshold will replace it later, and
@@ -284,6 +287,11 @@ pub(super) fn worker(
         };
         if shared.jit.stopping.load(Ordering::Acquire) {
             break;
+        }
+        if request.osr {
+            osr.get_or_insert_with(|| Compiler::for_osr(&shared, domain))
+                .compile_osr(func);
+            continue;
         }
         let started = shared.jit.work.as_ref().map(|_| std::time::Instant::now());
         let units = shared.jit.work.as_ref().and_then(|_| {
@@ -389,6 +397,11 @@ pub(super) fn worker(
     // published code. The address space is reclaimed in one go at process exit.
     std::mem::forget(baseline);
     std::mem::forget(optimized);
+    if let Some(mut compiler) = osr {
+        compiler.context = None;
+        compiler.c2i_templates = Default::default();
+        std::mem::forget(compiler);
+    }
 }
 
 // ===== Runtime helpers (compiled code calls back into the engine through imported symbols) =====

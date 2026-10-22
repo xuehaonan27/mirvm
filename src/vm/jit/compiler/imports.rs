@@ -332,6 +332,7 @@ impl<'a> Compiler<'a> {
             values,
             sites: reloc::Sites::default(),
             tier,
+            osr: false,
             published: std::collections::HashSet::new(),
             artifacts: Vec::new(),
             ordinals: None,

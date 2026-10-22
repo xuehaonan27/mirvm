@@ -28,14 +28,16 @@ def resolve(stacks, temporary):
         header = HEADER.match(line)
         if header:
             pid = int(header[2])
-        frame = re.match(r"(\s+)([0-9a-f]+)\s+\[unknown\](.*)", line)
+        # Cranelift's own map may already name a frame f123/o123. The engine's map adds
+        # the guest name and code role; resolve those frames as well as unknown ones.
+        frame = re.match(r"(\s+)([0-9a-f]+)\s+(.+)", line)
         if frame and pid in mappings:
-            indent, ip, tail = frame.groups()
+            indent, ip, _ = frame.groups()
             address = int(ip, 16)
             starts, ranges = mappings[pid]
             index = bisect.bisect_right(starts, address) - 1
             if index >= 0 and address < ranges[index][0] + ranges[index][1]:
-                line = f"{indent}{ip} {ranges[index][2]}{tail}"
+                line = f"{indent}{ip} {ranges[index][2]} (mirvm-jit)"
         lines.append(line)
     return "\n".join(lines) + "\n", len(mappings)
 

@@ -1,6 +1,6 @@
 # On-stack replacement
 
-Status: Implementation design. This document owns transfer of an active interpreted invocation into
+Status: Implemented with session-local, memory-backed continuations. This document owns transfer of an active interpreted invocation into
 compiled execution. Ordinary entry ABI belongs to [frame-abi-bytecode.md](frame-abi-bytecode.md),
 exceptions to [c-unwind-contract.md](c-unwind-contract.md), and admission/heat to
 [jit-code-cache-design.md](jit-code-cache-design.md).
@@ -30,14 +30,17 @@ zero/one/two-word or indirect return convention. A packed boundary uses the ordi
 pinning machinery to enter it from host Rust.
 
 OSR requests are deduplicated separately from ordinary entry requests and use the existing worker.
-Compilation is requested only for an invocation still interpreting after sufficient loop activity.
+The interpreter polls every 256 backward edges. A function with at least 65,536 accumulated
+interpreted backedges may request a continuation while an invocation is still interpreting.
 Normal execution does not wait for publication; sparse polls continue interpreting until an entry is
 available. Unavailable, rejected, stopped or failed compilation leaves the invocation interpreted.
 
 OSR publication is separate from ordinary fast/packed slots. Instructions, callee trampolines, symbol
 ranges and unwind registrations are complete before a Release publication; transfer uses Acquire.
 The initial OSR entries live for the same code lifetime as other JIT entries, but are not persisted.
-Their distinct profiler roles must not introduce a second guest backtrace frame alongside the
+`MIRVM_JIT_OSR=off` disables requests and transfers without disabling ordinary JIT.
+`MIRVM_JIT_STATS=1` reports transfers as `osr`; debug diagnostics report compilation time, bytes
+and transfer destinations. Their distinct `osr-body` / `osr-packed` profiler roles must not introduce a second guest backtrace frame alongside the
 interpreter shadow frame that still owns this invocation.
 
 ## 3. Generics and code domains
@@ -62,7 +65,7 @@ Keep ordinary stack-headroom checks, return/backedge signal safepoints and regis
 A continuation must not be entered without enough host-stack headroom. Function-pointer identity
 continues to refer to the ordinary guest entry, never to an OSR continuation.
 
-## 5. Acceptance
+## 5. Verification
 
 - Prove transfer during one long invocation, with a side effect before the loop executed exactly
   once, and compare the result with native and interpretation.
@@ -77,3 +80,11 @@ continues to refer to the ordinary guest entry, never to an OSR continuation.
 
 Persistent OSR code, entry-specific scalar promotion, speculative deoptimization and code-domain
 migration require separate extensions; none is implied by the initial transfer contract.
+
+The `osr-state` native differential covers nested loops, aligned address-taken storage, narrow and
+wide values, generic calls, indirect/pair returns and panic cleanup. `osr-transfer` requires a
+nonzero transfer count in an asynchronous single-invocation workload. Compiler/state unit checks
+prepublish continuations to deterministically prove active-frame transfer, generic dictionary
+specialization, side-effect uniqueness, headroom fallback, EngineFault restoration, failed
+publication, request deduplication and trace-domain entry. Performance evidence belongs to
+[current-status.md](../current-status.md); these semantic checks do not prove compile payback.

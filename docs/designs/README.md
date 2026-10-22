@@ -215,7 +215,7 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 | shim workload (the largest risk) | implement on demand; the boundary model of [ffi-boundary.md](ffi-boundary.md) removes pointless shims (real resources pass through); borrow Miri's shim code |
 | test false positives and misreported semantics | a green must compare output or check an invariant; both legs failing is never a PASS; an expected red pins its exact code and diagnostic |
 | silent stubs | unimplemented observable semantics must trap or be really implemented — never a success return that fakes support |
-| interpreter performance ceiling | the method-level JIT is the answer to the ceiling, and the hard gate is the interpreter/JIT/native three-way differential; the JIT's own gaps (no OSR, no deopt, no production tiering) are listed in [current-status.md](../current-status.md) |
+| interpreter performance ceiling | the method-level JIT is the answer to the ceiling, and the hard gate is the interpreter/JIT/native three-way differential; the JIT's own gaps (no deopt, no within-run tier upgrade) are listed in [current-status.md](../current-status.md) |
 | FFI callbacks from C into Rust | ordinary callbacks go through a thunk plus TLS attach; signals use a fixed atomic registration stub and safe-point dispatch, never libffi or guest code in the signal frame |
 | platform semantics | unwind, signal and ABI behaviour is verified per platform and is never extrapolated from the Linux baseline; each platform is a directory plus a ladder arm (P6) |
 | lifecycle and embedding | close/wait, execution leases and deferred pthread callbacks are the model of [engine-lifecycle.md](engine-lifecycle.md); `CtxSlot` reclamation and per-instance constructors/destructors exist; retaining process-lifetime code addresses is the explicit boundary for an arbitrary native pointer. Only a safe typed export API or a per-API revocation contract could shrink it — container validation cannot prove an arbitrary FFI ABI |
@@ -241,7 +241,7 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 | Document | Status | Owns |
 |---|---|---|
 | [runtime-optimization-lessons.md](runtime-optimization-lessons.md) | Design guidance | lessons from HotSpot/V8, optimization selection and required performance evidence |
-| [osr-design.md](osr-design.md) | Implementation design | transfer of an active interpreted invocation into compiled execution, storage identity and unwind ownership |
+| [osr-design.md](osr-design.md) | Implemented | transfer of an active interpreted invocation into compiled execution, storage identity and unwind ownership |
 | [ram-spec.md](ram-spec.md) | Contract | the Rust abstract machine: correctness contract, degrees of definition, storage/computation/concurrency semantics, as-if freedom, UB stance, declared deviations |
 | [ffi-boundary.md](ffi-boundary.md) | Contract | the abstract machine's edge: the foreign-call classification, interposition points, the sandbox doctrine, native access to guest memory |
 | [concurrency-arch.md](concurrency-arch.md) | Decided RFC | guest threads → OS threads, the state split, why execution never holds a `tcx`, isolation and the checked-mode reserve |

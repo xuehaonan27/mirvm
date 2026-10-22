@@ -15,6 +15,8 @@ pub enum JitSymbolRole {
     FastBody,
     Packed,
     C2i,
+    OsrBody,
+    OsrPacked,
 }
 
 impl JitSymbolRole {
@@ -23,6 +25,8 @@ impl JitSymbolRole {
             Self::FastBody => "fast-body",
             Self::Packed => "packed",
             Self::C2i => "c2i",
+            Self::OsrBody => "osr-body",
+            Self::OsrPacked => "osr-packed",
         }
     }
 }

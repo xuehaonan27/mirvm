@@ -4,7 +4,7 @@
 > remains demand-driven; the compile-work budget and compiled shared tier are experimental.
 > Owns generic execution products, promotion and integration gates. Frontend selection and semantic
 > validation remain in [frontend-boundary.md](frontend-boundary.md#41-runtime-generics); measurements
-> belong to [current-status.md](../current-status.md#production-shared-generic-execution). D7 and T13 in
+> belong to [current-status.md](../current-status.md#production-shared-generic-execution). D7 and E40 in
 > [open-issues.md](../open-issues.md) own unfinished work. Unsupported functions retain eager lowering.
 
 ## 1. Decision and boundary
@@ -173,10 +173,10 @@ Republishing an Engine preserves these shared products even after individual ins
 Standalone packages use the same owned representation in FUNCS; its byte layout is owned by the
 [container contract](modeb-mirvmar-design.md#22-container).
 
-Exact type/const specialization does not require speculative deoptimization. It also cannot move a
-currently executing loop into newly published code. OSR is a separate transfer contract under T13:
-live-value maps, operand and shadow frames, cleanup state and code-domain identity must agree at a
-safe point. An entry-only policy cannot claim OSR's single-invocation benefit.
+Exact type/const specialization does not require speculative deoptimization. Its ordinary entry
+serves subsequent calls; [OSR](osr-design.md) can transfer an active shared interpretation into
+an exact specialized continuation while preserving its frame and code domain. Entry publication
+alone does not transfer an activation.
 
 ## 4. Promotion policy
 
@@ -206,7 +206,7 @@ pressure, and removes stale queued tasks. MIRVM should measure its own removable
 and compilation/publication cost before promoting an instance. Installation prepares reusable
 bytecode, not native code for every definition. A shared template does not imply that every bound
 instance is hot. Thresholds and tier choices require whole-process payback on MIRVM workloads;
-copying HotSpot constants is not a policy. OSR is a separate prioritized contract under [osr-design.md](osr-design.md).
+copying HotSpot constants is not a policy. OSR follows the separate transfer contract in [osr-design.md](osr-design.md).
 
 Use shared interpretation as the guaranteed fallback. A compiled shared template is a candidate
 intermediate tier when many instances execute briefly; it can amortize one compilation across
@@ -246,9 +246,9 @@ Remaining integration work is grouped by a complete execution or preparation bou
    range/array-subslice paths when their measured missed coverage warrants the change. Keep eager
    fallback and diagnostic parity for unsupported shapes. Associated types, niches/enums, closures,
    indirect calls and recursive drop/cleanup need explicit contracts, not layout-size equivalence.
-3. **OSR.** Implement T13's activation-transfer contract independently of generic coverage,
-   then attach specialization to the same mechanism. Acceptance includes one long hot invocation,
-   live values and cleanup state across transfer, and plain/trace domain identity.
+3. **OSR payback.** Measure continuation scheduling, unused compilation and code growth separately
+   from generic coverage. Persistence and entry-specific scalar promotion extend the existing
+   activation-transfer contract only with corresponding lifetime and liveness proofs.
 
 The shared-entry gate covers mixed shared/concrete/JIT execution, concurrent first publication,
 recursion, native callbacks, unwind, signals, close and fork. These lifecycle contracts remain
@@ -257,6 +257,6 @@ product gate.
 
 Do not select default tier promotion from the execution microbenchmarks. The release decision needs
 unmodified reference/candidate whole-process measurements, native output agreement, the relevant
-repository correctness checks, and demonstrated reuse of a bound image after preparation. OSR can
-resume after the activation ownership contract is fixed; it is not part of the current preparation,
-policy and coverage work.
+repository correctness checks, and demonstrated reuse of a bound image after preparation.
+OSR and generic coverage retain separate acceptance gates even when a continuation specializes
+a shared interpreted activation.

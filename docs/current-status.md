@@ -25,6 +25,10 @@ contracts are its siblings in `docs/designs/`.
   machine-local `cache/jit` store keyed by `(fragment, jit-key)`, with relocation deferred to load: a
   warm session links the heat order before serving a request and takes each function's tier from
   `cache/package-heat` (`MIRVM_NO_JIT_CACHE`, `MIRVM_JIT_RELOAD`, `MIRVM_JIT_LEDGER`).
+  OSR transfers active hot loops into session-local compiled continuations that borrow the
+  interpreter frame, including exact generic instances and both code domains. It is on by default;
+  `MIRVM_JIT_OSR=off` keeps ordinary JIT while disabling transfer. [osr-design.md](designs/osr-design.md)
+  owns the entry, ownership and unwind contract.
 - **FFI and unwind** — guest to native through `dlsym` + libffi with the source ABI (C or C-unwind);
   native to guest through libffi closures plus TLS attach; aggregates marshalled by value (frozen
   layout, libffi struct grouping, sret). Exceptions keep their source ABI: plain C aborts, C-unwind
@@ -339,58 +343,55 @@ rustc otherwise disables that pass at LLVM optimization level 0, leaving many it
 arithmetic wrappers as guest calls. Profile check settings remain unchanged. The producer contract
 is in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
 
-A Linux x86_64 release comparison against `2a380a9` uses the full compiler-linked CLI, original
-corpus inputs and native release stdout agreement on every run. Nine alternating pairs retain
-populated JIT entries and naturally evolving heat records after four warmups per workload/binary;
-five pairs disable persistence and start each run with empty heat. Each measurement starts a fresh
-process with prepared images and warm filesystem caches. Both binaries use the same installed
-managed sysroot. File identities and integrity validation remain intact. Preparation, diagnostic
-ledgers, builds, tests and sampling are outside timed runs. Shared-host scheduling and storage are
-uncontrolled. Medians in milliseconds are baseline / candidate:
+A Linux x86_64 release comparison toggles only `MIRVM_JIT_OSR` in the same full compiler-linked
+binary. Every run starts a fresh process, uses prepared original corpus inputs and checks native
+release stdout. Nine alternating off/on pairs retain populated JIT entries after four warmups;
+five pairs bypass JIT persistence and empty the heat order before every process. Filesystem caches
+remain warm. Preparation, diagnostics and sampling are outside timed runs; shared-host scheduling
+and storage are uncontrolled. Medians in milliseconds are OSR off / on:
 
-| Workload | Default JIT process | Default JIT child CPU | Persistence disabled process |
+| Workload | Populated JIT process | Populated JIT child CPU | Empty JIT process |
 |---|---:|---:|---:|
-| Empty program | 59.14 / 36.82 | 28.09 / 23.81 | 45.12 / 35.90 |
-| Corpus fib (0 through 9) | 53.78 / 44.66 | 28.55 / 30.05 | 49.90 / 39.13 |
-| HashMap | 45.79 / 48.60 | 32.26 / 30.34 | 40.95 / 54.25 |
-| Strings | 43.42 / 45.52 | 28.02 / 25.51 | 52.81 / 51.81 |
-| serde JSON | 75.44 / 76.19 | 50.80 / 49.03 | 68.32 / 78.88 |
-| Full flate2, approximately 100 KiB | 390.66 / 338.52 | 366.26 / 310.38 | 456.18 / 465.22 |
+| Empty program | 36.51 / 37.37 | 26.61 / 25.83 | 37.19 / 39.98 |
+| Corpus fib (0 through 9) | 37.99 / 37.44 | 26.92 / 26.43 | 42.63 / 34.02 |
+| HashMap | 39.93 / 41.08 | 29.85 / 28.25 | 41.44 / 37.44 |
+| Strings | 46.92 / 37.10 | 29.52 / 28.89 | 38.69 / 42.66 |
+| serde JSON | 66.65 / 66.07 | 46.00 / 46.87 | 58.81 / 62.34 |
+| Full flate2, approximately 100 KiB | 272.53 / 270.11 | 276.21 / 274.17 | 428.22 / 373.50 |
 
-Full flate2 improves in eight of nine default process pairs and all nine CPU pairs: 13.3% less
-process time and 15.3% less child CPU. With persistence disabled, child CPU changes only from
-501.86 to 496.06 ms, and process latency does not improve. Small controls have mixed wall-clock
-results. The corpus fib is not the fib(32) timing case. These results establish a populated-cache
-execution gain, not a universal first-run or cold-filesystem speedup.
+Empty-JIT flate2 improves in all five process pairs and four CPU pairs: 12.8% less process time;
+child CPU changes from 501.31 to 477.27 ms (4.8% less). Populated-JIT flate2 wins only five of nine
+process pairs and four CPU pairs, so there is no established gain there. Small controls have mixed
+wall-clock results and no demonstrated OSR benefit. Corpus fib is not the fib(32) timing case.
+These are prepared fresh-process measurements, not empty-filesystem or first-install timings.
 
-Successful prelinks remain in the next heat order, and an unchanged order is not republished.
-The full-flate order stays at 169 functions across all nine candidate runs; the baseline alternates
-between 61 and 163. A separate instrumented census finds that more than 99.8% of about 2.59 million
-C2I calls already have compiled targets, chiefly scalar comparisons and drop glue. Ordinary direct
-guest calls with cleanup now use the domain's fast slot and existing exception tables. A separate
-default diagnostic run counts 2,396,647 / 3,497 C2I calls and prelinks 163 / 169 functions. Diagnostic
-link/compile intervals overlap guest execution and do not partition wall time.
+A separate empty-JIT diagnostic run compiles six continuations whose bodies/wrappers total 57,967 bytes in 26.94 ms
+(excluding callee trampolines and metadata);
+two transfer active calls, `compress_stored` and `compress_normal`. The other definitions cost work
+without an observed transfer. Populated-JIT diagnostics prelink 169 ordinary entries and observe no
+OSR transfer; one unused 569-byte continuation costs 0.69 ms. Compiler intervals overlap execution
+and cannot be subtracted directly from process latency. Ordinary direct cleanup calls use fast
+slots, successful prelinks remain in the heat order, and unchanged orders are not republished.
 
-Separate user-cycle captures cover three fresh full-flate processes per binary at 1999 Hz with
-DWARF stacks and JIT maps: 2,426 / 2,197 samples, 4.066 / 3.586 billion cycles and no lost samples.
-Interpreter functions account for 32.5% / 31.9% of sampled self cycles; guest dispatch and C2I
-account for 7.0% / 3.4%. The candidate's leading compiled costs are match finding (15.2%),
-`Result<[u8; 8], _>::unwrap` (8.8%) and a short integer-reading helper (8.1%). These samples
-attribute remaining work; uninstrumented timings establish the speedup.
+Separate 1999 Hz user-cycle captures with DWARF stacks and process-local JIT maps cover three
+full-flate processes per mode, with no lost samples. Empty-JIT off/on captures contain 3,456 / 3,593
+samples and 5.753 / 5.714 billion cycles. Interpreter self cycles fall from 37.5% to 30.9%; the guest
+thread's share falls from 73.9% to 67.9%, while compiler work grows from 22.7% to 28.4%. The maps
+identify both active `osr-body` continuations. Sampling and debug diagnostics change scheduling;
+unprofiled timings, not these cycle totals, establish the latency comparison.
 
-The full-input interpreter census distinguishes functions that never request compilation from
-invocations that continue interpreting after publication. Stable unrequested work includes tree
-initialization, slice filling, symbol sorting and checksum reduction; those operation counts are
-not CPU time or proof of compilation payback. Long active invocations can continue interpreting
-millions of operations after their entry is published. OSR is prioritized under T13, and that component
-must be measured separately from admission and queue delay. There is no evidence in this census
-that failed compilation explains the dominant interpreted work.
+Populated-JIT profiles contain no transfer and retain 22–26% interpreter self cycles. Leading
+compiled costs remain match finding (14–15%), aggregate Result extraction (about 12%) and a short
+integer-reading helper (9–10%). Interpreter censuses nominate tree initialization, slice filling,
+symbol sorting and checksum reduction, but operation counts do not establish compilation payback.
+Further work must distinguish unrequested work, queue delay and unused OSR compilation.
 
-Five local AArch64 macOS runs before and after the changes observe full-flate medians of
-311.77 / 298.43 ms and child CPU of 367.11 / 354.01 ms; corpus fib observes 25.59 / 25.22 ms.
-These observations are not interleaved controls, and AArch64 persistent-JIT relocation remains
-incomplete. The Linux cache result must not be extrapolated to macOS. Full-flate stdout agrees
-with native; the macOS serde control still stops at an unsupported inline-assembly boundary.
+Six alternating off/on pairs on macOS AArch64, after an untimed warmup, observe full-flate
+process medians of 315.66 / 287.21 ms and child CPU of 370.02 / 360.99 ms. Corpus fib observes
+24.57 / 24.51 ms. Outputs agree across modes. These measurements use default persistence, but
+AArch64 persistent-JIT relocations remain incomplete, so the state is not equivalent to Linux's
+populated cache. The full serde control remains outside the macOS claim because of unsupported
+inline assembly in `zmij::write`.
 
 With registry sources and the matching sysroot already available, a separate empty-derived-cache
 install prepares full flate in 2.47 seconds with 1.42 seconds of child CPU. This single observation
@@ -398,14 +399,16 @@ is a preparation cost check. The installed execution closure contains 3,727 func
 the canonical base is 15.66 MB and the MIR-rich sysroot 230.47 MB. Sysroot construction/download is
 outside that timing.
 
-Cleanup-call validation covers native differentials for unit/scalar/pair/aggregate returns, stack
-arguments and panic cleanup, including cold/warm forced JIT and interpretation. Sixteen focused
-compiler tests pass, including plain/trace slot relocations, stack checks and unwind metadata.
-Linux differentials also cover MIR inlining, the call ABI, catch/unwind and the main panic boundary;
-the cleanup fixture and full flate pass on macOS. The heat regression reproduces lost prelinks and
-unnecessary publication on the respective baselines, then checks retention and unchanged file
-identity across four processes. Formatting, all-target/all-feature Clippy, the platform boundary,
-manifest validation and inventory pass. The full runtime suite is outside this validation.
+OSR native differentials pass on Linux x86_64 and macOS AArch64, including nested loops, aligned
+address-taken locals, generic calls, narrow/wide values, indirect/pair returns and panic cleanup.
+Transfer-count checks observe three active transfers in the fixture. Six compiler/state checks
+cover deterministic transfer, exact shared specialization, entry side effects, headroom fallback,
+EngineFault restoration, refused/partial publication, concurrent request deduplication and trace
+entry. On Linux, 45 additional JIT checks pass with one existing ignored linked-unwind check;
+16 interpreter checks pass locally. Formatting, all three applicable Clippy feature configurations,
+repository boundary checks, manifest validation and inventory pass. No full runtime suite was run.
+The macOS artifact-identity check fails identically in an isolated pre-OSR checkout; AArch64 cache
+relocations remain incomplete (E26).
 
 The generic contract proves actual export/binding coverage under eager interpretation, shared
 interpretation and forced JIT, including layout constants and tracked direct calls. The base
@@ -830,7 +833,7 @@ The generic contract agrees with native under eager/shared interpretation, synch
 bound-image reload, including concurrent entries, callbacks, unwind and fork. The budget mode also
 matches native for normal and fork invocations. Focused template, cache-publication and compile-work
 unit checks, all-target/all-feature Clippy, formatting and repository boundary checks pass. The
-preparation contract covers both dependency tracks. OSR is prioritized under T13.
+preparation contract covers both dependency tracks. OSR transfer is implemented under [osr-design.md](designs/osr-design.md).
 
 ### Runtime generics prototype
 
@@ -840,7 +843,8 @@ only when the compile worker needs them. Call bridges reuse the interpreter's di
 implementation; concrete promotion publishes the original ABI for subsequent calls. Active frames
 retain their body and code. Production archives retain immutable template content IDs; the
 experiment groups those IDs across archive copies without eager decoding or payload hashing.
-Persisted shared JIT code and trace are refused, and there is no OSR. The compiled shared tier
+Persisted shared JIT code, trace and OSR out of this experimental compiled tier are refused.
+Production OSR from shared interpretation into an exact specialized continuation is separate. The compiled shared tier
 remains an experiment with no production option or default enablement.
 
 Identity qualification compares content IDs with address grouping in the same release binary and
@@ -949,7 +953,7 @@ Its six focused unit checks and four native-matching contract invocations pass; 
 suite was run. SSA remains opt-in. Remaining work includes profitable group selection, frame/call
 cost attribution, archive identity, code-size/register-pressure control, RSS and the full
 lifecycle/trace gates. The contract and release gates belong to
-[runtime-generics-design.md](designs/runtime-generics-design.md); OSR is prioritized under T13.
+[runtime-generics-design.md](designs/runtime-generics-design.md); OSR transfer is implemented under [osr-design.md](designs/osr-design.md).
 
 ## 4. Gaps and honest limits
 
@@ -960,8 +964,10 @@ What is refused or not yet claimed — not what is planned.
   It has no dedicated platform `Makefile` target or CI gate (E26).
 - **Arbitrary Rust**: not supported. The corpus holds real projects and a small workload set; those
   are not a continuous gate and do not generalize.
-- **JIT**: no OSR, no deopt, and no within-run tier upgrade — a function's tier is the previous run's
-  heat order (E42; OSR is T13). Close stops and joins compile workers and releases `Shared`, but published JIT code
+- **JIT**: no deopt or within-run tier upgrade — an ordinary function's tier is the previous run's
+  heat order (E42). OSR continuations are session-local, retain every guest slot in frame memory,
+  and can spend compilation on invocations that finish before publication. Close stops and joins
+  compile workers and releases `Shared`, but published JIT code
   and its `.eh_frame` live to process end.
 - **Signals**: synchronous faults in a guest handler, realtime signals and
   `SA_SIGINFO`/`SA_ONSTACK`/`SA_NODEFER`/`SA_RESETHAND` are refused. Process-directed external signals
@@ -1006,7 +1012,7 @@ product covering all of Rust.
    alternating unprofiled process/engine controls under default persistence, empty and populated
    JIT stores, and a non-recursive workload. CPU samples and diagnostic ledgers explain those
    results; isolated throughput or hit counts do not establish payback. A local small-cache result
-   does not qualify a populated or network-backed store. OSR is prioritized under T13.
+   does not qualify a populated or network-backed store. OSR transfer is implemented under [osr-design.md](designs/osr-design.md).
 2. **Logging and telemetry.** Fork generations are closed. Next: the remaining direct hot path, the
    trace interpreter loop, then stateless inline-asm raw syscall sites — the first internal syscall
    slice must not be claimed complete before those raw sites land. Only variadic `libc::syscall` forms

@@ -191,7 +191,8 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
 - Linux/x86_64 first, per P6: the write→execute flip and code-arena mapping go through `src/os`;
   the macOS `MAP_JIT` discipline is that pair's item, never a core-path special case.
 - Trace domain, closures, trampolines and stubs are never cached (§1).
-- No OSR, no deoptimization, no speculative entries: the cache persists exactly what the compile
+- OSR continuations are session-local and excluded from this cache. No deoptimization or
+  speculative entries: the cache persists exactly what the compile
   path can already produce; tiering policy stays outside this contract.
 - The interpreter remains the semantic reference; a cache hit changes where machine code comes
   from, never what may run without verification.

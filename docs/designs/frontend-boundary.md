@@ -189,7 +189,7 @@ Its separate witness experiment covers native Clone/Drop and C-unwind. The
 feasibility and show that short/native-call-heavy work can lose when promoted. They do not establish
 a serde/flate cold-start improvement or general guest trait/unwind coverage. Full frontend savings
 still require broader production template coverage and reuse of validated installed products.
-OSR is tracked separately under T13.
+Active-frame transfer is owned separately by [osr-design.md](osr-design.md).
 
 ## 5. Proposed handoff
 

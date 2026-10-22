@@ -343,21 +343,55 @@ impl Translator<'_, '_> {
         }
         self.b.ins().jump(blocks[0], &[]);
 
+        self.build_blocks(func, body, &blocks);
+    }
+
+    /// Resume at a loop header without reinitializing arguments or touching dead frame slots.
+    pub(super) fn build_osr(&mut self, func: u32, body: &ir::FuncBody) {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        let blocks: Vec<_> = (0..body.blocks.len())
+            .map(|_| self.b.create_block())
+            .collect();
+        self.b.switch_to_block(entry);
+        let base = self.b.block_params(entry)[0];
+        let destination = self.b.block_params(entry)[1];
+        let var = self.b.declare_var(types::I64);
+        self.b.def_var(var, base);
+        self.frame_base_var = Some(var);
+        if body
+            .blocks
+            .iter()
+            .any(|block| matches!(block.term, Terminator::Resume))
+        {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            let exception = self.exception_var();
+            self.b.def_var(exception, zero);
+        }
+        let mut switch = cranelift_frontend::Switch::new();
+        for (bb, is_target) in backedge_targets(body).into_iter().enumerate() {
+            if is_target {
+                switch.set_entry(bb as u128, blocks[bb]);
+            }
+        }
+        let invalid = self.b.create_block();
+        switch.emit(self.b, destination, invalid);
+        self.b.switch_to_block(invalid);
+        self.b.ins().trap(TrapCode::unwrap_user(1));
+        self.build_blocks(func, body, &blocks);
+    }
+
+    fn build_blocks(
+        &mut self,
+        func: u32,
+        body: &ir::FuncBody,
+        blocks: &[cranelift_codegen::ir::Block],
+    ) {
         // A safe point sits where control can go backwards, plus every return (`term`). A straight
         // run of blocks carries bounded work, and a cycle always contains the block of least index
         // among its members, whose in-cycle predecessor comes no earlier -- so that block is marked
         // here and every iteration of any loop polls, whatever order the blocks are laid out in.
-        let mut poll_here = vec![false; body.blocks.len()];
-        let mut succ = Vec::new();
-        for (bi, blk) in body.blocks.iter().enumerate() {
-            succ.clear();
-            blk.term.successors(&mut succ);
-            for target in &succ {
-                if *target as usize <= bi {
-                    poll_here[*target as usize] = true;
-                }
-            }
-        }
+        let poll_here = backedge_targets(body);
         for (bi, blk) in body.blocks.iter().enumerate() {
             self.b.switch_to_block(blocks[bi]);
             if poll_here[bi] {
@@ -368,9 +402,24 @@ impl Translator<'_, '_> {
                 self.item = item as u32;
                 self.stmt(st);
             }
-            self.term(func, body, &blk.term, &blocks);
+            self.term(func, body, &blk.term, blocks);
         }
     }
+}
+
+pub(super) fn backedge_targets(body: &ir::FuncBody) -> Vec<bool> {
+    let mut targets = vec![false; body.blocks.len()];
+    let mut successors = Vec::new();
+    for (bb, block) in body.blocks.iter().enumerate() {
+        successors.clear();
+        block.term.successors(&mut successors);
+        for &target in &successors {
+            if target as usize <= bb {
+                targets[target as usize] = true;
+            }
+        }
+    }
+    targets
 }
 
 pub(super) fn clif_rmw_op(op: ir::RmwOp) -> cranelift_codegen::ir::AtomicRmwOp {

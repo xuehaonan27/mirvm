@@ -289,9 +289,9 @@ signal safepoint.
   Java can do it only because it has no compile-time target cfg, fixes layout at load time and has
   fixed-size primitives — Rust violates all three.
 - **A missing triple is refused, not guessed**, as "unsupported platform".
-- **Tiering policy is not fixed here.** When to compile, whether to OSR (not first: compile whole
-  methods at call boundaries) and deoptimization are separate decisions; this design guarantees only
-  seamless plug-in after compilation.
+- **Tiering policy is not fixed here.** Admission and deoptimization are separate decisions.
+  [osr-design.md](osr-design.md) owns transfer of an active interpreted frame; ordinary entry
+  continues to use the calling convention defined here.
 
 ## 4. Verification
 
@@ -319,7 +319,7 @@ must agree byte-for-byte.
 2. **Calling-convention details**: whether to base the convention on the platform C ABI or a custom
    Cranelift calling convention, and the concrete treatment of aggregate passing aligned with the
    rustc ABI.
-3. **Tiering policy**: when to compile, whether to OSR and deoptimization.
+3. **Tiering policy**: profitable compilation admission, OSR scheduling and deoptimization.
 4. **Thunk and closure generation**: libffi closures or self-generated small stubs, merged with the
    c2i adapter.
 5. **Bytecode verification and lowering pipeline**: the MIR→bytecode pass, plus caching and content

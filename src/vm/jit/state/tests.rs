@@ -36,6 +36,33 @@ fn tables_sized_to_fn_count_and_zero_initialized() {
 }
 
 #[test]
+fn osr_requests_are_hot_deduplicated_and_domain_local() {
+    use super::{CodeDomain, FAIL_SENTINEL, ITERATION_REQUEST, OSR_QUEUED};
+    let mut j = JitState::new(1);
+    j.enabled = true;
+    j.osr_enabled = true;
+    let (tx, rx) = std::sync::mpsc::channel();
+    *j.queue.lock().unwrap() = Some(tx);
+    j.request_osr(CodeDomain::Plain, 0);
+    assert!(rx.try_recv().is_err());
+    j.iterations[0].store(ITERATION_REQUEST, Ordering::Relaxed);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| j.request_osr(CodeDomain::Plain, 0));
+        }
+    });
+    assert!(rx.try_recv().unwrap().osr);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(j.osr[0].load(Ordering::Acquire), OSR_QUEUED);
+    assert_eq!(j.trace.osr[0].load(Ordering::Acquire), 0);
+    drop(rx);
+    j.request_osr(CodeDomain::Trace, 0);
+    assert_eq!(j.trace.osr[0].load(Ordering::Acquire), FAIL_SENTINEL);
+    j.request_osr(CodeDomain::Trace, 0);
+    assert_eq!(j.trace.osr[0].load(Ordering::Acquire), FAIL_SENTINEL);
+}
+
+#[test]
 fn call_admission_stops_at_the_threshold_without_wrapping() {
     for threshold in [1, 1000, u32::MAX] {
         let mut j = JitState::new(1);

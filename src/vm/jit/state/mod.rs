@@ -64,11 +64,12 @@ impl Tier {
     }
 }
 
-/// One compilation request: which function, and the tier the ledger asked for.
+/// An ordinary entry or OSR continuation request, served by the engine's domain-specific worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Request {
     pub func: u32,
     pub tier: Tier,
+    pub osr: bool,
     pub queued: Option<std::time::Instant>,
 }
 
@@ -136,8 +137,12 @@ impl Heat {
 /// Failure sentinel for `MIRVM_JIT_SYNC` verification mode: when compilation of an
 /// eligible function fails, the worker stores this into the slots and the sync waiter
 /// aborts loudly on it. It lies outside the normal value range (0 = not compiled, keep
-/// interpreting), and non-strict mode never writes it.
+/// interpreting). Ordinary slots write it only in strict mode; OSR slots also use it for a
+/// terminal refusal, which always keeps the current invocation interpreted.
 pub const FAIL_SENTINEL: u64 = u64::MAX;
+
+/// OSR slots are empty, queued, refused, or a published aligned code pointer.
+pub(crate) const OSR_QUEUED: u64 = 1;
 
 /// Interpreted loop iterations of one function before the compile policy asks for it. A compiled body
 /// is worth some milliseconds of compilation, and interpreting a loop body pays that back after tens
@@ -162,6 +167,7 @@ pub(crate) struct DomainSlots {
     pub(crate) slots: Vec<AtomicU64>,
     /// compiled cc->cc face: FuncId -> checked-at-call-site body / c2i trampoline address.
     pub(crate) slots_fast: Vec<AtomicU64>,
+    pub(crate) osr: Vec<AtomicU64>,
 }
 
 impl DomainSlots {
@@ -169,6 +175,7 @@ impl DomainSlots {
         Self {
             slots: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
             slots_fast: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
+            osr: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 }
@@ -181,6 +188,7 @@ impl DomainSlots {
 pub(crate) struct DomainSlotSet<'a> {
     pub(crate) slots: &'a [AtomicU64],
     pub(crate) slots_fast: &'a [AtomicU64],
+    pub(crate) osr: &'a [AtomicU64],
 }
 
 pub struct JitState {
@@ -191,6 +199,10 @@ pub struct JitState {
     /// address (0 = none yet). Only compiled call sites read it (load plus
     /// `call_indirect`); the interpreter does not consume it.
     pub slots_fast: Vec<AtomicU64>,
+    osr: Vec<AtomicU64>,
+    pub(crate) osr_enabled: bool,
+    /// Transfers, including continuations that subsequently unwind.
+    pub(crate) osr_transfers: AtomicU64,
     /// The trace domain's own slot set. Kept beside the plain one so dispatch has
     /// exactly one selection point; a trace activation does not consult the plain
     /// slots and vice versa.
@@ -262,6 +274,9 @@ impl JitState {
         JitState {
             slots: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
             slots_fast: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
+            osr: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
+            osr_enabled: crate::options::jit_osr(),
+            osr_transfers: AtomicU64::new(0),
             trace: DomainSlots::new(fn_count),
             trace_enter: AtomicU64::new(0),
             counters: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
@@ -380,6 +395,7 @@ impl JitState {
             .send(Request {
                 func,
                 tier: self.tier_for(func),
+                osr: false,
                 queued: self.work.as_ref().map(|_| std::time::Instant::now()),
             })
             .is_ok();
@@ -397,6 +413,51 @@ impl JitState {
             Ok(hot) if hot.contains(&func) => Tier::Optimized,
             _ => Tier::Baseline,
         }
+    }
+
+    /// Only active interpreted loops request continuations. Failed publication is terminal for
+    /// this engine, and competing threads enqueue at most one request per function/domain.
+    pub(crate) fn request_osr(&self, domain: CodeDomain, func: u32) {
+        if !self.enabled
+            || !self.osr_enabled
+            || self.stopping.load(Ordering::Acquire)
+            || self.iterations[func as usize].load(Ordering::Relaxed) < ITERATION_REQUEST
+        {
+            return;
+        }
+        let slot = &self.slots_for(domain).osr[func as usize];
+        if slot
+            .compare_exchange(0, OSR_QUEUED, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let sent = self.queue.lock().unwrap().as_ref().is_some_and(|queue| {
+            queue
+                .send(Request {
+                    func,
+                    tier: Tier::Optimized,
+                    osr: true,
+                    queued: None,
+                })
+                .is_ok()
+        });
+        if !sent {
+            slot.store(FAIL_SENTINEL, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn publish_osr(
+        &self,
+        domain: CodeDomain,
+        func: u32,
+        entry: u64,
+        ranges: Vec<JitSymbolRange>,
+    ) {
+        for range in ranges {
+            self.register_symbol_range_with(range, perf_registry());
+        }
+        self.slots_for(domain).osr[func as usize].store(entry, Ordering::Release);
     }
 
     /// Record one compiled body's absolutes. A later compilation replaces an earlier one of the same
@@ -435,10 +496,12 @@ impl JitState {
             CodeDomain::Plain => DomainSlotSet {
                 slots: &self.slots,
                 slots_fast: &self.slots_fast,
+                osr: &self.osr,
             },
             CodeDomain::Trace => DomainSlotSet {
                 slots: &self.trace.slots,
                 slots_fast: &self.trace.slots_fast,
+                osr: &self.trace.osr,
             },
         }
     }

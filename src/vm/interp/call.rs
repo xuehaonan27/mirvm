@@ -15,7 +15,7 @@ use super::*;
 pub(super) fn run_cleanup(ctx: *mut Ctx, func: u32, body: &FuncBody, base: usize, entry: Bb) {
     // Cleanup blocks contain no nested cleanup (MIR invariant), so a dummy edge is enough.
     let edge = Cell::new(None);
-    match run_blocks(ctx, func, body, base, &edge, entry) {
+    match run_blocks(ctx, func, body, base, &edge, entry, false) {
         Exit::Resume => {} // return to the guard; the host unwinder continues on its own
         Exit::Ret(..) => engine_abort("cleanup chain ended in Return (MIR invariant broken)"),
     }
@@ -177,8 +177,9 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         })
     };
     guard.shadow_active = true;
-    match crate::vm::unwind::catch_raw(|| run_blocks(ctx, func, body, base, &guard.unwind_edge, 0))
-    {
+    match crate::vm::unwind::catch_raw(|| {
+        run_blocks(ctx, func, body, base, &guard.unwind_edge, 0, true)
+    }) {
         Ok(Exit::Ret(lo, hi)) => (lo, hi), // guard drop restores the region
         Ok(Exit::Resume) => engine_abort(&format!(
             "Resume reached on the normal execution path (fn {})",

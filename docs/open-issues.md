@@ -54,19 +54,20 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     denser storage or demand loading with immutable ownership and validation before execution;
     quantify decoding/verification and publication costs as well as whole-process latency.
     Attribute input validation separately; mutable source trees still require content reads.
-  - Execution payback: the full 100 KiB flate driver retains about 31.9% of sampled self cycles in
-    interpretation and 3.4% in guest dispatch. Attribute bytecode operations and frame traffic in
+  - Execution payback: the full 100 KiB flate driver with populated JIT entries retains 22–26% of
+    sampled self cycles in interpretation. Attribute bytecode operations and frame traffic in
     tree initialization, slice filling, symbol sorting and checksum reduction, separately from
     active invocations that outlive publication. Compiled aggregate extraction and short load
-    helpers together retain about 17%; evaluate scalar promotion with aliasing,
+    helpers together retain about 21%; evaluate scalar promotion with aliasing,
     stack checks, return safepoints, unwind metadata, cache identity and plain/trace isolation intact.
-    Attribute remaining interpreted work and publication
-    timing separately: a compiled body cannot replace an active interpreted invocation without OSR.
+    Attribute remaining interpreted work, publication delay and OSR continuation scheduling separately.
     Reduced-input compilation profiles are not a substitute for the full workload. Price saved
     interpretation against compilation, queueing, publication and code growth; avoid a blanket
     threshold reduction or synchronous compilation. Register allocation and verification are costs
     to avoid repeating, not checks to disable. Rayon's delayed publication and compiled/interpreted
-    transitions need the same accounting. OSR is prioritized under T13.
+    transitions need the same accounting. OSR requests can outlive their active invocation; measure
+    cancellation of unused requests, reuse of continuations across processes and entry-specific
+    scalar promotion while preserving the borrowed frame and pointer identity.
   - Persistent JIT payback: attribute selected-pack reads, relocation/finalization and prelink
     scheduling before changing cache layout. Publication can still miss a hot invocation's entry
     even when the heat order is stable. Quantify tier selection, hits, misses and refusals across
@@ -94,12 +95,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Approved, awaiting construction
 
-- **T13** `APPROVED`: implement [OSR](designs/osr-design.md) for long-running interpreted loops before
-  further admission-policy tuning. Borrow the active frame at backward edges, preserve pointer and
-  unwind ownership, cover exact generic instances and plain/trace domains, and measure polling,
-  compilation and transfer costs on single invocations and complete workloads. Persistent OSR code
-  and entry-specific scalar promotion remain separate extensions. Coordinate with E42's within-run
-  tier policy.
 - **T8** `APPROVED`: HostSyscall direct hot path. Three pieces remain — dropping the per-record cold
   sequence update on the healthy pair (needs a separate ruling, since `next_sequence` is also the
   producer-end ledger's `attempted` and deriving it in-page changes the v0 file/sequence contract);
@@ -283,7 +278,7 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     unchanged bound-image reuse and specialization payback before enabling experimental tier policies. Preserve
     guest trait/drop/unwind, concurrency, callbacks, fork, signal and trace contracts as admission
     grows. Retain Rust diagnostics, build-script/proc-macro, layout/ABI, std and input invalidation;
-    coordinate single-invocation optimization with T13.
+    preserve the [OSR transfer contract](designs/osr-design.md) when extending single-invocation optimization.
   - Symbolic program deltas cannot represent every anonymous address in a lower dependency layer.
     Bound-image publication is independent, but edited-program sharing still needs a stable
     representation for those references without inventing symbol identities or weakening validation.

@@ -215,14 +215,14 @@ impl<'a> Compiler<'a> {
 
     /// Define missing PLT entries without making them callable. Keep unpublished definitions so
     /// another caller can reuse them if this request fails before publication.
-    fn prepare_callees(&mut self, func: u32, body: &ir::FuncBody) -> Option<Vec<u32>> {
+    pub(super) fn prepare_callees(&mut self, func: u32, body: &ir::FuncBody) -> Option<Vec<u32>> {
         let jit = &self.shared.jit;
         let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
         for blk in &body.blocks {
             if let Terminator::Call {
                 callee, args, ret, ..
             } = &blk.term
-                && *callee != func
+                && (*callee != func || self.osr)
                 && !callees.iter().any(|(c, _)| c == callee)
                 && let Some(cabi) =
                     callee_abi(self.shared.module.funcs.header(*callee as usize).unwrap())
@@ -245,7 +245,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// All definitions and their unwind records must be finalized before any slot is visible.
-    fn publish_callees(&mut self, callees: Vec<u32>) {
+    pub(super) fn publish_callees(&mut self, callees: Vec<u32>) {
         for callee in callees {
             let symbol = self.pending_callees.remove(&callee).unwrap();
             let entry = self.module.get_finalized_function(symbol.id) as u64;
@@ -509,7 +509,11 @@ impl<'a> Compiler<'a> {
         let sig = self.fast_sig(abi);
         let id = self
             .module
-            .declare_function(&format!("f{func}"), Linkage::Local, &sig)
+            .declare_function(
+                &format!("{}{func}", if self.osr { "o" } else { "f" }),
+                Linkage::Local,
+                &sig,
+            )
             .unwrap();
         let mut cctx = self.take_context();
         cctx.func.signature = sig;
@@ -518,8 +522,12 @@ impl<'a> Compiler<'a> {
         let has_try_call;
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
-            let frame_offs = analyze_frame(body);
-            let frame_ss = if !frame_offs.needs_frame() {
+            let frame_offs = if self.osr {
+                super::super::frame::FrameMap::borrowed(body.frame_size)
+            } else {
+                analyze_frame(body)
+            };
+            let frame_ss = if self.osr || !frame_offs.needs_frame() {
                 None
             } else {
                 Some(b.create_sized_stack_slot(StackSlotData::new(
@@ -582,7 +590,11 @@ impl<'a> Compiler<'a> {
                 has_try_call: false,
                 frame_base_var: None,
             };
-            tr.build(func, body);
+            if self.osr {
+                tr.build_osr(func, body);
+            } else {
+                tr.build(func, body);
+            }
             has_try_call = tr.has_try_call;
             self.sites = std::mem::take(&mut tr.sites);
             b.seal_all_blocks();
@@ -674,14 +686,20 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        self.shared.jit.record_sites(self.domain, func, placed);
+        if !self.osr {
+            self.shared.jit.record_sites(self.domain, func, placed);
+        }
         self.recycle_context(cctx);
         Some((
             id,
             PendingJitSymbol {
                 id,
                 func,
-                role: JitSymbolRole::FastBody,
+                role: if self.osr {
+                    JitSymbolRole::OsrBody
+                } else {
+                    JitSymbolRole::FastBody
+                },
                 size,
             },
         ))
@@ -711,7 +729,11 @@ impl<'a> Compiler<'a> {
         }
         let id = self
             .module
-            .declare_function(&format!("p{func}"), Linkage::Local, &sig)
+            .declare_function(
+                &format!("{}{func}", if self.osr { "q" } else { "p" }),
+                Linkage::Local,
+                &sig,
+            )
             .unwrap();
         let mut cctx = self.take_context();
         cctx.func.signature = sig;
@@ -820,7 +842,11 @@ impl<'a> Compiler<'a> {
             PendingJitSymbol {
                 id,
                 func,
-                role: JitSymbolRole::Packed,
+                role: if self.osr {
+                    JitSymbolRole::OsrPacked
+                } else {
+                    JitSymbolRole::Packed
+                },
                 size,
             },
         ))
