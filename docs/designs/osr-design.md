@@ -35,12 +35,21 @@ interpreted backedges may request a continuation while an invocation is still in
 Normal execution does not wait for publication; sparse polls continue interpreting until an entry is
 available. Unavailable, rejected, stopped or failed compilation leaves the invocation interpreted.
 
+Demand belongs to each eligible interpreted activation. It registers once at an OSR poll, remains
+registered across nested calls, and releases its registration on return, unwind or transfer. The
+worker checks demand after dequeuing and before constructing the continuation compiler. With no
+remaining demand it cancels the request and resets the slot, allowing a later activation to retry.
+Only the worker resets canceled slots, so a new request cannot leave an older one queued behind it.
+Demand arriving during cancellation retries at its next poll. Once compilation starts it finishes
+normally; an activation can still end before publication, so admission does not guarantee use.
+
 OSR publication is separate from ordinary fast/packed slots. Instructions, callee trampolines, symbol
 ranges and unwind registrations are complete before a Release publication; transfer uses Acquire.
 The initial OSR entries live for the same code lifetime as other JIT entries, but are not persisted.
 `MIRVM_JIT_OSR=off` disables requests and transfers without disabling ordinary JIT.
-`MIRVM_JIT_STATS=1` reports transfers as `osr`; debug diagnostics report compilation time, bytes
-and transfer destinations. Their distinct `osr-body` / `osr-packed` profiler roles must not introduce a second guest backtrace frame alongside the
+`MIRVM_JIT_STATS=1` reports transfers as `osr` and canceled queued requests as `osr_cancel`.
+Debug diagnostics report queue delay, waiting activations, compilation time, bytes and transfer
+destinations. Their distinct `osr-body` / `osr-packed` profiler roles must not introduce a second guest backtrace frame alongside the
 interpreter shadow frame that still owns this invocation.
 
 ## 3. Generics and code domains
@@ -72,8 +81,8 @@ continues to refer to the ordinary guest entry, never to an OSR continuation.
 - Cover multiple/nested loop entries, narrow scalars, pairs, indirect aggregates, alignment and
   pointers to live locals across transfer; include exact generic instances.
 - Exercise normal return, panic cleanup, EngineFault propagation and caller-frame restoration.
-- Cover both code domains, publication failure and concurrent request deduplication; identify OSR
-  code in CPU profiles.
+- Cover both code domains, publication failure, concurrent request deduplication, demand release
+  and cancellation followed by retry; identify OSR code in CPU profiles.
 - Measure full workloads and short controls against the same build with OSR disabled. Report
   additional compilation/code cost as well as saved interpretation. A successful transfer alone
   does not establish a latency improvement.
@@ -86,5 +95,5 @@ wide values, generic calls, indirect/pair returns and panic cleanup. `osr-transf
 nonzero transfer count in an asynchronous single-invocation workload. Compiler/state unit checks
 prepublish continuations to deterministically prove active-frame transfer, generic dictionary
 specialization, side-effect uniqueness, headroom fallback, EngineFault restoration, failed
-publication, request deduplication and trace-domain entry. Performance evidence belongs to
+publication, request deduplication, cancellation, demand release and trace-domain entry. Performance evidence belongs to
 [current-status.md](../current-status.md); these semantic checks do not prove compile payback.

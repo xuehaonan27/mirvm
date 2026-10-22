@@ -10,6 +10,7 @@ pub(crate) fn try_enter_osr(
     _body: &FuncBody,
     _base: usize,
     _bb: Bb,
+    _interest: &mut Option<super::OsrInterest<'_>>,
 ) -> Option<(u64, u64)> {
     None
 }
@@ -21,6 +22,7 @@ pub(crate) fn try_enter_osr(
     body: &FuncBody,
     base: usize,
     bb: Bb,
+    interest: &mut Option<super::OsrInterest<'_>>,
 ) -> Option<(u64, u64)> {
     use super::*;
     let jit = unsafe { &(*ctx).shared.jit };
@@ -28,12 +30,17 @@ pub(crate) fn try_enter_osr(
         return None;
     }
     let domain = crate::vm::ctx::current_code_domain();
-    let entry = jit.slots_for(domain).osr[func as usize].load(Ordering::Acquire);
-    if entry == 0 {
-        jit.request_osr(domain, func);
+    let entry = jit.slots_for(domain).osr[func as usize]
+        .entry
+        .load(Ordering::Acquire);
+    if entry == 0 || entry == OSR_QUEUED {
+        if entry == 0 || interest.is_none() {
+            jit.request_osr(domain, func, interest);
+        }
         return None;
     }
-    if entry == OSR_QUEUED || entry == FAIL_SENTINEL {
+    if entry == FAIL_SENTINEL {
+        interest.take();
         return None;
     }
     // Leave slack for the packed boundary before it performs its own guard. Failing this
@@ -56,6 +63,8 @@ pub(crate) fn try_enter_osr(
     } else {
         None
     };
+    // Compiled execution no longer needs a continuation, even while its host owner is suspended.
+    interest.take();
     jit.osr_transfers.fetch_add(1, Ordering::Relaxed);
     helpers::stat(helpers::S_OSR);
     if crate::options::jit_debug() {

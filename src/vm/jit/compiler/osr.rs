@@ -16,20 +16,21 @@ impl<'a> Compiler<'a> {
 
     pub(super) fn compile_osr(&mut self, func: u32) {
         let started = std::time::Instant::now();
-        let slot = &self.shared.jit.slots_for(self.domain).osr[func as usize];
+        let state = &self.shared.jit.slots_for(self.domain).osr[func as usize];
         if self.published.contains(&func) {
             return;
         }
         let Some((entry, ranges)) = self.define_osr(func) else {
-            slot.store(FAIL_SENTINEL, Ordering::Release);
+            state.entry.store(FAIL_SENTINEL, Ordering::Release);
             return;
         };
         if crate::options::jit_debug() {
             let bytes: u64 = ranges.iter().map(|range| range.size).sum();
             crate::diag_debug!(
                 Jit,
-                "OSR f{func}: compiled {bytes} bytes in {} us",
-                started.elapsed().as_micros()
+                "OSR f{func}: compiled {bytes} bytes in {} us; waiting={}",
+                started.elapsed().as_micros(),
+                state.waiting()
             );
         }
         self.shared

@@ -289,6 +289,26 @@ pub(super) fn worker(
             break;
         }
         if request.osr {
+            if !shared.jit.begin_osr(domain, func) {
+                helpers::stat(helpers::S_OSR_CANCEL);
+                if dbg {
+                    crate::diag_debug!(
+                        Jit,
+                        "OSR f{func}: canceled before compilation; no active demand"
+                    );
+                }
+                continue;
+            }
+            if dbg {
+                crate::diag_debug!(
+                    Jit,
+                    "OSR f{func}: starting with {} waiting after {} us",
+                    shared.jit.slots_for(domain).osr[func as usize].waiting(),
+                    request
+                        .queued
+                        .map_or(0, |queued| queued.elapsed().as_micros())
+                );
+            }
             osr.get_or_insert_with(|| Compiler::for_osr(&shared, domain))
                 .compile_osr(func);
             continue;

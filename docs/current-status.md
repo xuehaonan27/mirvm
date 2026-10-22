@@ -343,55 +343,64 @@ rustc otherwise disables that pass at LLVM optimization level 0, leaving many it
 arithmetic wrappers as guest calls. Profile check settings remain unchanged. The producer contract
 is in [distribution-design.md](designs/distribution-design.md#27-installed-execution-products).
 
-A Linux x86_64 release comparison toggles only `MIRVM_JIT_OSR` in the same full compiler-linked
-binary. Every run starts a fresh process, uses prepared original corpus inputs and checks native
-release stdout. Nine alternating off/on pairs retain populated JIT entries after four warmups;
-five pairs bypass JIT persistence and empty the heat order before every process. Filesystem caches
-remain warm. Preparation, diagnostics and sampling are outside timed runs; shared-host scheduling
-and storage are uncontrolled. Medians in milliseconds are OSR off / on:
+OSR demand is owned by eligible interpreted activations. The worker discards queued requests whose
+last waiting activation has ended, before constructing or running the continuation compiler; later
+calls can request again. Already-started compilation finishes normally. The ownership and race
+contract belongs to [osr-design.md](designs/osr-design.md).
 
-| Workload | Populated JIT process | Populated JIT child CPU | Empty JIT process |
+Three separate empty-JIT diagnostic runs of full flate compare cancellation enabled/disabled while
+recording waiting activations. Without cancellation, six continuations total 57,967 body/wrapper
+bytes and a median 26.66 ms of compilation; only two or three transfer. Most unused definitions
+already have zero demand when compilation starts. Cancellation skips three to five queued requests
+per process and compiles two or three continuations, all observed in use: 26,952–27,521 bytes and a
+median 12.25 ms. This excludes callee trampolines and metadata. Compilation overlaps guest execution,
+so the 54% reduction in these compile intervals is not a process-latency reduction. Demand can
+still disappear after compilation begins.
+
+Linux x86_64 release timing compares the original OSR policy with activation-owned cancellation;
+OSR remains enabled in both binaries. Every run starts a fresh process with prepared original corpus
+inputs and checks native release stdout. Filesystem pages remain warm; preparation, diagnostics and
+sampling are outside timing. Full flate, approximately 100 KiB, has these medians in milliseconds
+(original / cancellation):
+
+| JIT state and scheduling | Alternating pairs | Process time | Child CPU |
 |---|---:|---:|---:|
-| Empty program | 36.51 / 37.37 | 26.61 / 25.83 | 37.19 / 39.98 |
-| Corpus fib (0 through 9) | 37.99 / 37.44 | 26.92 / 26.43 | 42.63 / 34.02 |
-| HashMap | 39.93 / 41.08 | 29.85 / 28.25 | 41.44 / 37.44 |
-| Strings | 46.92 / 37.10 | 29.52 / 28.89 | 38.69 / 42.66 |
-| serde JSON | 66.65 / 66.07 | 46.00 / 46.87 | 58.81 / 62.34 |
-| Full flate2, approximately 100 KiB | 272.53 / 270.11 | 276.21 / 274.17 | 428.22 / 373.50 |
+| Populated shared store | 9 | 290.68 / 320.17 | 302.04 / 339.43 |
+| Populated shared store, fixed two-core affinity | 9 | 364.09 / 442.02 | 354.60 / 392.23 |
+| Separately seeded stores | 9 | 256.29 / 245.95 | 243.21 / 243.45 |
+| Persistence bypassed, heat empty before each process | 5 | 396.32 / 390.89 | 504.61 / 498.42 |
+| Persistence bypassed, empty heat, fixed two-core affinity | 9 | 410.34 / 370.12 | 540.81 / 469.80 |
 
-Empty-JIT flate2 improves in all five process pairs and four CPU pairs: 12.8% less process time;
-child CPU changes from 501.31 to 477.27 ms (4.8% less). Populated-JIT flate2 wins only five of nine
-process pairs and four CPU pairs, so there is no established gain there. Small controls have mixed
-wall-clock results and no demonstrated OSR benefit. Corpus fib is not the fib(32) timing case.
-These are prepared fresh-process measurements, not empty-filesystem or first-install timings.
+The shared store contains 586 packs, versus seven in each separately seeded store. Both seeded
+stores start empty and receive five warmups for each corpus case; directory renames retain pack
+identities during comparisons. Shared-store comparisons receive four warmups. Two-core affinity
+restricts both binaries identically but does not reserve those cores against other workloads.
+The empty-JIT affinity comparison wins five of nine wall-clock pairs and eight CPU pairs; the
+separately seeded comparison wins only five of nine pairs in either metric. A separate seven-pair
+shared-store repeat without preparation gives 286.58 / 279.27 ms wall and 288.05 / 278.18 ms CPU;
+with OSR disabled in both builds, it gives 279.85 / 278.32 ms wall and 289.50 / 277.92 ms CPU.
+These conflicting populated-store results do not establish either a latency improvement or a
+stable regression attributable to demand tracking. Store population, prelink delay and scheduling
+remain unresolved contributors; equal prelink counts alone do not control them.
 
-A separate empty-JIT diagnostic run compiles six continuations whose bodies/wrappers total 57,967 bytes in 26.94 ms
-(excluding callee trampolines and metadata);
-two transfer active calls, `compress_stored` and `compress_normal`. The other definitions cost work
-without an observed transfer. Populated-JIT diagnostics prelink 169 ordinary entries and observe no
-OSR transfer; one unused 569-byte continuation costs 0.69 ms. Compiler intervals overlap execution
-and cannot be subtracted directly from process latency. Ordinary direct cleanup calls use fast
-slots, successful prelinks remain in the heat order, and unchanged orders are not republished.
+Empty, corpus fib, HashMap, strings and serde JSON controls have mixed timing changes and no
+established benefit. Corpus fib is not the fib(32) timing case. These measurements qualify neither
+first install nor an empty filesystem cache. Ordinary cleanup calls use fast slots; successful
+prelinks remain in the heat order, and unchanged orders are not republished.
 
 Separate 1999 Hz user-cycle captures with DWARF stacks and process-local JIT maps cover three
-full-flate processes per mode, with no lost samples. Empty-JIT off/on captures contain 3,456 / 3,593
-samples and 5.753 / 5.714 billion cycles. Interpreter self cycles fall from 37.5% to 30.9%; the guest
-thread's share falls from 73.9% to 67.9%, while compiler work grows from 22.7% to 28.4%. The maps
-identify both active `osr-body` continuations. Sampling and debug diagnostics change scheduling;
-unprofiled timings, not these cycle totals, establish the latency comparison.
+full-flate processes per binary/cache state, with no lost samples. Empty-JIT original/cancellation
+captures contain 3,998 / 3,449 samples and 6.523 / 5.464 billion cycles. Interpreter self cycles
+account for 35.6% / 31.0%; compiler threads account for 26.6% / 27.1%. Both captures identify active
+`osr-body` continuations. Sampling and diagnostics change scheduling, so these totals do not
+establish the latency comparison.
 
-Populated-JIT profiles contain no transfer and retain 22–26% interpreter self cycles. Leading
-compiled costs remain match finding (14–15%), aggregate Result extraction (about 12%) and a short
-integer-reading helper (9–10%). Interpreter censuses nominate tree initialization, slice filling,
-symbol sorting and checksum reduction, but operation counts do not establish compilation payback.
-Further work must distinguish unrequested work, queue delay and unused OSR compilation.
-
-Six alternating off/on pairs on macOS AArch64, after an untimed warmup, observe full-flate
-process medians of 315.66 / 287.21 ms and child CPU of 370.02 / 360.99 ms. Corpus fib observes
-24.57 / 24.51 ms. Outputs agree across modes. These measurements use default persistence, but
-AArch64 persistent-JIT relocations remain incomplete, so the state is not equivalent to Linux's
-populated cache. The full serde control remains outside the macOS claim because of unsupported
-inline assembly in `zmij::write`.
+Populated-store profiles contain no transfer and retain 21.6–29.1% interpreter self cycles.
+Leading compiled costs remain match finding (14–17.5%), aggregate Result extraction (10.6–11.1%)
+and a short integer-reading helper (8.0–8.8%). Interpreter censuses nominate tree initialization,
+slice filling, symbol sorting and checksum reduction, but operation counts do not establish
+compilation payback. Further attribution must separate work awaiting publication from work never
+selected, and distinguish continuation cost from the borrowed frame's execution cost.
 
 With registry sources and the matching sysroot already available, a separate empty-derived-cache
 install prepares full flate in 2.47 seconds with 1.42 seconds of child CPU. This single observation
@@ -401,11 +410,11 @@ outside that timing.
 
 OSR native differentials pass on Linux x86_64 and macOS AArch64, including nested loops, aligned
 address-taken locals, generic calls, narrow/wide values, indirect/pair returns and panic cleanup.
-Transfer-count checks observe three active transfers in the fixture. Six compiler/state checks
+Transfer-count checks observe three active transfers in the fixture. Nine compiler/state checks
 cover deterministic transfer, exact shared specialization, entry side effects, headroom fallback,
 EngineFault restoration, refused/partial publication, concurrent request deduplication and trace
-entry. On Linux, 45 additional JIT checks pass with one existing ignored linked-unwind check;
-16 interpreter checks pass locally. Formatting, all three applicable Clippy feature configurations,
+entry, plus demand release, stale-request cancellation and retry. They pass on both platforms.
+Formatting, all three applicable Clippy feature configurations,
 repository boundary checks, manifest validation and inventory pass. No full runtime suite was run.
 The macOS artifact-identity check fails identically in an isolated pre-OSR checkout; AArch64 cache
 relocations remain incomplete (E26).

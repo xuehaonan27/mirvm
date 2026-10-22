@@ -174,7 +174,9 @@ fn osr_borrows_live_frame_and_specializes_without_replaying_entry() {
         compiler.compile_osr(0);
         let jit = &engine.shared().jit;
         let slots = jit.slots_for(engine.shared().domain);
-        assert!(![0, OSR_QUEUED, FAIL_SENTINEL].contains(&slots.osr[0].load(Ordering::Acquire)));
+        assert!(
+            ![0, OSR_QUEUED, FAIL_SENTINEL].contains(&slots.osr[0].entry.load(Ordering::Acquire))
+        );
         assert_eq!(slots.slots[0].load(Ordering::Acquire), 0);
         let range = jit
             .symbol_ranges()
@@ -247,7 +249,7 @@ fn osr_rejection_is_terminal_and_does_not_publish_normal_entries() {
     let mut compiler = Compiler::for_osr(engine.shared(), engine.shared().domain);
     compiler.compile_osr(0);
     let slots = engine.shared().jit.slots_for(engine.shared().domain);
-    assert_eq!(slots.osr[0].load(Ordering::Acquire), FAIL_SENTINEL);
+    assert_eq!(slots.osr[0].entry.load(Ordering::Acquire), FAIL_SENTINEL);
     assert_eq!(slots.slots[0].load(Ordering::Acquire), 0);
     assert_eq!(slots.slots_fast[0].load(Ordering::Acquire), 0);
 }
@@ -259,8 +261,61 @@ fn osr_partial_definition_cannot_be_entered() {
     compiler.fail_after_symbol = Some(JitSymbolRole::OsrBody);
     compiler.compile_osr(0);
     let slots = engine.shared().jit.slots_for(engine.shared().domain);
-    assert_eq!(slots.osr[0].load(Ordering::Acquire), FAIL_SENTINEL);
+    assert_eq!(slots.osr[0].entry.load(Ordering::Acquire), FAIL_SENTINEL);
     assert!(engine.shared().jit.symbol_ranges().is_empty());
+}
+
+#[test]
+fn osr_demand_is_released_on_return_and_engine_fault() {
+    for fault in [false, true] {
+        let mut body = loop_body(false);
+        if fault {
+            body.blocks[2].term = Terminator::Trap("osr demand probe".into());
+        }
+        let engine = engine(body);
+        let jit = &engine.shared().jit;
+        jit.note_iterations(0, ITERATION_REQUEST);
+        let (tx, rx) = std::sync::mpsc::channel();
+        *jit.queue.lock().unwrap() = Some(tx);
+        let activation = activate(engine.shared());
+        let mut effects = 0u64;
+        let result = unsafe {
+            crate::vm::interp::run_export(&engine, "loop", &[1027, &mut effects as *mut u64 as u64])
+        };
+        assert_eq!(result.is_err(), fault);
+        assert!(rx.try_recv().unwrap().osr);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(jit.slots_for(engine.shared().domain).osr[0].waiting(), 0);
+        assert!(!jit.begin_osr(engine.shared().domain, 0));
+        assert_eq!(effects, 1);
+        assert_eq!(unsafe { (*activation.ctx()).depth }, 0);
+    }
+}
+
+#[test]
+fn osr_worker_discards_stale_demand_before_constructing_code() {
+    let engine = engine(loop_body(false));
+    let jit = &engine.shared().jit;
+    jit.note_iterations(0, ITERATION_REQUEST);
+    let (tx, rx) = std::sync::mpsc::channel();
+    *jit.queue.lock().unwrap() = Some(tx);
+    let mut interest = None;
+    jit.request_osr(engine.shared().domain, 0, &mut interest);
+    drop(interest);
+    jit.queue.lock().unwrap().take();
+    super::super::worker(
+        std::sync::Arc::clone(engine.shared()),
+        rx,
+        engine.shared().domain,
+        Heat::default(),
+    );
+    assert_eq!(
+        jit.slots_for(engine.shared().domain).osr[0]
+            .entry
+            .load(Ordering::Acquire),
+        0
+    );
+    assert!(jit.symbol_ranges().is_empty());
 }
 
 #[test]
@@ -300,6 +355,7 @@ fn osr_trace_preserves_frame_and_unwind_boundaries() {
     .unwrap();
     osr_borrows_live_frame_and_specializes_without_replaying_entry();
     osr_engine_fault_restores_the_interpreter_owner();
+    osr_demand_is_released_on_return_and_engine_fault();
     drop(session);
     let _ = std::fs::remove_file(path);
 }

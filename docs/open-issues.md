@@ -65,13 +65,15 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     interpretation against compilation, queueing, publication and code growth; avoid a blanket
     threshold reduction or synchronous compilation. Register allocation and verification are costs
     to avoid repeating, not checks to disable. Rayon's delayed publication and compiled/interpreted
-    transitions need the same accounting. OSR requests can outlive their active invocation; measure
-    cancellation of unused requests, reuse of continuations across processes and entry-specific
-    scalar promotion while preserving the borrowed frame and pointer identity.
+    transitions need the same accounting. Demand can disappear after OSR compilation starts;
+    measure admission payback, reuse of continuations across processes and entry-specific scalar
+    promotion while preserving the borrowed frame and pointer identity.
   - Persistent JIT payback: attribute selected-pack reads, relocation/finalization and prelink
     scheduling before changing cache layout. Publication can still miss a hot invocation's entry
     even when the heat order is stable. Quantify tier selection, hits, misses and refusals across
-    repeated runs. Preserve file identities when seeding a warm-store experiment; copying packs makes
+    repeated runs. Attribute the populated-store timing sensitivity independently of OSR cancellation;
+    equal prelink counts do not control store population or publication delay. Preserve file
+    identities when seeding a warm-store experiment; copying packs makes
     catalogue offsets stale and invalidates the comparison.
   - Locked resolution on preparation misses still decodes full registry version histories.
     Evaluate selective materialization without requiring a reusable launch record.

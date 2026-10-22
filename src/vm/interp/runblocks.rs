@@ -62,6 +62,7 @@ pub(super) fn run_blocks(
         .as_ref()
         .and_then(|_| unsafe { &(*ctx).shared.jit }.work.as_ref()?.sample(func));
 
+    let mut osr_interest = None;
     let mut blk = entry as usize;
     let mut iterations = Iterations {
         jit: unsafe { &(*ctx).shared.jit },
@@ -472,8 +473,14 @@ pub(super) fn run_blocks(
             if iterations.back_edge()
                 && allow_osr
                 && edge.get().is_none()
-                && let Some((lo, hi)) =
-                    crate::vm::jit::try_enter_osr(ctx, func, body, base, blk as Bb)
+                && let Some((lo, hi)) = crate::vm::jit::try_enter_osr(
+                    ctx,
+                    func,
+                    body,
+                    base,
+                    blk as Bb,
+                    &mut osr_interest,
+                )
             {
                 return Exit::Ret(lo, hi);
             }

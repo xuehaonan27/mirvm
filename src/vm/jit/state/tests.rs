@@ -43,23 +43,75 @@ fn osr_requests_are_hot_deduplicated_and_domain_local() {
     j.osr_enabled = true;
     let (tx, rx) = std::sync::mpsc::channel();
     *j.queue.lock().unwrap() = Some(tx);
-    j.request_osr(CodeDomain::Plain, 0);
+    j.request_osr(CodeDomain::Plain, 0, &mut None);
     assert!(rx.try_recv().is_err());
     j.iterations[0].store(ITERATION_REQUEST, Ordering::Relaxed);
     std::thread::scope(|scope| {
         for _ in 0..8 {
-            scope.spawn(|| j.request_osr(CodeDomain::Plain, 0));
+            scope.spawn(|| j.request_osr(CodeDomain::Plain, 0, &mut None));
         }
     });
     assert!(rx.try_recv().unwrap().osr);
     assert!(rx.try_recv().is_err());
-    assert_eq!(j.osr[0].load(Ordering::Acquire), OSR_QUEUED);
-    assert_eq!(j.trace.osr[0].load(Ordering::Acquire), 0);
+    assert_eq!(j.osr[0].entry.load(Ordering::Acquire), OSR_QUEUED);
+    assert_eq!(j.trace.osr[0].entry.load(Ordering::Acquire), 0);
     drop(rx);
-    j.request_osr(CodeDomain::Trace, 0);
-    assert_eq!(j.trace.osr[0].load(Ordering::Acquire), FAIL_SENTINEL);
-    j.request_osr(CodeDomain::Trace, 0);
-    assert_eq!(j.trace.osr[0].load(Ordering::Acquire), FAIL_SENTINEL);
+    j.request_osr(CodeDomain::Trace, 0, &mut None);
+    assert_eq!(j.trace.osr[0].entry.load(Ordering::Acquire), FAIL_SENTINEL);
+    j.request_osr(CodeDomain::Trace, 0, &mut None);
+    assert_eq!(j.trace.osr[0].entry.load(Ordering::Acquire), FAIL_SENTINEL);
+}
+
+#[test]
+fn osr_demand_survives_other_callers_and_cancellation_allows_retry() {
+    use super::{CodeDomain, ITERATION_REQUEST, OSR_QUEUED};
+    let mut jit = JitState::new(1);
+    jit.enabled = true;
+    jit.osr_enabled = true;
+    jit.iterations[0].store(ITERATION_REQUEST, Ordering::Relaxed);
+    let (tx, rx) = std::sync::mpsc::channel();
+    *jit.queue.lock().unwrap() = Some(tx);
+    for domain in [CodeDomain::Plain, CodeDomain::Trace] {
+        let state = &jit.slots_for(domain).osr[0];
+        let mut interests = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut interest = None;
+                        jit.request_osr(domain, 0, &mut interest);
+                        interest.unwrap()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(rx.try_recv().unwrap().osr);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(state.waiting(), 8);
+        interests.truncate(1);
+        assert_eq!(state.waiting(), 1);
+        assert!(
+            jit.begin_osr(domain, 0),
+            "one remaining activation still needs the code"
+        );
+        drop(interests);
+        assert_eq!(state.waiting(), 0);
+        assert!(!jit.begin_osr(domain, 0));
+        assert_eq!(state.entry.load(Ordering::Acquire), 0);
+        let mut renewed = None;
+        jit.request_osr(domain, 0, &mut renewed);
+        assert!(rx.try_recv().unwrap().osr);
+        // Repeated polls keep one registration and one queued request.
+        jit.request_osr(domain, 0, &mut renewed);
+        assert_eq!(state.waiting(), 1);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(state.entry.load(Ordering::Acquire), OSR_QUEUED);
+        drop(renewed);
+        assert!(!jit.begin_osr(domain, 0));
+    }
 }
 
 #[test]

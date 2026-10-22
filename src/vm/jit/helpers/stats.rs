@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 // Each helper entry does one fetch_add(Relaxed); at process exit a single line is dumped
 // through libc atexit. With the knob off the cost is one relaxed load per entry.
 pub(crate) static STAT_ON: AtomicBool = AtomicBool::new(false);
-static STAT: [AtomicU64; 14] = [
+static STAT: [AtomicU64; 15] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -27,7 +28,7 @@ static STAT: [AtomicU64; 14] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
-const STAT_NAMES: [&str; 14] = [
+const STAT_NAMES: [&str; 15] = [
     "alloc",
     "tls_ref",
     "c2i",
@@ -42,6 +43,7 @@ const STAT_NAMES: [&str; 14] = [
     "bin128_ovf",
     "syscall_trace",
     "osr",
+    "osr_cancel",
 ];
 pub(crate) const S_ALLOC: usize = 0;
 pub(crate) const S_TLS: usize = 1;
@@ -60,6 +62,7 @@ pub(crate) const S_BIN128: usize = 11;
 /// interpreter's thread-local one.
 pub(crate) const S_SYSCALL_TRACE: usize = 12;
 pub(crate) const S_OSR: usize = 13;
+pub(crate) const S_OSR_CANCEL: usize = 14;
 
 #[inline(always)]
 pub(crate) fn stat(i: usize) {
