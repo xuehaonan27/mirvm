@@ -382,7 +382,7 @@ The full-input interpreter census distinguishes functions that never request com
 invocations that continue interpreting after publication. Stable unrequested work includes tree
 initialization, slice filling, symbol sorting and checksum reduction; those operation counts are
 not CPU time or proof of compilation payback. Long active invocations can continue interpreting
-millions of operations after their entry is published. OSR remains deferred, so that component
+millions of operations after their entry is published. OSR is prioritized under T13, and that component
 must be measured separately from admission and queue delay. There is no evidence in this census
 that failed compilation explains the dominant interpreted work.
 
@@ -830,7 +830,7 @@ The generic contract agrees with native under eager/shared interpretation, synch
 bound-image reload, including concurrent entries, callbacks, unwind and fork. The budget mode also
 matches native for normal and fork invocations. Focused template, cache-publication and compile-work
 unit checks, all-target/all-feature Clippy, formatting and repository boundary checks pass. The
-preparation contract covers both dependency tracks. OSR remains deferred.
+preparation contract covers both dependency tracks. OSR is prioritized under T13.
 
 ### Runtime generics prototype
 
@@ -949,7 +949,7 @@ Its six focused unit checks and four native-matching contract invocations pass; 
 suite was run. SSA remains opt-in. Remaining work includes profitable group selection, frame/call
 cost attribution, archive identity, code-size/register-pressure control, RSS and the full
 lifecycle/trace gates. The contract and release gates belong to
-[runtime-generics-design.md](designs/runtime-generics-design.md); OSR remains deferred under T13.
+[runtime-generics-design.md](designs/runtime-generics-design.md); OSR is prioritized under T13.
 
 ## 4. Gaps and honest limits
 
@@ -1006,7 +1006,7 @@ product covering all of Rust.
    alternating unprofiled process/engine controls under default persistence, empty and populated
    JIT stores, and a non-recursive workload. CPU samples and diagnostic ledgers explain those
    results; isolated throughput or hit counts do not establish payback. A local small-cache result
-   does not qualify a populated or network-backed store. OSR remains deferred.
+   does not qualify a populated or network-backed store. OSR is prioritized under T13.
 2. **Logging and telemetry.** Fork generations are closed. Next: the remaining direct hot path, the
    trace interpreter loop, then stateless inline-asm raw syscall sites — the first internal syscall
    slice must not be claimed complete before those raw sites land. Only variadic `libc::syscall` forms

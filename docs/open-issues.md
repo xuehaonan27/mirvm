@@ -66,7 +66,7 @@ Design references: [ram-spec.md](designs/ram-spec.md),
     interpretation against compilation, queueing, publication and code growth; avoid a blanket
     threshold reduction or synchronous compilation. Register allocation and verification are costs
     to avoid repeating, not checks to disable. Rayon's delayed publication and compiled/interpreted
-    transitions need the same accounting. OSR remains deferred.
+    transitions need the same accounting. OSR is prioritized under T13.
   - Persistent JIT payback: attribute selected-pack reads, relocation/finalization and prelink
     scheduling before changing cache layout. Publication can still miss a hot invocation's entry
     even when the heat order is stable. Quantify tier selection, hits, misses and refusals across
@@ -94,13 +94,12 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Approved, awaiting construction
 
-- **T13** `APPROVED`: on-stack replacement (OSR) for long-running interpreted loops. Backedge heat
-  can request compilation, but an active invocation cannot enter the published body. Define safe
-  transfer points and maps for live locals, operand regions, pending cleanup/drop state, shadow
-  frames and the plain/trace code domain. Preserve stack checks, signals, unwind ownership and
-  function-pointer identity. Validate a single long invocation as well as repeated calls, and
-  measure polling and transfer costs. Runtime generic specialization must use the same transfer
-  contract; entry-only promotion is not OSR. Coordinate with E42's within-run tier policy.
+- **T13** `APPROVED`: implement [OSR](designs/osr-design.md) for long-running interpreted loops before
+  further admission-policy tuning. Borrow the active frame at backward edges, preserve pointer and
+  unwind ownership, cover exact generic instances and plain/trace domains, and measure polling,
+  compilation and transfer costs on single invocations and complete workloads. Persistent OSR code
+  and entry-specific scalar promotion remain separate extensions. Coordinate with E42's within-run
+  tier policy.
 - **T8** `APPROVED`: HostSyscall direct hot path. Three pieces remain — dropping the per-record cold
   sequence update on the healthy pair (needs a separate ruling, since `next_sequence` is also the
   producer-end ledger's `attempted` and deriving it in-page changes the v0 file/sequence contract);

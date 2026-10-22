@@ -240,6 +240,8 @@ by [d15-cargoless-design.md](d15-cargoless-design.md) where they concern resolut
 
 | Document | Status | Owns |
 |---|---|---|
+| [runtime-optimization-lessons.md](runtime-optimization-lessons.md) | Design guidance | lessons from HotSpot/V8, optimization selection and required performance evidence |
+| [osr-design.md](osr-design.md) | Implementation design | transfer of an active interpreted invocation into compiled execution, storage identity and unwind ownership |
 | [ram-spec.md](ram-spec.md) | Contract | the Rust abstract machine: correctness contract, degrees of definition, storage/computation/concurrency semantics, as-if freedom, UB stance, declared deviations |
 | [ffi-boundary.md](ffi-boundary.md) | Contract | the abstract machine's edge: the foreign-call classification, interposition points, the sandbox doctrine, native access to guest memory |
 | [concurrency-arch.md](concurrency-arch.md) | Decided RFC | guest threads → OS threads, the state split, why execution never holds a `tcx`, isolation and the checked-mode reserve |

@@ -206,7 +206,7 @@ pressure, and removes stale queued tasks. MIRVM should measure its own removable
 and compilation/publication cost before promoting an instance. Installation prepares reusable
 bytecode, not native code for every definition. A shared template does not imply that every bound
 instance is hot. Thresholds and tier choices require whole-process payback on MIRVM workloads;
-copying HotSpot constants is not a policy. OSR remains a separate deferred contract.
+copying HotSpot constants is not a policy. OSR is a separate prioritized contract under [osr-design.md](osr-design.md).
 
 Use shared interpretation as the guaranteed fallback. A compiled shared template is a candidate
 intermediate tier when many instances execute briefly; it can amortize one compilation across
@@ -246,7 +246,7 @@ Remaining integration work is grouped by a complete execution or preparation bou
    range/array-subslice paths when their measured missed coverage warrants the change. Keep eager
    fallback and diagnostic parity for unsupported shapes. Associated types, niches/enums, closures,
    indirect calls and recursive drop/cleanup need explicit contracts, not layout-size equivalence.
-3. **OSR (deferred).** Implement T13's activation-transfer contract independently of generic coverage,
+3. **OSR.** Implement T13's activation-transfer contract independently of generic coverage,
    then attach specialization to the same mechanism. Acceptance includes one long hot invocation,
    live values and cleanup state across transfer, and plain/trace domain identity.
 
