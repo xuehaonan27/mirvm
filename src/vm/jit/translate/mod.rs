@@ -15,6 +15,7 @@ use super::frame::FrameMap;
 use super::*;
 
 mod call;
+mod fold;
 mod inline;
 mod numeric;
 mod place;
@@ -24,6 +25,7 @@ mod term;
 mod value;
 
 pub(super) struct Translator<'a, 'b> {
+    pub(super) baseline: bool,
     pub(super) inlining: &'a super::inline::Plan,
     pub(super) shared: &'a Shared,
     /// The function being built: a site's symbol carries it, so one function's relocation list maps
@@ -184,6 +186,11 @@ impl Translator<'_, '_> {
     fn mask_val(&mut self, v: Value, w: Width) -> Value {
         if w == Width::W64 {
             return v;
+        }
+        if self.baseline
+            && let Some(bits) = self.constant(v)
+        {
+            return self.b.ins().iconst(types::I64, (bits & w.mask()) as i64);
         }
         self.b.ins().band_imm(v, w.mask() as i64)
     }

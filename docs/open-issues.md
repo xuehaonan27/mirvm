@@ -99,9 +99,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 - **P1** `APPROVED`: execute the runtime optimization work in this order. OSR activation transfer
   is implemented and is not a prerequisite still awaiting construction.
-  4. Add a genuinely cheaper baseline compiler with bounded local optimization, retaining the
-     optimizing backend for selected hot code. Verify both architecture ABIs, unwind, safepoints,
-     and live-frame entry before making it a default tier.
   5. Reduce prepared-startup metadata materialization through immutable compact views and demand
      indexing. Function-body demand decoding already exists; retain content validation and explicit
      ownership of every borrowed byte.

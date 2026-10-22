@@ -428,6 +428,7 @@ impl<'a> Compiler<'a> {
                 )))
             };
             let mut tr = Translator {
+                baseline: self.tier == Tier::Baseline,
                 inlining: &inlining,
                 shared: self.shared,
                 func,

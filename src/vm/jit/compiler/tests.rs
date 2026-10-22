@@ -1305,66 +1305,69 @@ fn frame_objects_bound_escape_and_overlapping_scalar_views_stay_coherent() {
 
 #[test]
 fn promoted_frame_copies_preserve_overlap_and_mixed_width_accesses() {
-    for (src, dst, size) in [(0, 8, 24), (8, 0, 24), (0, 0, 32), (0, 32, 32)] {
-        for mixed in [false, true] {
-            let slot = |off| Slot {
-                off,
-                width: Width::W64,
-            };
-            let place = |off| ir::PlaceExpr {
-                base: ir::PlaceBase::Local(off),
-                steps: Box::new([]),
-            };
-            let mut probe = body("copy", Terminator::Return);
-            probe.frame_size = 64;
-            probe.ret = RetAbi::Pair(slot(dst), slot(dst + size - 8));
-            for off in (0..64).step_by(8) {
-                probe.blocks[0].stmts.push(Stmt::Assign {
-                    dst: ScalarPlace::Slot(slot(off)),
-                    rv: ir::Rvalue::Use(Operand::Imm {
-                        bits: u64::from(off) + 100,
-                        width: Width::W64,
-                    }),
+    for tier in [Tier::Baseline, Tier::Optimized] {
+        for (src, dst, size) in [(0, 8, 24), (8, 0, 24), (0, 0, 32), (0, 32, 32)] {
+            for mixed in [false, true] {
+                let slot = |off| Slot {
+                    off,
+                    width: Width::W64,
+                };
+                let place = |off| ir::PlaceExpr {
+                    base: ir::PlaceBase::Local(off),
+                    steps: Box::new([]),
+                };
+                let mut probe = body("copy", Terminator::Return);
+                probe.frame_size = 64;
+                probe.ret = RetAbi::Pair(slot(dst), slot(dst + size - 8));
+                for off in (0..64).step_by(8) {
+                    probe.blocks[0].stmts.push(Stmt::Assign {
+                        dst: ScalarPlace::Slot(slot(off)),
+                        rv: ir::Rvalue::Use(Operand::Imm {
+                            bits: u64::from(off) + 100,
+                            width: Width::W64,
+                        }),
+                    });
+                }
+                if mixed {
+                    probe.blocks[0].stmts.push(Stmt::Assign {
+                        dst: ScalarPlace::Mem {
+                            expr: place(src + 1),
+                            width: Width::W16,
+                        },
+                        rv: ir::Rvalue::Use(Operand::Imm {
+                            bits: 0x1234,
+                            width: Width::W16,
+                        }),
+                    });
+                }
+                probe.blocks[0].stmts.push(Stmt::Copy {
+                    dst: place(dst),
+                    src: place(src),
+                    size,
                 });
+                assert_eq!(analyze_frame(&probe).needs_frame(), mixed);
+                let mut module = ir::Module {
+                    funcs: vec![probe].into(),
+                    ..Default::default()
+                };
+                module.exports.insert("copy".into(), 0);
+                let engine = crate::vm::ctx::Engine::new(Shared::new(module));
+                let expected =
+                    unsafe { crate::vm::interp::run_export(&engine, "copy", &[]) }.unwrap();
+                let mut compiler = Compiler::with_tier(engine.shared(), CodeDomain::Plain, tier);
+                compiler.jit_cache = false;
+                compiler.reload = true;
+                compiler.compile(0);
+                assert_ne!(engine.shared().jit.slots[0].load(Ordering::Acquire), 0);
+                assert_eq!(
+                    unsafe { crate::vm::interp::run_export(&engine, "copy", &[]) }.unwrap(),
+                    expected
+                );
+                std::mem::forget(compiler);
             }
-            if mixed {
-                probe.blocks[0].stmts.push(Stmt::Assign {
-                    dst: ScalarPlace::Mem {
-                        expr: place(src + 1),
-                        width: Width::W16,
-                    },
-                    rv: ir::Rvalue::Use(Operand::Imm {
-                        bits: 0x1234,
-                        width: Width::W16,
-                    }),
-                });
-            }
-            probe.blocks[0].stmts.push(Stmt::Copy {
-                dst: place(dst),
-                src: place(src),
-                size,
-            });
-            assert_eq!(analyze_frame(&probe).needs_frame(), mixed);
-            let mut module = ir::Module {
-                funcs: vec![probe].into(),
-                ..Default::default()
-            };
-            module.exports.insert("copy".into(), 0);
-            let engine = crate::vm::ctx::Engine::new(Shared::new(module));
-            let expected = unsafe { crate::vm::interp::run_export(&engine, "copy", &[]) }.unwrap();
-            let mut compiler = test_compiler(engine.shared(), CodeDomain::Plain);
-            compiler.reload = true;
-            compiler.compile(0);
-            assert_ne!(engine.shared().jit.slots[0].load(Ordering::Acquire), 0);
-            assert_eq!(
-                unsafe { crate::vm::interp::run_export(&engine, "copy", &[]) }.unwrap(),
-                expected
-            );
-            std::mem::forget(compiler);
         }
     }
 }
-
 #[test]
 fn leaf_inlining_uses_private_ssa_and_keys_the_bound_callee_content() {
     let slot = |off| Slot {
@@ -1430,4 +1433,89 @@ fn leaf_inlining_uses_private_ssa_and_keys_the_bound_callee_content() {
         std::mem::forget(compiler);
     }
     assert_ne!(keys[0], keys[1]);
+}
+
+#[test]
+fn baseline_folding_preserves_branch_merges_and_narrow_signed_values() {
+    let slot = |off, width| Slot { off, width };
+    let input = slot(0, Width::W64);
+    let local = slot(8, Width::W8);
+    let output = slot(16, Width::W64);
+    let assign = |dst, rv| Stmt::Assign {
+        dst: ScalarPlace::Slot(dst),
+        rv,
+    };
+    let mut probe = body(
+        "baseline_join",
+        Terminator::SwitchInt {
+            discr: ir::SwitchDiscr::Scalar(Operand::Slot(input)),
+            targets: vec![(0, 1)],
+            otherwise: 2,
+        },
+    );
+    probe.frame_size = 24;
+    probe.params = vec![ParamAbi::Scalar(input)];
+    probe.ret = RetAbi::Scalar(output);
+    probe.blocks.truncate(1);
+    for bits in [255, 127] {
+        probe.blocks.push(ir::Block {
+            stmts: vec![
+                assign(
+                    local,
+                    ir::Rvalue::Use(Operand::Imm {
+                        bits,
+                        width: Width::W8,
+                    }),
+                ),
+                assign(
+                    local,
+                    ir::Rvalue::IntBin {
+                        op: IntBinOp::Add,
+                        signed: true,
+                        a: Operand::Slot(local),
+                        b: Operand::Imm {
+                            bits: 1,
+                            width: Width::W8,
+                        },
+                    },
+                ),
+            ],
+            term: Terminator::Goto(3),
+        });
+    }
+    probe.blocks.push(ir::Block {
+        stmts: vec![assign(
+            output,
+            ir::Rvalue::Cast {
+                from: (Width::W8, true),
+                to: Width::W64,
+                a: Operand::Slot(local),
+            },
+        )],
+        term: Terminator::Return,
+    });
+    let mut module = ir::Module {
+        funcs: vec![probe].into(),
+        ..Default::default()
+    };
+    module.exports.insert("baseline_join".into(), 0);
+    let engine = crate::vm::ctx::Engine::new(Shared::new(module));
+    let expected: Vec<_> = [0, 1]
+        .into_iter()
+        .map(|arg| unsafe {
+            crate::vm::interp::run_export(&engine, "baseline_join", &[arg]).unwrap()
+        })
+        .collect();
+    let mut compiler = Compiler::with_tier(engine.shared(), CodeDomain::Plain, Tier::Baseline);
+    compiler.jit_cache = false;
+    compiler.reload = true;
+    compiler.compile(0);
+    assert_ne!(engine.shared().jit.slots[0].load(Ordering::Acquire), 0);
+    for (arg, expected) in [0, 1].into_iter().zip(expected) {
+        assert_eq!(
+            unsafe { crate::vm::interp::run_export(&engine, "baseline_join", &[arg]) }.unwrap(),
+            expected
+        );
+    }
+    std::mem::forget(compiler);
 }

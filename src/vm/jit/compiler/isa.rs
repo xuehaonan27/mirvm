@@ -16,6 +16,14 @@ use super::*;
 pub(crate) fn domain_flags(tier: Tier, pin_register: bool) -> settings::Flags {
     let mut fb = settings::builder();
     fb.set("opt_level", tier.opt_level()).unwrap();
+    fb.set(
+        "regalloc_algorithm",
+        match tier {
+            Tier::Baseline => "single_pass",
+            Tier::Optimized => "backtracking",
+        },
+    )
+    .unwrap();
     fb.set("unwind_info", "true").unwrap();
     fb.set("preserve_frame_pointers", "true").unwrap();
     if pin_register {

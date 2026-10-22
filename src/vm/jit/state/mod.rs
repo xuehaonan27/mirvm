@@ -60,7 +60,7 @@ impl Tier {
     /// The cranelift `opt_level` value this tier compiles with.
     pub(crate) fn opt_level(self) -> &'static str {
         match self {
-            Tier::Baseline => "speed_and_size",
+            Tier::Baseline => "none",
             Tier::Optimized => "speed",
         }
     }

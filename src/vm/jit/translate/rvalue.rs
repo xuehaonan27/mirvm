@@ -6,6 +6,11 @@ use super::*;
 impl Translator<'_, '_> {
     pub(super) fn rvalue(&mut self, rv: &ir::Rvalue) -> Value {
         use crate::vm::ir::Rvalue as R;
+        if self.baseline
+            && let Some(bits) = self.fold(rv)
+        {
+            return self.b.ins().iconst(types::I64, bits as i64);
+        }
         match rv {
             R::Use(a) => self.operand(a).0,
             R::IntBin { op, signed, a, b } => {
