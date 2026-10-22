@@ -1087,7 +1087,7 @@ fn lower_inner(
             .iter()
             .map(|(inst, &addr)| {
                 let name = if base_build {
-                    module.function_names[linker.ids[inst] as usize].clone()
+                    Box::from(&module.function_names[linker.ids[inst] as usize])
                 } else {
                     tcx.symbol_name(*inst).name.into()
                 };

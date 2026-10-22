@@ -325,13 +325,14 @@ fn uuid(text_off: usize, slot_count: usize) -> [u8; 16] {
 
 /// Builds the unsigned dylib and returns its bytes together with the file offset the slots start
 /// at. The caller signs the bytes before loading them.
-pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), crate::error::Error> {
+pub fn build(names: &[impl AsRef<str>]) -> Result<(Vec<u8>, usize), crate::error::Error> {
     // A symbol in this format carries a leading underscore, and a loader looks a C name up with it
     // applied: `dlsym` asking for `x` searches for `_x`. The symbol table and the export trie
     // therefore both spell every name this way, which is also what `nm` and `dyld_info` print.
     let symbols: Vec<Vec<u8>> = names
         .iter()
         .map(|name| {
+            let name = name.as_ref();
             let mut symbol = Vec::with_capacity(name.len() + 1);
             symbol.push(b'_');
             symbol.extend_from_slice(name.as_bytes());

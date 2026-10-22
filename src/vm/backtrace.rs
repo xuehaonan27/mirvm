@@ -125,7 +125,7 @@ impl Symbols {
         }
         let (bytes, text_off) = crate::native::symbol::image::build(
             crate::os::dll::OBJECT_FORMAT,
-            &module.function_names,
+            &module.function_names.iter().collect::<Vec<_>>(),
         )?;
         let image = crate::os::dll::load_private_image(&bytes, c"mirvm-guest-symbols").map_err(
             |error| {
@@ -247,7 +247,8 @@ mod tests {
             function_names: vec![
                 "mirvm_backtrace_probe_a".into(),
                 "mirvm_backtrace_probe_b".into(),
-            ],
+            ]
+            .into(),
             ..Module::default()
         };
         let symbols = Symbols::materialize(&module).unwrap();

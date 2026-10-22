@@ -148,6 +148,15 @@ metadata into the instance used for verification and execution, so it need not i
 It validates every address directly without collecting obligations for a later instance. Reusable
 packages retain their metadata and address obligations and check them on each fresh instance.
 
+Function names are borrowed from the validated immutable function archive; execution metadata
+does not serialize or allocate a second copy. The name view retains the archive owner even if the
+executable table is dropped. Lowering and merging can materialize owned names explicitly. Demand
+decode and specialization cells store pointers to initialized bodies instead of reserving space
+for a full body in every cell. Dense function IDs index those cells directly, without a startup
+hash table of generic instances. The shared-template identity index is populated on first decode;
+its lock covers cell lookup only, and a per-template cell publishes exactly one shared template.
+None of these changes skip structural or semantic verification.
+
 Frozen snapshot payloads decode through serde's byte-buffer channel. Their postcard bytes remain
 identical to the existing byte-sequence encoding; the change does not weaken domain, length or
 relocation checks. Formats providing byte sequences, including JSON, retain the sequence visitor.

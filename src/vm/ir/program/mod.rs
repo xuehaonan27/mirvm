@@ -21,6 +21,7 @@ pub use generic::*;
 pub(crate) use header::*;
 pub use instr::*;
 pub use module::*;
+pub use names::FunctionNames;
 
 mod ffi;
 mod funcs;
@@ -28,6 +29,7 @@ mod generic;
 mod header;
 mod instr;
 mod module;
+mod names;
 
 /// Owned name of an unsupported builtin. Deserialization cannot produce a `&'static str`, so the name
 /// is owned and released together with the Module.

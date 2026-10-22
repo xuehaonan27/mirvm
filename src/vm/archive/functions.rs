@@ -6,7 +6,7 @@ use rkyv::Deserialize;
 use rkyv::{Archive, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::error::Error;
 use crate::vm::ir::{ArchivedFuncBody, FuncBody, GenericTemplate, SharedBody};
@@ -17,8 +17,10 @@ use crate::vm::ir::FuncTable;
 pub(crate) struct Functions {
     bytes: Arc<super::bytes::Bytes>,
     chunks: Vec<Chunk>,
-    templates: HashMap<[u8; 32], OnceLock<Arc<GenericTemplate>>>,
+    templates: Mutex<HashMap<[u8; 32], TemplateCell>>,
 }
+
+type TemplateCell = Arc<OnceLock<Arc<GenericTemplate>>>;
 
 struct Chunk {
     range: Range<usize>,
@@ -84,17 +86,11 @@ impl Functions {
         if pos != data.len() {
             return Err(invalid());
         }
-        let mut result = Self {
+        Ok(Self {
             bytes,
             chunks,
-            templates: HashMap::new(),
-        };
-        result.templates = result
-            .bodies()
-            .filter_map(|body| body.shared.as_ref())
-            .map(|shared| (shared.template.identity(), OnceLock::new()))
-            .collect();
-        Ok(result)
+            templates: Mutex::default(),
+        })
     }
 
     fn chunk_bodies(&self, chunk: &Chunk) -> &[ArchivedFuncBody] {
@@ -139,8 +135,16 @@ impl Functions {
             blocks: owned(&body.blocks),
             shared: body.shared.as_ref().map(|shared| {
                 let key = shared.template.identity();
-                let template =
-                    self.templates[&key].get_or_init(|| Arc::new(owned(shared.template.as_ref())));
+                // Release the index lock before decoding. Only requests for this identity wait
+                // for its initializer; unrelated templates can be decoded concurrently.
+                let cell = self
+                    .templates
+                    .lock()
+                    .unwrap()
+                    .entry(key)
+                    .or_default()
+                    .clone();
+                let template = cell.get_or_init(|| Arc::new(owned(shared.template.as_ref())));
                 Box::new(SharedBody {
                     template: template.clone(),
                     values: owned(&shared.values),
@@ -266,11 +270,11 @@ mod tests {
         let b = combined.body(1).shared.as_ref().unwrap();
         assert!(!std::ptr::eq(a.template.as_ref(), b.template.as_ref()));
         assert_eq!(a.template.identity(), b.template.identity());
-        assert_eq!(combined.templates.len(), 1);
-        assert!(combined.templates.values().all(|cell| cell.get().is_none()));
+        assert!(combined.templates.lock().unwrap().is_empty());
         let first = combined.decode(0).shared.unwrap();
         let second = combined.decode(1).shared.unwrap();
         assert!(Arc::ptr_eq(&first.template, &second.template));
+        assert_eq!(combined.templates.lock().unwrap().len(), 1);
         assert_eq!(first.values, [11]);
         assert_eq!(second.values, [29]);
         assert_eq!(first.template.identity(), a.template.identity());

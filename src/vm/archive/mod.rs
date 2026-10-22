@@ -26,12 +26,13 @@ impl Image {
         meta: meta::ModuleMeta,
         functions: functions::Functions,
     ) -> Result<Self, Error> {
-        let (module, instance) = meta.instantiate()?;
+        let functions = Arc::new(functions);
+        let (module, instance) = meta.instantiate(functions.clone())?;
         let addresses = std::cell::RefCell::new(crate::vm::verify::AddressUses::default());
         crate::vm::verify::archived::module(&module, &instance, &functions, Some(&addresses))?;
         Ok(Self {
             meta,
-            functions: Arc::new(functions),
+            functions,
             addresses: addresses.into_inner(),
         })
     }
@@ -42,12 +43,13 @@ impl Image {
         functions: functions::Functions,
     ) -> Result<VerifiedArtifact, Error> {
         let start = crate::options::timing().then(std::time::Instant::now);
-        let (mut module, instance) = meta.into_instance()?;
+        let functions = Arc::new(functions);
+        let (mut module, instance) = meta.into_instance(functions.clone())?;
         let restored = start.map(|_| std::time::Instant::now());
         // This instance consumes the proof directly; it has no later address rebinding.
         crate::vm::verify::archived::module(&module, &instance, &functions, None)?;
         let verified = start.map(|_| std::time::Instant::now());
-        module.funcs = crate::vm::ir::FuncTable::from_archive(Arc::new(functions));
+        module.funcs = crate::vm::ir::FuncTable::from_archive(functions);
         if let Some(((start, restored), verified)) = start.zip(restored).zip(verified) {
             crate::diag::instrument(format_args!(
                 "mirvm-image-instance: restore={:.3}ms verification={:.3}ms functions={:.3}ms",
@@ -64,7 +66,7 @@ impl Image {
     }
 
     pub(crate) fn instantiate(&self) -> Result<VerifiedArtifact, Error> {
-        let (mut module, instance) = self.meta.instantiate()?;
+        let (mut module, instance) = self.meta.instantiate(self.functions.clone())?;
         self.addresses
             .check(&module, &instance, self.functions.len())?;
         module.funcs = crate::vm::ir::FuncTable::from_archive(self.functions.clone());

@@ -135,7 +135,14 @@ fn module_section_preserves_guest_panic_cleanup_plan() {
 
     let encoded = module_meta_bytes(&module);
     let decoded: ModuleMeta = postcard::from_bytes(&encoded).unwrap();
-    let (decoded_module, _instance) = decoded.instantiate().unwrap();
+    let section = build_function_section(&module.funcs).unwrap();
+    let len = section.len();
+    let functions = crate::vm::archive::functions::Functions::load(
+        crate::vm::archive::bytes::Bytes::new(section),
+        0..len,
+    )
+    .unwrap();
+    let (decoded_module, _instance) = decoded.instantiate(std::sync::Arc::new(functions)).unwrap();
     assert_eq!(decoded_module.guest_panic_cleanup, Some(plan));
 }
 

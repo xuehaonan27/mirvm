@@ -226,7 +226,7 @@ fn load_bytes(
             .function_names
             .iter()
             .zip(functions.bodies())
-            .any(|(name, body)| name.as_ref() != body.name.as_ref())
+            .any(|(name, body)| name != body.name.as_ref())
     {
         return None;
     }

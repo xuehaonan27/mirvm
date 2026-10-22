@@ -97,16 +97,6 @@ Design references: [ram-spec.md](designs/ram-spec.md),
 
 ## Approved, awaiting construction
 
-- **P1** `APPROVED`: execute the runtime optimization work in this order. OSR activation transfer
-  is implemented and is not a prerequisite still awaiting construction.
-  5. Reduce prepared-startup metadata materialization through immutable compact views and demand
-     indexing. Function-body demand decoding already exists; retain content validation and explicit
-     ownership of every borrowed byte.
-  Batch related changes before running focused checks. Use existing attribution and code analysis
-  to select work; new CPU profiles are needed for unresolved attribution, not for every edit.
-  Each implementation needs native-output agreement and complete-process controls before claiming
-  a performance gain. Remove completed work here; contracts belong to the corresponding designs.
-
 - **T8** `APPROVED`: HostSyscall direct hot path. Three pieces remain — dropping the per-record cold
   sequence update on the healthy pair (needs a separate ruling, since `next_sequence` is also the
   producer-end ledger's `attempted` and deriving it in-page changes the v0 file/sequence contract);
@@ -171,8 +161,8 @@ Design references: [ram-spec.md](designs/ram-spec.md),
   (`src/os/macos/`, `src/os_arch/macos_aarch64/`, `src/arch/aarch64/`, selected by the `#[cfg]`
   ladders) with focused runtime and NEON/CRC native differentials, but no dedicated platform
   `Makefile` target or CI gate. Full lifecycle, JIT memory-policy and unwinding coverage remains
-  required before claiming the same baseline. Persistent-JIT AArch64 relocations remain incomplete;
-  the full serde JSON control reaches unsupported inline assembly in `zmij::write` on macOS.
+  required before claiming the same baseline. The full serde JSON control reaches unsupported inline
+  assembly in `zmij::write` on macOS.
 - **E32** `ACCEPTED`: inline-asm setjmp/longjmp captured-frame memory reuse hazard. The capture point
   sits in the asm-stub wrapper frame, and the interpreter frame's synthetic protocol can collide when
   that host stack memory is reused between capture and restore (confirmed by a v2 spike; the boundary

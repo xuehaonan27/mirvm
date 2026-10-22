@@ -11,7 +11,6 @@ use serde::Serialize;
 #[derive(Serialize)]
 #[cfg(any(feature = "compiler", test))]
 pub(crate) struct ModuleMetaRef<'a> {
-    function_names: &'a [Box<str>],
     exports: &'a std::collections::HashMap<Box<str>, crate::vm::ir::FuncId>,
     frozen: Option<crate::vm::frozen::FrozenSnapshot>,
     image_frozens: Vec<(u64, &'a [u8])>,
@@ -38,7 +37,6 @@ impl<'a> From<(&'a crate::vm::ir::Module, &'a crate::vm::instance::Instance)>
         (module, instance): (&'a crate::vm::ir::Module, &'a crate::vm::instance::Instance),
     ) -> Self {
         Self {
-            function_names: &module.function_names,
             exports: &module.exports,
             frozen: module.frozen.clone(),
             image_frozens: instance
@@ -85,7 +83,6 @@ impl<'a> From<(&'a crate::vm::ir::Module, &'a crate::vm::instance::Instance)>
 
 #[derive(Clone, Deserialize)]
 pub(crate) struct ModuleMeta {
-    function_names: Vec<Box<str>>,
     exports: std::collections::HashMap<Box<str>, crate::vm::ir::FuncId>,
     frozen: Option<crate::vm::frozen::FrozenSnapshot>,
     image_frozens: Vec<(u64, crate::vm::frozen::SnapshotBytes)>,
@@ -111,16 +108,18 @@ impl ModuleMeta {
 
     pub(crate) fn instantiate(
         &self,
+        functions: std::sync::Arc<super::functions::Functions>,
     ) -> Result<(crate::vm::ir::Module, crate::vm::instance::Instance), Error> {
-        self.clone().into_instance()
+        self.clone().into_instance(functions)
     }
 
     pub(crate) fn into_instance(
         self,
+        functions: std::sync::Arc<super::functions::Functions>,
     ) -> Result<(crate::vm::ir::Module, crate::vm::instance::Instance), Error> {
         let module = crate::vm::ir::Module {
             funcs: Default::default(),
-            function_names: self.function_names,
+            function_names: crate::vm::ir::FunctionNames::archived(functions),
             exports: self.exports,
             frozen: self.frozen,
             fn_entry_links: self.link_fn_addrs.into_iter().collect(),
@@ -137,8 +136,7 @@ impl ModuleMeta {
             guest_panic_cleanup: self.guest_panic_cleanup,
             entry: self.entry,
         };
-        // The function table arrives separately in the FUNCS section; the name table is copied from
-        // the package verbatim and must not be re-derived from the (still empty) function table.
+        // Names borrow the validated FUNCS section without constructing executable bodies.
         // Each instantiation gets its own frozen mapping so several instances of one package can run
         // at once; the embedded addresses are translated by the load map, which a packaged artifact
         // always fully covers.

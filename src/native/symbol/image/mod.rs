@@ -15,7 +15,7 @@ pub(crate) mod macho;
 /// has to accept the result; the bytes are this layer's either way.
 pub fn build(
     format: crate::native::object::ObjectFormat,
-    names: &[Box<str>],
+    names: &[impl AsRef<str>],
 ) -> Result<(Vec<u8>, usize), crate::error::Error> {
     match format {
         crate::native::object::ObjectFormat::Elf => elf::build_elf(names),

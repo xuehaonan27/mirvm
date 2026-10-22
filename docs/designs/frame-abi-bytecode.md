@@ -51,7 +51,7 @@
 A body retains sorted, disjoint `FrameObject { off, size }` ranges for nonempty typed locals.
 Concrete generic bindings append their allocated object ranges. Verification rejects overlap,
 empty ranges and ranges outside the frame; missing coverage requires conservative aliasing.
-Taking an object's address retains that object's reachable suffix in memory, without retaining
+Taking an object's address retains the entire object in memory, without retaining
 unrelated later locals. Dynamic projections outside known coverage use the frame-wide fallback.
 
 Scalar slot and constant local-place accesses share one analysis. Different-width or overlapping

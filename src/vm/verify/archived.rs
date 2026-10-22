@@ -84,7 +84,7 @@ pub(crate) fn module(
     context.address_uses = addresses;
     let (mut boundaries, mut catchers) = (0, 0);
     for (index, body) in functions.bodies().enumerate() {
-        if body.name.as_ref() != module.function_names[index].as_ref() {
+        if body.name.as_ref() != &module.function_names[index] {
             return Err(crate::fail!(
                 Engine,
                 format!("function {index} name differs from module table")

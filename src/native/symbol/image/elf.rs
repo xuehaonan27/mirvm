@@ -26,7 +26,9 @@ fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, crate::error::Err
 }
 
 /// The ELF layout: one dynamic symbol per function, in one load segment.
-pub(super) fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), crate::error::Error> {
+pub(super) fn build_elf(
+    names: &[impl AsRef<str>],
+) -> Result<(Vec<u8>, usize), crate::error::Error> {
     /// The section index of `.text`, which every synthetic symbol is defined in.
     const TEXT_SECTION_INDEX: u16 = 1;
     const EHDR: usize = elf::EHDR_SIZE;
@@ -46,7 +48,7 @@ pub(super) fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), crate::e
     let mut dynstr = vec![0];
     let mut name_offsets = Vec::with_capacity(names.len());
     for name in names {
-        name_offsets.push(push_cstr(&mut dynstr, name.as_bytes())?);
+        name_offsets.push(push_cstr(&mut dynstr, name.as_ref().as_bytes())?);
     }
     let strtab = dynstr.clone();
     let mut shstr = vec![0];

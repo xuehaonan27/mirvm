@@ -11,7 +11,7 @@ Linux/ELF/x86_64 baseline: rustc MIR is lowered into mirvm's own typed bytecode 
 executed in a VM. The design contract is [docs/designs/README.md](designs/README.md); the per-topic
 contracts are its siblings in `docs/designs/`.
 
-- **Interpreter** — a tcx-free tree walk over the typed bytecode: scalar and SIMD intrinsics, true
+- **Interpreter** — tcx-free compact scalar operations with a semantic typed-bytecode fallback: scalar and SIMD intrinsics, true
   stack depth, `f16`/`f128`, atomic ordering, 128-bit forms, nested DSTs, `volatile`, `dyn` tail
   fields. An exhaustive verifier checks raw IR and immutable archives; internal ownership evidence carries
   validated code into Engine construction without repeating the function walk.
@@ -23,8 +23,8 @@ contracts are its siblings in `docs/designs/`.
   and productized unwind with a full LSDA over both CIEs. `MIRVM_JIT_SYNC` publishes synchronously, so
   `MIRVM_JIT_THRESHOLD=1` differentials prove compiled code really ran. Compiled symbols persist in the
   machine-local `cache/jit` store keyed by `(fragment, jit-key)`, with relocation deferred to load: a
-  warm session interleaves bounded heat-order loading with current requests and takes each function's tier from
-  `cache/package-heat` (`MIRVM_NO_JIT_CACHE`, `MIRVM_JIT_RELOAD`, `MIRVM_JIT_LEDGER`).
+  warm session interleaves bounded heat-order loading with current requests and selects tiers using
+  persisted heat plus structural cost bounds (`MIRVM_NO_JIT_CACHE`, `MIRVM_JIT_RELOAD`, `MIRVM_JIT_LEDGER`).
   OSR transfers active hot loops into session-local compiled continuations that borrow the
   interpreter frame, including exact generic instances and both code domains. It is on by default;
   `MIRVM_JIT_OSR=off` keeps ordinary JIT while disabling transfer. [osr-design.md](designs/osr-design.md)
@@ -139,8 +139,8 @@ frame storage and constant-copy paths covers:
   and all 14 repository source-boundary checks.
 - Compiler tests on Linux x86_64, including escaped pointer mutation, nested dereferences,
   unaligned and overlapping copies, execution from reloaded artifacts, pre-callee-frame stack
-  checks, and rebinding callee headroom across programs. macOS aarch64 has runtime/Cranelift
-  Clippy coverage.
+  checks, and rebinding callee headroom across programs. The same compiler checks pass on macOS AArch64, including
+  persistent-code relocation and loaded-frame unwinding.
 - Linux release differentials with compilation forced on first call: `jit_abi_probe`,
   `jit_call_probe`, `jit_builtin_probe`, `jit_foreign_probe`, `jit_unwind_probe`, `simd_probe`,
   `panic_exit`, `catch` and `signal_probe`; also `recursion-stack-overflow`, `fib32-reload` and
@@ -165,15 +165,15 @@ Interpreter/native packed entries check headroom before calling the body; no sep
 symbol is emitted. Persisted callers name callee headroom through a canonical relocation, so
 another program can bind the same caller fragment to a different callee frame layout. Both paths
 retain return safepoints and registered unwind metadata. Current timings, profiles and focused
-validation are reported with the startup measurements below. Selective inlining and smaller call
-sequences still require joint time/code-size measurements.
+validation are reported with the startup measurements below. Bounded concrete leaf inlining and
+local-object scalar promotion preserve cache identity and the separate OSR frame contract.
 
-The bound `fib(32)` execution image is approximately 21 MB, with a 17.7 MB function section retaining
-9,486 bodies. Archived blocks occupy 104 bytes and statements 128 bytes. An aligned immutable file
-owner avoids a second archive copy, and an execution-cache hit consumes metadata into its validated
-instance. Reusable packages restore independent frozen domains. Archive pruning, runtime-only
-compiler-library loading, and empty-cache frontend/base preparation remain separate optimization
-questions requiring separate measurements.
+Bound execution images retain all conservatively reachable and address-taken bodies. Immutable
+archive owners support borrowed function names and direct semantic validation. Per-function decode
+and specialization slots hold boxed bodies only after demand; the generic template index is also
+created on demand. Reusable packages restore independent frozen domains. Archive pruning,
+runtime-only compiler-library loading and empty-cache frontend/base preparation remain separate
+optimization questions.
 
 These focused checks do not certify the full fast, smoke or gate tiers. The existing `fib32` case has met
 80 ms in focused checks; broader fresh-process measurements include startup and scheduling outliers
@@ -210,27 +210,46 @@ and truncation rebuilds the retained prefix. Projection, restoration and reverse
 share that view. The [dependency-sharing design](designs/dep-sharing-design.md#2-contract) owns its
 collision, scope and invalidation rules. Cache formats and external-reference validation are unchanged.
 
-The interpreter keeps scalar transfers, slot/immediate operands and local addresses with zero or
-one dereference in small inline entry paths. Recursive projections retain the same fallback semantics.
-A separate census with JIT disabled counts 24.42 million operands on flate and 496,069 on serde;
-slot/immediate operands make up 89.0% / 88.1%. This instrumented census is not a timing measurement.
-The Linux x86_64 release block loop grows from 9,336 to 11,270 bytes. Unique text ranges whose
-symbols name the interpreter grow from 51,692 to 64,593 bytes, including instantiated helpers;
-this 12.6 KiB increase is the code-size cost of direct execution, not the whole binary's growth.
+Preparation emits compact scalar operations and retains the semantic statements for fallback,
+verification and JIT translation. Generic templates share the operation stream and read already-bound
+dictionary values directly. These operations preserve basic-block and frame coordinates for OSR;
+the verifier compares the prepared stream against semantic bytecode before execution.
 
 The packed entry performs the boundary stack check and calls the fast body directly. A fresh JIT
 compile finalizes its body, packed entry and missing C2I trampolines together. C2I backend output is
 reused by flattened ABI shape within each compiler. The
 [JIT design](designs/jit-code-cache-design.md#25-load-time-linking-and-publication) owns template
-isolation, relocation, publication, failure handling and scratch lifetimes. Guest ABI, verification,
-optimization levels and admission thresholds are unchanged. C2I templates are persisted in artifact encoding 5. The independent loader batches mappings and
-unwind registration, supports AArch64 instruction relocations and synchronizes instruction fetch
-before publishing code. Compiler tiers are constructed only for code-generation requests.
-Five alternating fresh-process pairs with installed inputs and populated code stores put the full
-100 KiB flate driver at 280.04 → 265.57 ms on Linux x86_64 and 277.33 → 190.10 ms on macOS
-AArch64; corresponding process CPU medians are 282.67 → 263.90 ms and 343.22 → 194.20 ms.
-Linux empty/fib/hashmap controls move by +3.34/+0.23/+1.65 ms, so this is not a uniform startup gain.
-macOS serde JSON remains unqualified because the baseline traps on its dependency's inline assembly.
+isolation, relocation, publication, failure handling and scratch lifetimes. Guest ABI, verification
+and admission thresholds remain unchanged. C2I templates are persisted in artifact encoding 5. The
+independent loader batches mappings and unwind registration, supports AArch64 instruction relocations
+and synchronizes instruction fetch before publishing code. Compiler tiers are constructed only for
+code-generation requests. Small admitted straight-line bodies use local folding and single-pass
+allocation; larger bodies and control-flow graphs use the optimizing pipeline.
+
+Five alternating fresh-process pairs compare release binaries against `0283c14`, with installed inputs,
+warm filesystem pages and the full 100 KiB flate driver. Linux outputs agree with native execution.
+Default persistence uses populated stores; the separate bypass control clears heat before each run.
+No compilation, correctness checks or CPU sampling overlap measurement on the measured host.
+Shared-host scheduling and storage latency remain uncontrolled.
+
+| Platform / case | Baseline wall | Candidate wall | Baseline CPU | Candidate CPU |
+|---|---:|---:|---:|---:|
+| macOS AArch64, flate, populated JIT | 280.35 ms | 185.23 ms | 345.81 ms | 186.87 ms |
+| Linux x86_64, flate, populated JIT | 321.53 ms | 297.00 ms | 320.91 ms | 273.91 ms |
+| Linux x86_64, flate, JIT persistence bypassed | 416.21 ms | 423.21 ms | 491.74 ms | 509.96 ms |
+| Linux x86_64, serde, populated JIT | 82.29 ms | 86.77 ms | 52.87 ms | 57.41 ms |
+| Linux x86_64, serde, JIT persistence bypassed | 77.27 ms | 70.61 ms | 48.75 ms | 47.14 ms |
+| Linux x86_64, strings, populated JIT | 46.76 ms | 79.10 ms | 28.86 ms | 31.78 ms |
+
+These results establish populated-store flate gains, not a uniform startup or compilation-speed win.
+macOS empty/fib/hashmap/strings wall medians change by +0.94/-0.34/+1.45/+1.80 ms;
+Linux controls are mixed, including the strings regression above. macOS serde remains unqualified
+because the baseline traps on its dependency's inline assembly. In a separate diagnostic flate load,
+Linux metadata decoding is 1.214 → 0.745 ms and function-slot setup 0.178 → 0.008 ms, while total
+cache load is 26.9 → 29.4 ms. Lower allocation and indexing costs do not imply faster total loading.
+Focused compiler/archive/package/symbol checks and the complete persistent-code contract pass on
+both CPUs. Three Clippy configurations and repository ownership/boundary checks pass; no full suite
+or sanitizer qualification is implied.
 
 The performance priority is ordinary prepared execution. The focused measurements below use the
 compiler-independent CLI with its matching worker, offline prepared inputs and generic templates
@@ -1007,7 +1026,7 @@ What is refused or not yet claimed — not what is planned.
   two-machine-word exports must be trusted, `Shared` is not public, and no safe typed export bindings
   are generated. Third-party callbacks have no universal revocation, so published closure/JIT/MC/native
   code lives to process end.
-- **Distribution**: `.mirvm` is at unstable format v9 with direct archive verification and demand
+- **Distribution**: `.mirvm` is at unstable format v10 with direct archive verification and demand
   body decoding. Cross-build_id/target compatibility, fat artifacts and format freeze are unfinished. No daemon, REPL, checked mode, resource governance or real sandbox.
 - **Cargo config**: Git source replacement, patches targeting a Git URL, and parts of the Cargo config
   surface such as `paths`/`HOST_RUSTFLAGS` are not implemented.

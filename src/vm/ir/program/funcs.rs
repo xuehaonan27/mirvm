@@ -10,7 +10,7 @@ pub struct FuncTable {
 struct Part {
     end: usize,
     storage: FuncStorage,
-    concrete: std::collections::HashMap<usize, std::sync::OnceLock<FuncBody>>,
+    concrete: Vec<std::sync::OnceLock<Box<FuncBody>>>,
 }
 
 enum FuncStorage {
@@ -20,7 +20,7 @@ enum FuncStorage {
 
 struct LazyFuncs {
     archive: std::sync::Arc<crate::vm::archive::functions::Functions>,
-    cells: Box<[std::sync::OnceLock<FuncBody>]>,
+    cells: Box<[std::sync::OnceLock<Box<FuncBody>>]>,
 }
 
 /// Borrow a table's storage without initializing its demand-decoded bodies.
@@ -39,11 +39,8 @@ impl From<Vec<FuncBody>> for FuncTable {
     fn from(funcs: Vec<FuncBody>) -> Self {
         Self {
             parts: vec![Part {
-                concrete: funcs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, body)| body.shared.is_some())
-                    .map(|(index, _)| (index, std::sync::OnceLock::new()))
+                concrete: (0..funcs.len())
+                    .map(|_| std::sync::OnceLock::new())
                     .collect(),
                 end: funcs.len(),
                 storage: FuncStorage::Eager(funcs),
@@ -67,11 +64,8 @@ impl FuncTable {
             .collect();
         Self {
             parts: vec![Part {
-                concrete: archive
-                    .bodies()
-                    .enumerate()
-                    .filter(|(_, body)| body.shared.is_some())
-                    .map(|(index, _)| (index, std::sync::OnceLock::new()))
+                concrete: (0..archive.len())
+                    .map(|_| std::sync::OnceLock::new())
                     .collect(),
                 end: archive.len(),
                 storage: FuncStorage::Lazy(LazyFuncs { archive, cells }),
@@ -111,13 +105,13 @@ impl FuncTable {
                     lazy.get(index);
                 }
             }
-            for (&index, cell) in &part.concrete {
+            for (index, cell) in part.concrete.iter().enumerate() {
                 let body = match &part.storage {
                     FuncStorage::Eager(funcs) => &funcs[index],
                     FuncStorage::Lazy(lazy) => lazy.get(index),
                 };
                 if body.shared.is_some() {
-                    cell.get_or_init(|| body.specialize());
+                    cell.get_or_init(|| Box::new(body.specialize()));
                 }
             }
         }
@@ -142,7 +136,7 @@ impl FuncTable {
     pub(crate) fn specialized_count(&self) -> usize {
         self.parts
             .iter()
-            .flat_map(|part| part.concrete.values())
+            .flat_map(|part| part.concrete.iter())
             .filter(|cell| cell.get().is_some())
             .count()
     }
@@ -161,9 +155,9 @@ impl FuncTable {
             return Some(body);
         }
         let (part, index) = self.part(index)?;
-        Some(part.concrete[&index].get_or_init(|| {
+        Some(part.concrete[index].get_or_init(|| {
             crate::diag_debug!(Jit, "generic instance specialized: {}", body.name);
-            body.specialize()
+            Box::new(body.specialize())
         }))
     }
 
@@ -201,7 +195,7 @@ impl FuncTable {
 
     pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, FuncBody> {
         self.make_eager();
-        for cell in self.parts[0].concrete.values_mut() {
+        for cell in self.parts[0].concrete.iter_mut() {
             *cell = std::sync::OnceLock::new();
         }
         let FuncStorage::Eager(funcs) = &mut self.parts[0].storage else {
@@ -215,14 +209,8 @@ impl FuncTable {
         let FuncStorage::Eager(funcs) = &mut self.parts[0].storage else {
             unreachable!()
         };
-        let generic = body.shared.is_some();
         funcs.push(body);
-        if generic {
-            let index = self.parts[0].end;
-            self.parts[0]
-                .concrete
-                .insert(index, std::sync::OnceLock::new());
-        }
+        self.parts[0].concrete.push(std::sync::OnceLock::new());
         self.parts[0].end += 1;
     }
 
@@ -251,7 +239,8 @@ impl FuncTable {
                             .into_iter()
                             .enumerate()
                             .map(|(i, cell)| {
-                                cell.into_inner().unwrap_or_else(|| lazy.archive.decode(i))
+                                cell.into_inner()
+                                    .map_or_else(|| lazy.archive.decode(i), |body| *body)
                             }),
                     );
                 }
@@ -263,7 +252,7 @@ impl FuncTable {
 
 impl LazyFuncs {
     fn get(&self, index: usize) -> &FuncBody {
-        self.cells[index].get_or_init(|| self.archive.decode(index))
+        self.cells[index].get_or_init(|| Box::new(self.archive.decode(index)))
     }
 }
 

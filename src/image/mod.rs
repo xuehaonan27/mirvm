@@ -299,7 +299,7 @@ impl ImageStack {
         for img in self.images {
             let mut m = img.module;
             let mut i = img.instance;
-            function_names.append(&mut m.function_names);
+            m.function_names.drain_into(&mut function_names);
             funcs.append(m.funcs);
             tls.append(&mut m.tls);
             sites.append(&mut m.asm_sites);
@@ -346,9 +346,9 @@ impl ImageStack {
             }
         }
         funcs.append(std::mem::take(&mut delta.funcs));
-        function_names.append(&mut delta.function_names);
+        delta.function_names.drain_into(&mut function_names);
         delta.funcs = funcs;
-        delta.function_names = function_names;
+        delta.function_names = function_names.into();
         delta.ensure_function_names();
         tls.append(&mut delta.tls);
         delta.tls = tls;

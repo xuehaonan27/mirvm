@@ -276,7 +276,10 @@ fn merged_archives_verify_and_publish_without_decoding() {
     base.funcs = FuncTable::from_archive(Arc::new(archive(&base)));
     tail.funcs = FuncTable::from_archive(Arc::new(archive(&tail)));
     base.funcs.append(tail.funcs);
-    base.function_names.extend(tail.function_names);
+    let mut names = Vec::new();
+    base.function_names.drain_into(&mut names);
+    tail.function_names.drain_into(&mut names);
+    base.function_names = names.into();
     base.funcs.append(vec![module().funcs[0].clone()].into());
     base.function_names.push("body0".into());
     assert_eq!(base.funcs.decoded_count(), 1);
@@ -506,4 +509,25 @@ fn prepared_operations_are_verified_against_archived_semantics() {
         assert_eq!(owned, archived);
         assert_eq!(owned.is_ok(), bad == 0);
     }
+}
+
+#[test]
+fn names_borrow_the_archive_and_keep_it_alive_without_decoding() {
+    let image = load(&module(), &Instance::default()).unwrap();
+    let owner = Arc::downgrade(&image.functions);
+    let pointer = image.functions.body(3).name.as_ptr();
+    let artifact = image.instantiate().unwrap();
+    assert_eq!(artifact.module().funcs.decoded_count(), 0);
+    let (module, _) = artifact.into_parts();
+    let names = module.function_names;
+    drop(module.funcs);
+    drop(image);
+    assert!(owner.upgrade().is_some());
+    assert_eq!(names[3].as_ptr(), pointer);
+    assert_eq!(&names[3], "body3");
+    let mut owned = Vec::new();
+    let mut names = names;
+    names.drain_into(&mut owned);
+    assert!(owner.upgrade().is_none());
+    assert_eq!(owned[3].as_ref(), "body3");
 }

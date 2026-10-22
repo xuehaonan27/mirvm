@@ -114,7 +114,7 @@ pub struct Module {
     pub funcs: FuncTable,
     /// Symbol names in FuncId order. Even when function bodies are decoded lazily, backtrace can build
     /// a standard ELF symbol table from this without decoding every body.
-    pub function_names: Vec<Box<str>>,
+    pub function_names: FunctionNames,
     /// Exported `no_mangle` symbol name to FuncId, used by `--vm-call` lookup.
     pub exports: std::collections::HashMap<Box<str>, FuncId>,
     /// Frozen area holding statics, the constant pool and fn entries, in artifact form: the clean

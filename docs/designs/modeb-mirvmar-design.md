@@ -46,7 +46,7 @@ cache. Each violation is a rejection:
 
 ### 2.1 Goals and non-goals
 
-Goals: a single-file package format v9; `mirvm pack` from a Cargo project or script; `mirvm run
+Goals: a single-file package format v10; `mirvm pack` from a Cargo project or script; `mirvm run
 x.mirvm` to validate, load and execute; and three-dimensional acceptance — pack plus run must be
 byte-identical to a direct `mirvm run` on three loads, while refusal probes must be loud.
 
@@ -59,7 +59,7 @@ materializes it and then dlopens it; and L3 JIT machine-code caching, which is u
 
 ```text
 offset 0   magic        8B   "MIRVMAR\0"
-           fmt_ver      u32  = 9
+           fmt_ver      u32  = 10
            build_id     u32 length + UTF-8 (MIRVM_BUILD_ID, exact match)
            section_cnt  u32
 sections   tag u32 | off u64 | len u64 | BLAKE3-128 (content checksum)
@@ -130,7 +130,8 @@ fork changes, writing to disk instead of executing.
    images, GOT and callback closures are materialized per instance.
 5. Start at `RELOC.entry`, the main startup chain, forwarding argv.
 
-Function bodies are constructed through per-instance `OnceLock` slots by the interpreter or JIT
+Function names borrow the validated FUNCS archive; MODULE does not duplicate them.
+Function bodies are constructed through per-instance `OnceLock<Box<FuncBody>>` slots by the interpreter or JIT
 thread that first needs them. There is no separate decode queue or speculative decode worker. Before
 `fork`, remaining slots are completed so the child cannot inherit an initializer owned by a vanished
 thread. Program-level JIT heat ordering remains independent of the package representation.
@@ -251,7 +252,7 @@ permanent `wait_closed` stall, at the cost of a permanent process-level address 
 constructors run, an instantiation failure is reclaimable; after that, escaped addresses never are.
 
 **Not frozen.** Cross-version bytecode requires an exact `build_id` today, and external format freezing
-awaits its own review; `fmt_ver` only separates generations. A v9 package does not occupy the
+awaits its own review; `fmt_ver` only separates generations. A v10 package does not occupy the
 artifact's fixed base at run time — every Engine uses its own anonymous mapping. A multi-target fat
 artifact is only a reserved section-table tag, to be judged after the freeze review.
 
