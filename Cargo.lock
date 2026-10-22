@@ -661,6 +661,7 @@ dependencies = [
  "toml",
  "ureq",
  "version-ranges",
+ "wasmtime-internal-jit-icache-coherence",
 ]
 
 [[package]]

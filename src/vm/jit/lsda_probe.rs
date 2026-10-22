@@ -602,6 +602,7 @@ fn a_linked_entry_unwinds_through_a_loaded_frame() {
         fragment: [0; 32],
         jit: jit_key.clone(),
         symbols: vec![raiser_symbol],
+        adapters: Vec::new(),
     };
     let raiser_linked = artifact::link(
         &raiser_entry,
@@ -616,6 +617,7 @@ fn a_linked_entry_unwinds_through_a_loaded_frame() {
         fragment: [0; 32],
         jit: jit_key,
         symbols: vec![caller_symbol],
+        adapters: Vec::new(),
     };
     let caller_linked = artifact::link(
         &caller_entry,

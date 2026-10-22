@@ -286,7 +286,7 @@ fn trace_domain_compiles_a_pinned_syscall_body() {
     );
 }
 
-fn body(name: &str, first: Terminator) -> ir::FuncBody {
+pub(super) fn body(name: &str, first: Terminator) -> ir::FuncBody {
     ir::FuncBody {
         shared: None,
         frame_size: 8,
@@ -759,6 +759,7 @@ fn a_compiled_body_runs_from_its_artifact() {
                 .expect("the body symbol was captured")
                 .clone(),
         ],
+        adapters: Vec::new(),
     };
     let bytes = entry.encode().expect("an artifact encodes");
     let entry = artifact::Entry::decode(&bytes).expect("an artifact decodes");
@@ -922,6 +923,7 @@ fn an_entry_depends_on_the_body_and_not_on_the_program() {
         first.fragment, second.fragment,
         "the same body is not the same fragment in two programs"
     );
+
     assert_eq!(
         first.encode().expect("the entry encodes"),
         second.encode().expect("the entry encodes"),

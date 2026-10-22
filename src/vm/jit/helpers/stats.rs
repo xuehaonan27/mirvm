@@ -108,7 +108,7 @@ pub(crate) fn cache_refused() {
     CACHE_REFUSED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Entries linked from the store before any request was served: what warmup traded a compile wave for.
+/// Entries linked by historical prefetch, interleaved with current compilation requests.
 pub(crate) fn cache_prelinked(count: u64) {
     CACHE_PRELINKED.fetch_add(count, Ordering::Relaxed);
 }
@@ -153,8 +153,8 @@ extern "C" fn stat_dump() {
     crate::diag::instrument(format_args!("{line}"));
 }
 
-/// Called from `Compiler::new`, which one Engine does once per tier: the environment is read and the
-/// exit dump registered exactly once per process, so the counters are not printed twice.
+/// Initialize worker instrumentation even when loading saved code never constructs a compiler.
+/// Compiler-only probes may also call this; exit dumps are registered once per process.
 pub(crate) fn stat_init() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {

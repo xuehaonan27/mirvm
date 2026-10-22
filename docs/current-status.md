@@ -23,7 +23,7 @@ contracts are its siblings in `docs/designs/`.
   and productized unwind with a full LSDA over both CIEs. `MIRVM_JIT_SYNC` publishes synchronously, so
   `MIRVM_JIT_THRESHOLD=1` differentials prove compiled code really ran. Compiled symbols persist in the
   machine-local `cache/jit` store keyed by `(fragment, jit-key)`, with relocation deferred to load: a
-  warm session links the heat order before serving a request and takes each function's tier from
+  warm session interleaves bounded heat-order loading with current requests and takes each function's tier from
   `cache/package-heat` (`MIRVM_NO_JIT_CACHE`, `MIRVM_JIT_RELOAD`, `MIRVM_JIT_LEDGER`).
   OSR transfers active hot loops into session-local compiled continuations that borrow the
   interpreter frame, including exact generic instances and both code domains. It is on by default;
@@ -223,8 +223,14 @@ compile finalizes its body, packed entry and missing C2I trampolines together. C
 reused by flattened ABI shape within each compiler. The
 [JIT design](designs/jit-code-cache-design.md#25-load-time-linking-and-publication) owns template
 isolation, relocation, publication, failure handling and scratch lifetimes. Guest ABI, verification,
-optimization levels and admission thresholds are unchanged. C2I templates are not persisted; artifact
-encoding remains 3.
+optimization levels and admission thresholds are unchanged. C2I templates are persisted in artifact encoding 4. The independent loader batches mappings and
+unwind registration, supports AArch64 instruction relocations and synchronizes instruction fetch
+before publishing code. Compiler tiers are constructed only for code-generation requests.
+Five alternating fresh-process pairs with installed inputs and populated code stores put the full
+100 KiB flate driver at 280.04 → 265.57 ms on Linux x86_64 and 277.33 → 190.10 ms on macOS
+AArch64; corresponding process CPU medians are 282.67 → 263.90 ms and 343.22 → 194.20 ms.
+Linux empty/fib/hashmap controls move by +3.34/+0.23/+1.65 ms, so this is not a uniform startup gain.
+macOS serde JSON remains unqualified because the baseline traps on its dependency's inline assembly.
 
 The performance priority is ordinary prepared execution. The focused measurements below use the
 compiler-independent CLI with its matching worker, offline prepared inputs and generic templates

@@ -7,7 +7,7 @@
 //! is exactly that — the backend's machine code plus its relocation list in canonical form — and the
 //! link is the same resolution run once more against live state.
 //!
-//! A kind this file does not apply — an AArch64 call, a GOT reference, a TLS descriptor — is a
+//! A kind this file does not apply — a GOT reference or a TLS descriptor — is a
 //! *miss*, never a guess: the caller compiles instead. The kinds it does apply are applied exactly
 //! as `cranelift-jit`'s in-process relocation applies them, so a linked symbol is byte-identical to
 //! the one the module produced.
@@ -25,26 +25,20 @@ use super::state::{CodeDomain, JitSymbolRole};
 use super::{Body, SigPart};
 
 /// Encoding version, part of what an entry's bytes mean.
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 
-/// How one relocation's value lands in the code. Mirrors the backend kinds this engine replays.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum Kind {
-    /// A whole 4-byte absolute field.
-    Abs32,
-    /// A whole 8-byte absolute field.
-    Abs64,
-    /// A signed 4-byte field holding `value - place`.
-    PcRel32,
-}
+pub(crate) use crate::arch::code::Reloc as Kind;
 
 impl Kind {
     /// The backend kind this one replays, or `None` for a kind this engine does not apply.
-    fn of(kind: BackendReloc) -> Option<Kind> {
+    pub(super) fn of(kind: BackendReloc) -> Option<Kind> {
         match kind {
             BackendReloc::Abs4 => Some(Kind::Abs32),
             BackendReloc::Abs8 => Some(Kind::Abs64),
             BackendReloc::X86PCRel4 | BackendReloc::X86CallPCRel4 => Some(Kind::PcRel32),
+            BackendReloc::Arm64Call => Some(Kind::Arm64Call),
+            BackendReloc::Aarch64AdrPrelPgHi21 => Some(Kind::Arm64Page21),
+            BackendReloc::Aarch64AddAbsLo12Nc => Some(Kind::Arm64PageOffset12),
             _ => None,
         }
     }
@@ -194,6 +188,7 @@ pub(crate) struct Symbol {
     /// relocation from another symbol of the same entry finds it again.
     pub name: Box<str>,
     pub code: Vec<u8>,
+    pub alignment: u32,
     pub relocs: Vec<Reloc>,
     /// The CFA program the loading session turns into this symbol's FDE at the address it lands at.
     /// The backend gives one for every defined symbol of a target with unwind info.
@@ -259,6 +254,15 @@ pub(crate) struct Entry {
     /// What the code was built with, for the exact comparison a digest alone cannot give.
     pub jit: JitKey,
     pub symbols: Vec<Symbol>,
+    /// Call adapters are ABI templates, independent of the producer's callee numbering.
+    pub adapters: Vec<Adapter>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Adapter {
+    pub params: usize,
+    pub returns: usize,
+    pub symbol: Symbol,
 }
 
 impl Entry {
@@ -368,6 +372,7 @@ pub(crate) fn capture(input: Captured<'_>) -> Option<Symbol> {
         role,
         name: canonical_name(name),
         code: compiled.code_buffer().to_vec(),
+        alignment: compiled.buffer.alignment,
         relocs,
         unwind,
         lsda,
@@ -398,12 +403,21 @@ pub(crate) struct LinkedSymbol {
     pub size: u64,
 }
 
-/// Code linked into a fresh executable region, owned by this value. The caller that wants
-/// process-lifetime code leaks it; a test drops it and the mapping goes away.
-pub(crate) struct Linked {
+/// One region shared by all entries linked in a publication batch.
+struct Region {
     base: *mut u8,
     len: usize,
-    /// The linked symbols, in the order the roles were asked for.
+}
+
+impl Drop for Region {
+    fn drop(&mut self) {
+        unsafe { crate::os::mem::unmap(self.base, self.len) };
+    }
+}
+
+/// Code and its mapping owner. Publication retains it for the process lifetime.
+pub(crate) struct Linked {
+    _region: std::rc::Rc<Region>,
     pub symbols: Vec<LinkedSymbol>,
 }
 
@@ -416,112 +430,114 @@ impl Linked {
     }
 }
 
-impl Drop for Linked {
-    fn drop(&mut self) {
-        unsafe { crate::os::mem::unmap(self.base, self.len) };
-    }
-}
-
-/// Link the requested symbols of one entry into one executable region.
-///
-/// `resolve` answers what a named symbol or a site is *now*: the import whitelist for a helper, the
-/// live dispatch state for a site. A name that matches one of the linked symbols resolves inside the
-/// entry, which is how the packed wrapper finds the body it was built around. Every relocation must
-/// resolve — an entry that cannot be linked whole is a miss, because a partially patched code region
-/// would run with wrong values.
+/// Link an entry using the same W^X and lifetime contract as a multi-entry batch.
 pub(crate) fn link(
     entry: &Entry,
     roles: &[JitSymbolRole],
     mut resolve: impl FnMut(&Target) -> Option<u64>,
 ) -> Result<Linked, crate::error::Error> {
-    let wanted: Vec<&Symbol> = roles
+    let symbols = roles
         .iter()
-        .filter_map(|role| entry.symbol(*role))
-        .collect();
-    if wanted.len() != roles.len() {
-        return Err(crate::fail!(
-            Jit,
-            "entry does not hold every requested symbol"
-        ));
+        .map(|role| entry.symbol(*role))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| crate::fail!(Jit, "entry does not hold every requested symbol"))?;
+    Ok(link_batch(&[symbols], |_, target| resolve(target))?.remove(0))
+}
+
+/// Link a bounded batch into one mapping, then synchronize instruction fetch before returning.
+/// No address is published until all relocations succeed. An error releases the entire mapping.
+pub(crate) fn link_batch(
+    entries: &[Vec<&Symbol>],
+    mut resolve: impl FnMut(usize, &Target) -> Option<u64>,
+) -> Result<Vec<Linked>, crate::error::Error> {
+    let invalid = || crate::fail!(Jit, "invalid saved-code layout or relocation");
+    let mut total = 0usize;
+    let mut layouts = Vec::new();
+    for entry in entries {
+        let mut layout = Vec::new();
+        for symbol in entry {
+            let alignment = symbol.alignment as usize;
+            if !alignment.is_power_of_two() || alignment > crate::os::mem::page_size() {
+                return Err(invalid());
+            }
+            total = total.checked_add(alignment - 1).ok_or_else(invalid)? & !(alignment - 1);
+            let start = total;
+            total = total.checked_add(symbol.code.len()).ok_or_else(invalid)?;
+            total = total.checked_add(7).ok_or_else(invalid)? & !7;
+            let veneers = total;
+            for reloc in &symbol.relocs {
+                if reloc.offset as usize + reloc.kind.width() > symbol.code.len() {
+                    return Err(invalid());
+                }
+                total = total
+                    .checked_add(reloc.kind.veneer_size())
+                    .ok_or_else(invalid)?;
+            }
+            layout.push((symbol, start, veneers));
+        }
+        layouts.push(layout);
     }
-    // One region, symbols laid out in request order: an intra-entry reference is then a fixed offset
-    // from the region's base, and the entry addresses all come from one mapping.
-    let total: usize = wanted.iter().map(|symbol| symbol.code.len()).sum();
     if total == 0 {
-        return Err(crate::fail!(Jit, "entry holds no code"));
+        return Err(invalid());
     }
     let page = crate::os::mem::page_size();
-    let len = total.next_multiple_of(page);
+    let len = total.checked_add(page - 1).ok_or_else(invalid)? & !(page - 1);
     let base = crate::os::mem::map_anon(len, crate::os::mem::Prot::RW, false);
     if base.is_null() {
-        return Err(crate::fail!(Jit, format!("cannot map {len} bytes of code")));
+        return Err(crate::fail!(Jit, "cannot map saved code"));
     }
-    let mut placed: Vec<(JitSymbolRole, &Symbol, u64)> = Vec::new();
-    let mut offset = 0u64;
-    for symbol in &wanted {
-        let at = base as u64 + offset;
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                symbol.code.as_ptr(),
-                base.add(offset as usize),
-                symbol.code.len(),
-            );
-        }
-        placed.push((symbol.role, symbol, at));
-        offset += symbol.code.len() as u64;
-    }
-    for (_, symbol, at) in &placed {
-        for reloc in &symbol.relocs {
-            let value = match &reloc.target {
-                Target::Local(offset) => *at + u64::from(*offset),
-                Target::Named(name) => placed
-                    .iter()
-                    .find(|(_, own, _)| own.name.as_ref() == name.as_ref())
-                    .map(|(_, _, addr)| *addr)
-                    .or_else(|| resolve(&reloc.target))
-                    .ok_or_else(|| crate::fail!(Jit, format!("unresolved symbol `{name}`")))?,
-                // Everything else is a reference of the fragment, an interior of the body it belongs
-                // to, or this entry's own id: the caller answers those from the body it links for.
-                _ => resolve(&reloc.target)
-                    .ok_or_else(|| crate::fail!(Jit, format!("unresolved target {reloc:?}")))?,
-            };
-            let what = (value as i64).wrapping_add(reloc.addend) as u64;
-            let at = *at + u64::from(reloc.offset);
-            unsafe {
-                match reloc.kind {
-                    Kind::Abs32 => {
-                        let value = u32::try_from(what).map_err(|_| {
-                            crate::fail!(Jit, format!("{what:#x} does not fit an Abs32 field"))
-                        })?;
-                        std::ptr::write_unaligned(at as *mut u32, value);
+    let region = std::rc::Rc::new(Region { base, len });
+    let mut linked = Vec::new();
+    for (entry_id, layout) in layouts.iter().enumerate() {
+        let mut symbols = Vec::new();
+        for (symbol, start, veneers) in layout {
+            let at = unsafe { base.add(*start) };
+            unsafe { std::ptr::copy_nonoverlapping(symbol.code.as_ptr(), at, symbol.code.len()) };
+            let mut veneer = *veneers;
+            for reloc in &symbol.relocs {
+                let value = match &reloc.target {
+                    Target::Local(offset) if (*offset as usize) < symbol.code.len() => {
+                        Some(at as u64 + u64::from(*offset))
                     }
-                    Kind::Abs64 => std::ptr::write_unaligned(at as *mut u64, what),
-                    Kind::PcRel32 => {
-                        let delta = (what as i64).wrapping_sub(at as i64);
-                        let value = i32::try_from(delta).map_err(|_| {
-                            crate::fail!(Jit, format!("{delta} does not fit a PcRel32 field"))
-                        })?;
-                        std::ptr::write_unaligned(at as *mut i32, value);
-                    }
+                    Target::Local(_) => None,
+                    Target::Named(name) => layout
+                        .iter()
+                        .find(|(other, _, _)| other.name == *name)
+                        .map(|(_, offset, _)| base as u64 + *offset as u64)
+                        .or_else(|| resolve(entry_id, &reloc.target)),
+                    target => resolve(entry_id, target),
                 }
+                .ok_or_else(|| crate::fail!(Jit, format!("unresolved target {reloc:?}")))?;
+                let value = value.wrapping_add_signed(reloc.addend);
+                let success = unsafe {
+                    crate::arch::code::apply(
+                        reloc.kind,
+                        at.add(reloc.offset as usize),
+                        value,
+                        base.add(veneer),
+                    )
+                };
+                if !success {
+                    return Err(invalid());
+                }
+                veneer += reloc.kind.veneer_size();
             }
+            symbols.push(LinkedSymbol {
+                role: symbol.role,
+                addr: at as u64,
+                size: symbol.code.len() as u64,
+            });
         }
+        linked.push(Linked {
+            _region: region.clone(),
+            symbols,
+        });
     }
-    // W^X: the region is only executable once every value is in place.
     crate::os::mem::protect(base, len, crate::os::mem::Prot::RX)
         .map_err(|error| crate::fail!(Jit, format!("cannot protect linked code: {error}")))?;
-    Ok(Linked {
-        base,
-        len,
-        symbols: placed
-            .iter()
-            .map(|(role, symbol, addr)| LinkedSymbol {
-                role: *role,
-                addr: *addr,
-                size: symbol.code.len() as u64,
-            })
-            .collect(),
-    })
+    unsafe { crate::os::mem::publish_code(base, len) }
+        .map_err(|error| crate::fail!(Jit, format!("cannot synchronize linked code: {error}")))?;
+    Ok(linked)
 }
 
 /// What a linked target is *now*, in this process: the value the translator baked for the site the
@@ -640,5 +656,43 @@ fn body_value(shared: &crate::vm::ctx::Shared, func: u32, part: &Body) -> Option
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batches_preserve_alignment_and_refuse_out_of_bounds_fields() {
+        let mut symbol = Symbol {
+            role: JitSymbolRole::FastBody,
+            name: "probe".into(),
+            code: vec![0; 8],
+            alignment: 64,
+            relocs: vec![Reloc {
+                offset: 0,
+                kind: Kind::Abs64,
+                addend: 0,
+                target: Target::OwnId,
+            }],
+            unwind: None,
+            lsda: None,
+        };
+        let linked = link_batch(&[vec![&symbol], vec![&symbol]], |index, _| {
+            Some(123 + index as u64)
+        })
+        .unwrap();
+        for (index, entry) in linked.iter().enumerate() {
+            let at = entry.entry(JitSymbolRole::FastBody).unwrap();
+            assert_eq!(at % 64, 0);
+            assert_eq!(unsafe { (at as *const u64).read() }, 123 + index as u64);
+        }
+        assert!(std::rc::Rc::ptr_eq(&linked[0]._region, &linked[1]._region));
+        symbol.relocs[0].offset = 4;
+        assert!(link_batch(&[vec![&symbol]], |_, _| Some(0)).is_err());
+        symbol.relocs[0].offset = 0;
+        symbol.alignment = 3;
+        assert!(link_batch(&[vec![&symbol]], |_, _| Some(0)).is_err());
     }
 }

@@ -41,7 +41,7 @@
   kind or a jit-key mismatch falls back to compiling — self-healing, never a trap and never a
   degraded run.
 - **Not cached:** trace-domain bodies (they assume a pinned recorder register and a live session),
-  libffi closures, c2i trampolines and entry stubs (per-process by nature, microseconds to rebuild).
+  libffi closures and entry stubs. C2I adapters are persisted as ABI templates with relocatable callee IDs.
 - **Machine-local only.** The cache never enters a `.mirvm`; mode B keeps distributing bytecode.
 - **Two-state cross-check.** `MIRVM_NO_JIT_CACHE=1` bypasses the cache entirely, mirroring the
   deps-image discipline, so cached and freshly compiled states stay differentially comparable.
@@ -121,18 +121,24 @@ publish), in a `cache/jit/` family. One entry: header (jit-key material for exac
 machine-code bytes, relocation table, unwind material — the Cranelift `UnwindInfo` CFA program plus
 the LSDA body with its code-relative landing-pad map; CIE and FDE are synthesized at load, so no
 absolute survives in the stored form. Entry integrity is BLAKE3-verified on read, like every blob.
-Encoding version 3 stores fast-body and packed symbols; the packed symbol includes the boundary
-stack check. Previous encodings are refused and recompiled.
+Encoding version 4 stores fast-body and packed symbols, their alignment, and the C2I templates
+needed by direct callees. The packed symbol includes the boundary stack check. Previous encodings
+are refused and recompiled. AArch64 calls use checked branch immediates or adjacent veneers; page
+and low-page instruction relocations are checked and patched by the CPU layer.
 
 ### 2.5 Load-time linking and publication
 
-Compile-or-load sits where compilation sits today: the tier-up request path. On a hit the worker maps
-the entry into the self-managed code arena (mcload/StubArena precedent — the `JITModule` is not
-involved, and cranelift-jit's no-per-function-release memory model stays irrelevant to loaded code),
-patches every relocation, protects RX, synthesizes and registers the batch `.eh_frame`, then
-publishes fast/packed entries in the existing order. A batch is the natural unit: heat-order
-prefetch (the package-heat precedent) can pre-link the learned hot set in the background at startup,
-turning warmup into one link wave instead of a compile wave.
+The worker owns a loader independent of both compiler tiers. A single store snapshot indexes keys
+directly to their first matching pack and record; selected records still revalidate file identity
+and content. Compiler modules are constructed only when a request actually needs code generation.
+Historical prefetch processes at most eight functions per batch, interleaved with current requests;
+a stream of requests also yields to prefetch after eight serviced requests. Shutdown stops prefetch.
+
+A load batch includes missing callee adapters and uses one mapping with each symbol's required
+alignment. Relocations, RX protection, instruction-cache synchronization and unwind registration
+finish before any slot is published. Callee adapters precede caller entries. A failed link drops the
+whole unpublished mapping. Tier tracking prevents a late baseline request from replacing loaded
+optimized code. Both code and registered unwind descriptions live until process exit.
 
 Each compiler owns one reusable Cranelift context, isolated by tier and code domain. Successful
 definitions extract code, relocations and unwind material before clearing and retaining the context;
@@ -147,13 +153,12 @@ backend, retaining unrelocated bytes, alignment, relocations and the unwind prog
 gets an arena-owned copy with its integer ID rebound through a module relocation and local code
 references rebound to that copy. Finalization registers an independent unwind record for each
 address. Worker shutdown frees the templates without releasing published code or unwind records.
-Templates are process-local scratch and are not part of the persistent artifact format.
+Each saved caller includes the ABI shapes it needs, independent of which callees were already
+compiled in the producing session. The loader rebinds these templates without invoking Cranelift.
 
 A fresh compile defines the body, packed entry and missing C2I trampolines in one finalization
 batch. Relocation, executable protection and unwind registration finish before publishing any
-callee slots, followed by the caller's fast and packed slots. A stored entry links and validates its
-frames before preparing missing C2I definitions; those definitions are finalized and registered
-before publication. Both paths keep separate slots for each code domain.
+callee slots, followed by the caller's fast and packed slots. A stored entry links its missing C2I templates in the same publication batch. Both paths keep separate slots for each code domain.
 
 A failed request publishes neither its caller nor its newly prepared callee slots. Unpublished C2I
 definitions remain available to later callers, even if an intervening request finalizes them;
@@ -234,12 +239,11 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    region, so it registers the CFA programs the artifact carries *at the addresses the link placed them
    at* (`Compiler::linked_frames`), the same way the store path does: without that, an unwind out of a
    reloaded frame found no FDE and ended as `_URC_END_OF_STACK`, which a panic raised inside a reloaded
-   body reproduces immediately. The kinds applied are the x86_64 ones:
-   the call encoding, veneers and write/execute discipline of the macOS pair are that pair's item
-   (§6), and a kind this engine does not apply is a miss, never a guess.
+   body reproduces immediately. The loader supports both x86_64 and AArch64 relocation kinds;
+   unsupported kinds remain cache misses.
 3. **The store family** — packs, keys, generation, purge; cross-process warm runs; the §4 gates.
    Implemented: `store::jit` holds one entry per `(fragment, jit-key)` in packs whose index is keyed by
-   that pair and whose records carry their own BLAKE3, so a lookup is a binary search and every read is
+   that pair and whose records carry their own BLAKE3; a direct session index selects each record and every read is
    verified; the family is in the register, so `mirvm cache status` accounts for it and
    `cache purge --jit` takes it whole, with liveness scored against the fragments the manifests name.
    The jit-key is the build id, the triple, the codegen options and the ISA-dependent options — host
@@ -284,13 +288,13 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    hands that order to the worker, which links what the store holds for it *before* it serves a request —
    so the first call into a hot function finds a published entry instead of enqueueing a compile. The
    wave goes through the ordinary load path, so a stale or unreadable entry is a miss exactly as it is
-   there, and `fib32-jit-cache` requires the warm run to prelink and count it.
+   there, and `fib32-jit-cache` requires the warm run to reuse and count stored code.
    The next order retains successful prelinks before newly requested functions, deduplicated by id.
    A linked function bypasses interpretation counters, so absence from the request queue does not
    establish that it went cold. Failed prelinks are not carried forward unless requested again.
    An unchanged deduplicated order is not republished. `jit-heat-reuse` covers partial new demand,
    subsequent reuse and unchanged file identity across four processes.
-   Tiers are built as the mechanism §2.6 asks for: one Engine runs one compiler per tier (each with its
+   Tiers are built as the mechanism §2.6 asks for: one Engine lazily creates a compiler per requested tier (each with its
    own ISA, module and jit-key, both publishing into the same slots), the pre-link wave prefers a stored
    optimized entry for a hot function and falls back to the baseline one, and the *request* a function
    raises while it is interpreted asks for the tier the heat ledger gives it (`JitState::tier_for`).
@@ -330,18 +334,6 @@ share that keystone and are otherwise parallel.
 
 ## 6. Open items
 
-- The compile-time/code-size ledger (D16) is in place and has priced both questions:
-  `MIRVM_JIT_LEDGER=1` prints one row per function this process built or linked — the kind, the
-  canonical body's bytes, the machine code's bytes and the microseconds the call took — and a
-  per-kind summary at exit. Measured on two generated programs, one of 200 small bodies (13 B to
-  3 388 B) and one of graded large ones (678 B to 27 720 B), both with `MIRVM_JIT_THRESHOLD=1` so a
-  first call builds each function: linking is cheaper than compiling at **every** measured size, by
-  9.6× at the median (32.5 µs against 312 µs) and by 2.5× to 31× per size band. The small-function
-  floor this item hypothesized does not exist — the cheapest link measured (14 µs for a 27 B body)
-  beats the cheapest compile measured (82 µs for a 23 B body) — so the pre-link wave links the whole
-  order and no size gate is set. That also fixes the scope: a warm start pays ~62 µs per hot
-  function (184 links = 11.5 ms, against 89 ms to compile the same bodies), which is a price worth
-  paying for every function in the ledger.
 - A within-run tier upgrade needs a signal the compiled-call path can carry: the interpreter stops
   counting a function the moment its first entry is published, so today a function that becomes hot
   during a run keeps the tier the *previous* run's ledger gave it. The candidates are the PLT slot load
@@ -359,13 +351,6 @@ share that keystone and are otherwise parallel.
   `struct object` — or registering from a point the guest cannot be unwinding at. The repository gate
   runs its tests on one thread for the same reason, and the item closes when the JIT can register
   while guest threads unwind without that window.
-- The adaptive-tier statistic is chosen: the persisted **heat order**, not a counter. A function the
-  previous run's order names is asked for at the optimized tier the first time this session compiles
-  it, and everything else starts at the baseline one, so the decision is made once per function per
-  session from evidence the store already keeps (`cache/package-heat`). No hysteresis is needed while
-  the decision is a single membership test per session; it becomes necessary only with a within-run
-  signal, which is the item above.
-- macOS pair items: `MAP_JIT`, `pthread_jit_write_protect_np`, the code-arena placement rules, and the
-  `Arm64Call` encoding — a `bl` patches one instruction field, in range or through a veneer, and which
-  of the two is decided when the entry lands, so the pair owns both the decision and the space a
-  veneer needs.
+- Hardened-runtime code publication on macOS: assess `MAP_JIT`, thread write protection and
+  arena placement under signed executable policies. Ordinary AArch64 relocation, veneers and
+  instruction-cache synchronization are covered by the loader contract.

@@ -27,6 +27,7 @@ cranelift = [
     "dep:cranelift-module",
     "dep:cranelift-native",
     "dep:gimli",
+    "dep:wasmtime-jit-icache-coherence",
 ]
 
 [[bin]]
@@ -58,6 +59,7 @@ cranelift-jit = { version = "0.133.1", optional = true }
 cranelift-module = { version = "0.133.1", optional = true }
 cranelift-native = { version = "0.133.1", optional = true }
 gimli = { version = "0.33", optional = true, default-features = false, features = ["write"] }
+wasmtime-jit-icache-coherence = { package = "wasmtime-internal-jit-icache-coherence", version = "=46.0.1", optional = true }
 libc = "0.2.186"
 libffi = "5"
 libmimalloc-sys = "0.1.49"

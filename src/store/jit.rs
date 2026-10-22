@@ -18,9 +18,9 @@
 //! atomic publish. A key the family already holds is not written again, so republishing a batch is
 //! idempotent.
 
-use std::collections::BTreeMap;
 #[cfg(any(feature = "compiler", test))]
 use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -271,6 +271,7 @@ impl PackIndex {
 /// Every entry the packs hold, loaded once per reader batch or writer session.
 pub(crate) struct Index {
     packs: Vec<PackIndex>,
+    by_key: HashMap<[u8; 32], (usize, usize)>,
 }
 
 impl Index {
@@ -279,14 +280,21 @@ impl Index {
     }
 
     pub(crate) fn load_in(dir: &Path) -> Index {
-        let packs = super::index::load(dir, b"MIRJITI1", PackIndex::load)
+        let packs: Vec<PackIndex> = super::index::load(dir, b"MIRJITI1", PackIndex::load)
             .into_iter()
             .map(|(path, mut pack)| {
                 pack.file.path = path;
                 pack
             })
             .collect();
-        Index { packs }
+        let mut by_key = HashMap::new();
+        for (pack_id, pack) in packs.iter().enumerate() {
+            for (entry_id, entry) in pack.entries.iter().enumerate() {
+                // Preserve the first pack's answer, including a corrupt record's refusal.
+                by_key.entry(entry.key).or_insert((pack_id, entry_id));
+            }
+        }
+        Index { packs, by_key }
     }
 
     pub(crate) fn contains(&self, key: &[u8; 32]) -> bool {
@@ -297,21 +305,17 @@ impl Index {
 
     /// What the family holds for one key.
     pub(crate) fn lookup(&self, key: &[u8; 32]) -> Lookup {
-        for pack in &self.packs {
-            let Some(entry) = pack.find(key) else {
-                continue;
-            };
-            return match pack.read(&entry) {
-                Some(bytes) => Lookup::Entry(bytes),
-                // The pack holds the key and not the entry: unreadable, or bytes that do not hash back
-                // to what the record says they are. The caller compiles instead, and counts it.
-                None => Lookup::Bad(format!(
-                    "{} holds {key:?} unreadable",
-                    pack.file.path.display()
-                )),
-            };
+        let Some(&(pack_id, entry_id)) = self.by_key.get(key) else {
+            return Lookup::Absent;
+        };
+        let pack = &self.packs[pack_id];
+        match pack.read(&pack.entries[entry_id]) {
+            Some(bytes) => Lookup::Entry(bytes),
+            None => Lookup::Bad(format!(
+                "{} holds {key:?} unreadable",
+                pack.file.path.display()
+            )),
         }
-        Lookup::Absent
     }
 
     #[cfg(test)]
@@ -449,7 +453,7 @@ mod tests {
         // Flip one byte of the record body.
         let pack_path = pack_paths(&dir).pop().unwrap();
         let mut bytes = std::fs::read(&pack_path).unwrap();
-        let at = bytes.len() - FOOTER_LEN - 1;
+        let at = HEADER_LEN + RECORD_PREFIX_LEN as usize;
         bytes[at] ^= 0xff;
         std::fs::write(&pack_path, &bytes).unwrap();
         let index = Index::load_in(&dir);
@@ -467,6 +471,30 @@ mod tests {
         std::fs::write(&pack_path, &bytes[..bytes.len() - 4]).unwrap();
         let index = Index::load_in(&dir);
         assert!(index.read(&key(&fragment(5), &jit_key(5))).is_none());
+    }
+
+    #[test]
+    fn duplicate_lookup_keeps_the_first_pack_and_revalidates_its_identity() {
+        let dir = tmp("duplicate-lookup");
+        let record = key(&fragment(1), &jit_key(1));
+        for tag in [7, 9] {
+            let bytes = pack_bytes(&[(record, (fragment(1), entry(tag)))].into_iter().collect());
+            std::fs::write(pack_path(&dir, &bytes), bytes).unwrap();
+        }
+        let index = Index::load_in(&dir);
+        let first = index
+            .packs
+            .iter()
+            .find(|pack| pack.find(&record).is_some())
+            .unwrap();
+        assert_eq!(
+            index.read(&record),
+            first.read(&first.find(&record).unwrap())
+        );
+        std::fs::remove_file(&first.file.path).unwrap();
+        assert!(matches!(index.lookup(&record), Lookup::Bad(_)));
+        assert!(index.contains(&record));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Liveness follows the fragment: an entry whose fragment no manifest names is dead bytes.

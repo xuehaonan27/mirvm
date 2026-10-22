@@ -36,10 +36,7 @@ impl Compiler<'_> {
             .ok()?;
         // sret, pairs, indirect parameters and caller locations are already flattened into words.
         let shape = (abi.nparams, abi.nrets);
-        if !self.c2i_templates.contains_key(&shape) {
-            let template = self.compile_c2i_template(id, abi)?;
-            self.c2i_templates.insert(shape, template);
-        }
+        self.ensure_c2i_template(abi)?;
         let target_symbol = self
             .module
             .declare_data(
@@ -70,6 +67,73 @@ impl Compiler<'_> {
             func: target,
             role: JitSymbolRole::C2i,
             size: template.code.len() as u64,
+        })
+    }
+
+    pub(super) fn ensure_c2i_template(&mut self, abi: CalleeAbi) -> Option<()> {
+        let shape = (abi.nparams, abi.nrets);
+        if !self.c2i_templates.contains_key(&shape) {
+            let signature = self.fast_sig(abi);
+            let id = self
+                .module
+                .declare_function(
+                    &format!("adapter_{}_{}", abi.nparams, abi.nrets),
+                    Linkage::Local,
+                    &signature,
+                )
+                .ok()?;
+            let template = self.compile_c2i_template(id, abi)?;
+            self.c2i_templates.insert(shape, template);
+        }
+        Some(())
+    }
+
+    pub(super) fn saved_adapter(&self, abi: CalleeAbi) -> Option<artifact::Adapter> {
+        let template = self.c2i_templates.get(&(abi.nparams, abi.nrets))?;
+        let relocs = template
+            .relocs
+            .iter()
+            .map(|reloc| {
+                let target = match &reloc.name {
+                    ModuleRelocTarget::User {
+                        namespace: reloc::DATA_NAMESPACE,
+                        index,
+                    } if *index == template.target.as_u32() => artifact::Target::OwnId,
+                    ModuleRelocTarget::User {
+                        namespace: 0,
+                        index,
+                    } => {
+                        let declaration = self
+                            .module
+                            .declarations()
+                            .get_function_decl(ClifFuncId::from_u32(*index));
+                        artifact::Target::Named(declaration.name.as_ref()?.as_str().into())
+                    }
+                    ModuleRelocTarget::FunctionOffset(_, offset) => {
+                        artifact::Target::Local(*offset)
+                    }
+                    _ => return None,
+                };
+                Some(artifact::Reloc {
+                    offset: reloc.offset,
+                    kind: artifact::Kind::of(reloc.kind)?,
+                    addend: reloc.addend,
+                    target,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(artifact::Adapter {
+            params: abi.nparams,
+            returns: abi.nrets,
+            symbol: artifact::Symbol {
+                role: JitSymbolRole::C2i,
+                name: "adapter".into(),
+                code: template.code.clone(),
+                alignment: template.alignment as u32,
+                relocs,
+                unwind: Some(template.unwind.clone()),
+                lsda: None,
+            },
         })
     }
 
@@ -186,6 +250,7 @@ mod tests {
                     .declare_function("test_c2i_probe", Linkage::Import, &sig)
                     .unwrap();
                 let mut copies = Vec::new();
+                let mut saved = Vec::new();
                 let mut shapes = 0u32;
                 for nparams in [0, 2, 8] {
                     for nrets in 0..=2 {
@@ -196,6 +261,22 @@ mod tests {
                                 sret: nparams > 0 && nrets == 0 && target > 100,
                             };
                             let symbol = compiler.define_c2i_trampoline(target, abi).unwrap();
+                            let adapter = compiler.saved_adapter(abi).unwrap();
+                            let linked = artifact::link_batch(
+                                &[vec![&adapter.symbol]],
+                                |_, site| match site {
+                                    artifact::Target::OwnId => Some(u64::from(target)),
+                                    artifact::Target::Named(name)
+                                        if name.as_ref() == "test_c2i_probe" =>
+                                    {
+                                        Some(probe as *const u8 as u64)
+                                    }
+                                    _ => None,
+                                },
+                            )
+                            .unwrap()
+                            .remove(0);
+                            saved.push((linked, target, nparams, nrets));
                             copies.push((symbol.id, target, nparams, nrets));
                         }
                         shapes += 1;
@@ -206,8 +287,25 @@ mod tests {
                 compiler.register_pending_eh_frames();
                 // Published copies must own their bytes and unwind data independently of the cache.
                 compiler.c2i_templates.clear();
-                for (id, target, nparams, nrets) in copies {
-                    let entry = compiler.module.get_finalized_function(id);
+                let addresses = copies
+                    .iter()
+                    .map(|&(id, target, nparams, nrets)| {
+                        (
+                            compiler.module.get_finalized_function(id),
+                            target,
+                            nparams,
+                            nrets,
+                        )
+                    })
+                    .chain(saved.iter().map(|(linked, target, nparams, nrets)| {
+                        (
+                            linked.entry(JitSymbolRole::C2i).unwrap() as *const u8,
+                            *target,
+                            *nparams,
+                            *nrets,
+                        )
+                    }));
+                for (entry, target, nparams, nrets) in addresses {
                     macro_rules! invoke {
                         ($ret:ty) => {{
                             match nparams {

@@ -99,11 +99,6 @@ impl<'a> Compiler<'a> {
             }
             return;
         }
-        // A stored entry is the whole product of a compile: reuse it before spending one. The callees
-        // are pre-warmed either way, because a stored body calls through the same PLT slots.
-        if self.jit_cache && self.load_cached(func, body) {
-            return;
-        }
         let abi = callee_abi(ir::FuncHeader::Owned(body)).expect("admit already checked the shape");
         self.artifacts.clear();
 
@@ -154,7 +149,7 @@ impl<'a> Compiler<'a> {
         let mut packed = self.module.get_finalized_function(packed_id) as u64;
         // One entry for this function, built here and used by everyone below: the store keeps it, and
         // a reload links it back. Building it before either means the two can never disagree.
-        let entry = self.finish_entry();
+        let entry = self.finish_entry(func, body);
         if self.jit_cache
             && let Some(entry) = &entry
         {
@@ -217,22 +212,12 @@ impl<'a> Compiler<'a> {
     /// another caller can reuse them if this request fails before publication.
     pub(super) fn prepare_callees(&mut self, func: u32, body: &ir::FuncBody) -> Option<Vec<u32>> {
         let jit = &self.shared.jit;
-        let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
-        for blk in &body.blocks {
-            if let Terminator::Call {
-                callee, args, ret, ..
-            } = &blk.term
-                && (*callee != func || self.osr)
-                && !callees.iter().any(|(c, _)| c == callee)
-                && let Some(cabi) =
-                    callee_abi(self.shared.module.funcs.header(*callee as usize).unwrap())
-                && cabi.nparams == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
-            {
-                callees.push((*callee, cabi));
-            }
-        }
+        let callees = callees(self.shared, func, body, self.osr);
         let mut pending = Vec::new();
         for (c, cabi) in callees {
+            if self.jit_cache || self.reload {
+                self.ensure_c2i_template(cabi)?;
+            }
             if jit.slots_for(self.domain).slots_fast[c as usize].load(Ordering::Acquire) == 0 {
                 if !self.pending_callees.contains_key(&c) {
                     let symbol = self.define_c2i_trampoline(c, cabi)?;
@@ -254,127 +239,6 @@ impl<'a> Compiler<'a> {
                 .jit
                 .publish_c2i_entry_for(self.domain, callee, entry, ranges);
         }
-    }
-
-    /// Publish this function's code from the store, if the store holds an entry for its fragment under
-    /// this compiler's key.
-    ///
-    /// The entry is compared field by field before anything is linked: the digest is a key, not a proof.
-    /// A hit that links registers the stored unwind material at the loaded addresses and publishes the
-    /// same two entries a compile would. Everything a doubt can do is a miss, which spends a compile
-    /// and nothing else.
-    pub(super) fn load_cached(&mut self, func: u32, body: &ir::FuncBody) -> bool {
-        let started = helpers::ledger_on().then(std::time::Instant::now);
-        let Some(ordinals) = artifact::Ordinals::of(body) else {
-            return false;
-        };
-        let key = crate::store::jit::key(&ordinals.fragment(), &self.jit_key.digest());
-        let bytes = match self.jit_index().lookup(&key) {
-            crate::store::jit::Lookup::Entry(bytes) => bytes,
-            crate::store::jit::Lookup::Absent => {
-                helpers::cache_miss();
-                return false;
-            }
-            crate::store::jit::Lookup::Bad(reason) => {
-                helpers::cache_refused();
-                if crate::options::jit_debug() {
-                    crate::diag_debug!(Jit, "f{func} stored entry refused: {reason}");
-                }
-                return false;
-            }
-        };
-        let entry = artifact::Entry::decode(&bytes)
-            .ok()
-            .filter(|entry| entry.fragment == ordinals.fragment() && entry.jit == self.jit_key);
-        let Some(entry) = entry else {
-            helpers::cache_refused();
-            if crate::options::jit_debug() {
-                crate::diag_debug!(
-                    Jit,
-                    "f{func} stored entry refused: not this fragment and key"
-                );
-            }
-            return false;
-        };
-        let shared = self.shared;
-        let roles = [JitSymbolRole::FastBody, JitSymbolRole::Packed];
-        let Ok(linked) = artifact::link(&entry, &roles, |target| match target {
-            // One import table, so what a helper name means here is what it meant when the entry was
-            // written.
-            artifact::Target::Named(name) => imports::whitelist()
-                .get(name.as_ref())
-                .map(|addr| *addr as u64),
-            target => artifact::target_value(shared, func, &ordinals, target),
-        }) else {
-            helpers::cache_refused();
-            return false;
-        };
-        // The stored CFA programs become FDEs at the addresses the link placed the symbols at, exactly
-        // as a fresh compile registers its own. An entry whose frames this engine cannot all express
-        // is refused: a partially covered link is a wrong unwind.
-        let Some(frames) = Self::linked_frames(&linked, &entry) else {
-            helpers::cache_refused();
-            if crate::options::jit_debug() {
-                crate::diag_debug!(Jit, "f{func} stored entry has no registrable frames");
-            }
-            return false;
-        };
-        let Some(callees) = self.prepare_callees(func, body) else {
-            return false;
-        };
-        if !callees.is_empty() {
-            if self.module.finalize_definitions().is_err() {
-                return false;
-            }
-            self.register_pending_eh_frames();
-            self.publish_callees(callees);
-        }
-        self.register_eh_frames(frames);
-        let ranges = linked_ranges(shared, func, &linked);
-        let (Some(body_entry), Some(packed)) = (
-            linked.entry(JitSymbolRole::FastBody),
-            linked.entry(JitSymbolRole::Packed),
-        ) else {
-            helpers::cache_refused();
-            return false;
-        };
-        // Published code lives to process end, so the mapping must not be unmapped with the handle.
-        std::mem::forget(linked);
-        helpers::cache_hit();
-        if crate::options::jit_debug() {
-            crate::diag_debug!(
-                Jit,
-                "f{func} ({}) published from a stored entry",
-                self.shared
-                    .module
-                    .funcs
-                    .header(func as usize)
-                    .unwrap()
-                    .name()
-            );
-        }
-        self.shared
-            .jit
-            .publish_compiled_entries_for(self.domain, func, body_entry, packed, ranges);
-        self.published.insert(func);
-        if let Some(started) = started {
-            let micros = started.elapsed().as_micros() as u64;
-            helpers::ledger_row(
-                helpers::Built::Linked,
-                u64::from(ordinals.size()),
-                entry
-                    .symbols
-                    .iter()
-                    .map(|symbol| symbol.code.len() as u64)
-                    .sum(),
-                micros,
-            );
-        }
-        match self.tier {
-            Tier::Baseline => helpers::tier_baseline(),
-            Tier::Optimized => helpers::tier_optimized(),
-        }
-        true
     }
 
     /// This definition's CFA program, or `None` when this engine cannot express it.
@@ -414,21 +278,30 @@ impl<'a> Compiler<'a> {
             .collect()
     }
 
-    /// The store index, loaded once per compiler: what this session can reuse is what was there when it
-    /// started, which is exactly the entries a previous session published.
-    fn jit_index(&mut self) -> &crate::store::jit::Index {
-        self.jit_index
-            .get_or_insert_with(crate::store::jit::Index::load)
-    }
-
     /// This function's entry, or `None` when there is nothing to store or link: no artifact was
     /// captured, or the body's references could not be numbered.
-    fn finish_entry(&mut self) -> Option<artifact::Entry> {
+    pub(super) fn finish_entry(
+        &mut self,
+        func: u32,
+        body: &ir::FuncBody,
+    ) -> Option<artifact::Entry> {
+        if self.artifacts.len() != 2 {
+            return None;
+        }
+        let mut shapes = std::collections::BTreeMap::new();
+        for (_, abi) in callees(self.shared, func, body, false) {
+            shapes.entry((abi.nparams, abi.nrets)).or_insert(abi);
+        }
+        let adapters = shapes
+            .into_values()
+            .map(|abi| self.saved_adapter(abi))
+            .collect::<Option<Vec<_>>>()?;
         let fragment = self.ordinals.as_ref()?.fragment();
         Some(artifact::Entry {
             fragment,
             jit: self.jit_key.clone(),
             symbols: std::mem::take(&mut self.artifacts),
+            adapters,
         })
     }
 
@@ -673,6 +546,7 @@ impl<'a> Compiler<'a> {
                                 .unwrap_or_default(),
                             jit: self.jit_key.clone(),
                             symbols: vec![symbol.clone()],
+                            adapters: Vec::new(),
                         });
                     }
                     self.artifacts.push(symbol);
@@ -855,7 +729,11 @@ impl<'a> Compiler<'a> {
 
 /// The perf-map ranges of linked code: the addresses the link produced, not the module's, with the
 /// same roles and sizes so a profiler reads the running code.
-fn linked_ranges(shared: &Shared, func: u32, linked: &artifact::Linked) -> Vec<JitSymbolRange> {
+pub(super) fn linked_ranges(
+    shared: &Shared,
+    func: u32,
+    linked: &artifact::Linked,
+) -> Vec<JitSymbolRange> {
     let name = shared.module.funcs.header(func as usize).unwrap().name();
     linked
         .symbols
@@ -864,4 +742,27 @@ fn linked_ranges(shared: &Shared, func: u32, linked: &artifact::Linked) -> Vec<J
             JitSymbolRange::new(shared.id, func, symbol.role, symbol.addr, symbol.size, name)
         })
         .collect()
+}
+
+/// Direct callees whose flattened ABI can use the fast entry table.
+pub(super) fn callees(
+    shared: &Shared,
+    func: u32,
+    body: &ir::FuncBody,
+    include_self: bool,
+) -> Vec<(u32, CalleeAbi)> {
+    let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
+    for blk in &body.blocks {
+        if let Terminator::Call {
+            callee, args, ret, ..
+        } = &blk.term
+            && (*callee != func || include_self)
+            && !callees.iter().any(|(c, _)| c == callee)
+            && let Some(cabi) = callee_abi(shared.module.funcs.header(*callee as usize).unwrap())
+            && cabi.nparams == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
+        {
+            callees.push((*callee, cabi));
+        }
+    }
+    callees
 }

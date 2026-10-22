@@ -5,9 +5,8 @@
 //! Semantic contract = **bit-identical to the interpreter** (the JIT-on/off differential is the
 //! first oracle): all values preserve the "I64 zero-extended to width" slot invariant; operations
 //! mirror interp's int_bin/int_cmp/int_ovf identities; results are masked back by width band.
-//! Frame locals are all promoted to Cranelift SSA variables (admission excludes address-of /
-//! memory operands => no stack frame memory); entry uniformly defs 0 (valid MIR has no
-//! read-before-write paths, which makes this deterministic).
+//! Non-aliased scalar slots use SSA variables; addressable values retain frame storage.
+//! OSR continuations borrow the interpreter frame and preserve every live address.
 //!
 //! Calls (two entries + PLT):
 //! - **fast**: pure guest signature (n x I64 -> 0/1 x I64). Compiled code calls via
@@ -21,8 +20,7 @@
 //! entering compiled code must see its callee trampoline/entry (happens-before chain).
 //!
 //! unwind (CFI-only): create_unwind_info -> gimli FrameTable -> whole `.eh_frame` section
-//! registered at once. Admission already excludes cleanup edges (unwind-transparent: panic
-//! only passes through, does not land).
+//! registered at once. Cleanup edges also carry LSDA landing-pad descriptions.
 //!
 //! Single worker thread holds the JITModule (code memory lives for the process lifetime;
 //! cranelift-jit has no per-function release).
@@ -39,6 +37,7 @@ use super::translate::Translator;
 use super::*;
 
 mod isa;
+mod loader;
 pub(crate) use isa::*;
 
 /// Compiler for one code domain: owns the Cranelift module, the ids of every imported
@@ -134,9 +133,6 @@ struct Compiler<'a> {
     jit_key: artifact::JitKey,
     /// Entries captured but not yet published, as one pack per batch.
     jit_staging: crate::store::jit::Session,
-    /// The store's index, loaded on the first lookup: a session reuses what was published before it
-    /// started, never what it just wrote itself.
-    jit_index: Option<crate::store::jit::Index>,
     #[cfg(test)]
     fail_after_symbol: Option<JitSymbolRole>,
     /// The last entry captured, for tests that link one back or compare two sessions' artifacts.
@@ -235,56 +231,60 @@ pub(super) fn worker(
     heat: crate::vm::jit::Heat,
 ) {
     let dbg = crate::options::jit_debug();
-    // One compiler per tier: each has its own ISA, its own module and so its own jit-key, which is what
-    // lets one fragment have an entry at each level. Both publish into the same slots, so dispatch reads
-    // whichever was published last.
-    let mut baseline = Compiler::with_tier(&shared, domain, Tier::Baseline);
-    let mut optimized = Compiler::with_tier(&shared, domain, Tier::Optimized);
+    helpers::stat_init();
+    let mut baseline = None;
+    let mut optimized = None;
     let mut osr = None;
-    // Before a single request is served: link what the store holds for the functions the last run found
-    // hot. A stored optimized entry wins, because that is the tier the function is about to be asked
-    // for; otherwise the baseline entry is linked and the upgrade threshold will replace it later, and
-    // either way the first call finds a published entry instead of enqueueing a compile.
-    let mut observed: Vec<u32> = Vec::new();
-    // The set the tier policy reads: a function in this order is asked for optimized the first time
-    // this session compiles it.
+    let mut loader = None;
+    let mut observed = Vec::new();
     shared.jit.set_hot(&heat.order);
-    if baseline.jit_cache {
-        let mut prelinked = 0u64;
-        for func in &heat.order {
-            if shared.jit.work.as_ref().is_some_and(|work| work.enforce)
-                && shared
-                    .module
-                    .funcs
-                    .execution(*func as usize)
-                    .is_some_and(|body| body.shared.is_some())
-            {
-                // A previous run's heat is not credit for work this Engine has performed.
-                continue;
-            }
-            let Some(body) = shared.module.funcs.get(*func as usize) else {
-                continue;
+    let mut history = heat.order.iter().peekable();
+    let cache = domain == CodeDomain::Plain && !crate::options::no_jit_cache();
+    let mut served = 0usize;
+    loop {
+        if shared.jit.stopping.load(Ordering::Acquire) {
+            break;
+        }
+        // Current demand gets first service; historical work is bounded both ways so neither
+        // a long heat list nor a steady request stream can starve the other.
+        let ready = if served < 8 { rx.try_recv().ok() } else { None };
+        let request = if let Some(request) = ready {
+            request
+        } else {
+            let batch: Vec<_> = if cache {
+                history
+                    .by_ref()
+                    .take(8)
+                    .filter(|&&func| {
+                        !shared.jit.work.as_ref().is_some_and(|work| work.enforce)
+                            || !shared
+                                .module
+                                .funcs
+                                .execution(func as usize)
+                                .is_some_and(|body| body.shared.is_some())
+                    })
+                    .map(|&func| (func, Tier::Optimized))
+                    .collect()
+            } else {
+                Vec::new()
             };
-            if optimized.load_cached(*func, body) || baseline.load_cached(*func, body) {
-                prelinked += 1;
-                // A linked body no longer reaches the interpretation counter. Retain it in
-                // the next order so later requests cannot erase the reusable hot set.
-                observed.push(*func);
+            served = 0;
+            if !batch.is_empty() {
+                let loaded = loader
+                    .get_or_insert_with(|| loader::Loader::new(&shared, domain))
+                    .load(&batch, true);
+                helpers::cache_prelinked(loaded.len() as u64);
+                observed.extend(loaded);
+                continue;
             }
-        }
-        if prelinked != 0 {
-            helpers::cache_prelinked(prelinked);
-            if dbg {
-                crate::diag_debug!(Jit, "prelinked {prelinked} entries from the heat order");
+            if cache && history.peek().is_some() {
+                continue;
             }
-        }
-    }
-    while let Ok(request) = rx.recv() {
-        let func = request.func;
-        let c = match request.tier {
-            Tier::Baseline => &mut baseline,
-            Tier::Optimized => &mut optimized,
+            let Ok(request) = rx.recv() else { break };
+            request
         };
+        served += 1;
+        let func = request.func;
         if shared.jit.stopping.load(Ordering::Acquire) {
             break;
         }
@@ -344,7 +344,26 @@ pub(super) fn worker(
                 started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
             })
             .unwrap_or(0);
-        c.compile(func);
+        let loaded = cache && {
+            let loader = loader.get_or_insert_with(|| loader::Loader::new(&shared, domain));
+            if !loader.has(func, request.tier) {
+                loader.load(&[(func, request.tier)], true);
+            }
+            loader.has(func, request.tier)
+        };
+        if !loaded && !shared.jit.stopping.load(Ordering::Acquire) {
+            let compiler = match request.tier {
+                Tier::Baseline => &mut baseline,
+                Tier::Optimized => &mut optimized,
+            }
+            .get_or_insert_with(|| Compiler::with_tier(&shared, domain, request.tier));
+            compiler.compile(func);
+            if compiler.published.contains(&func)
+                && let Some(loader) = &mut loader
+            {
+                loader.record(func, request.tier);
+            }
+        }
         if let (Some(work), Some(units), Some(started)) = (&shared.jit.work, units, started) {
             let queue_ns = request
                 .queued
@@ -393,7 +412,7 @@ pub(super) fn worker(
     // Whatever a batch still holds is worth a file: the next session can only reuse what is in the
     // store, and a worker that exits with entries staged would lose them.
     let publishing = shared.jit.work.as_ref().map(|_| std::time::Instant::now());
-    for c in [&mut baseline, &mut optimized] {
+    for c in [&mut baseline, &mut optimized].into_iter().flatten() {
         if c.jit_cache {
             let session = std::mem::take(&mut c.jit_staging);
             if let Err(error) = session.publish()
@@ -406,18 +425,9 @@ pub(super) fn worker(
     if let (Some(work), Some(publishing)) = (&shared.jit.work, publishing) {
         work.report(publishing.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
     }
-    // Scratch belongs to the worker, not to the published code's process-long lifetime.
-    for compiler in [&mut baseline, &mut optimized] {
-        compiler.context = None;
-        compiler.c2i_templates = Default::default();
-    }
-    // Published JIT code may still be live on a sleeping stack in the process-wide
-    // thread pool. Teardown has to join the compile thread rather than race libc
-    // cleanup, and it must not destruct the JITModules either, since that would unmap
-    // published code. The address space is reclaimed in one go at process exit.
-    std::mem::forget(baseline);
-    std::mem::forget(optimized);
-    if let Some(mut compiler) = osr {
+    // Published code can remain on sleeping guest stacks. Retain code arenas, but release
+    // compiler scratch and the independently owned store index when the service exits.
+    for mut compiler in [baseline, optimized, osr].into_iter().flatten() {
         compiler.context = None;
         compiler.c2i_templates = Default::default();
         std::mem::forget(compiler);

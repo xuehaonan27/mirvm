@@ -342,7 +342,6 @@ impl<'a> Compiler<'a> {
             jit_cache: domain == CodeDomain::Plain && !crate::options::no_jit_cache(),
             jit_key,
             jit_staging: crate::store::jit::Session::default(),
-            jit_index: None,
             #[cfg(test)]
             fail_after_symbol: None,
             #[cfg(test)]

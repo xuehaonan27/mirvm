@@ -81,6 +81,8 @@ pub(crate) use macos::{linker, process};
 pub enum Error {
     #[error("{detail}")]
     Dlopen { detail: String },
+    #[error("instruction-cache synchronization failed: {detail}")]
+    CodePublication { detail: String },
 
     #[error("mprotect({addr:#x}, {size:#x}) failed rc={rc}")]
     Mprotect { addr: usize, size: usize, rc: i32 },
@@ -95,6 +97,7 @@ crate::diag_codes! {
     Error: Os => {
         Dlopen => "os.dlopen",
         Mprotect => "os.mprotect",
+        CodePublication => "os.code_publication",
         PrivateImage => "os.private_image",
     }
 }

@@ -74,6 +74,24 @@ pub fn protect(addr: *mut u8, size: usize, prot: Prot) -> Result<(), crate::os::
     Ok(())
 }
 
+/// Make completed code writes visible to instruction fetch on all threads.
+///
+/// # Safety
+/// The range must remain mapped and must not be written after this operation.
+#[cfg(feature = "cranelift")]
+pub(crate) unsafe fn publish_code(addr: *const u8, size: usize) -> Result<(), crate::os::Error> {
+    unsafe { wasmtime_jit_icache_coherence::clear_cache(addr.cast(), size) }.map_err(|error| {
+        crate::os::Error::CodePublication {
+            detail: error.to_string(),
+        }
+    })?;
+    wasmtime_jit_icache_coherence::pipeline_flush_mt().map_err(|error| {
+        crate::os::Error::CodePublication {
+            detail: error.to_string(),
+        }
+    })
+}
+
 /// Unmap the memory region. Caller holds capacity and lifecycle.
 ///
 /// # Safety
