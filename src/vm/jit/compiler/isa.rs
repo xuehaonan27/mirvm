@@ -2,6 +2,31 @@
 
 use super::*;
 
+/// A single-pass allocator is economical for small straight-line bodies. Backedges and larger
+/// live ranges pay for optimizing allocation once a function has already earned compilation.
+pub(super) fn entry_tier(header: ir::FuncHeader<'_>, requested: Tier) -> Tier {
+    if requested == Tier::Optimized {
+        return requested;
+    }
+    let small = match header {
+        ir::FuncHeader::Owned(body) => {
+            body.code().len() == 1
+                && body.code()[0].stmts.len() <= 32
+                && matches!(body.code()[0].term, Terminator::Return)
+        }
+        ir::FuncHeader::Archived(body) => {
+            body.code().len() == 1
+                && body.code()[0].stmts.len() <= 32
+                && matches!(body.code()[0].term, ir::ArchivedTerminator::Return)
+        }
+    };
+    if small && header.frame_size() <= 256 {
+        Tier::Baseline
+    } else {
+        Tier::Optimized
+    }
+}
+
 /// Flags for one domain at one tier: one constructor, so the tier is the only thing that can differ
 /// between two ISAs this build uses.
 ///

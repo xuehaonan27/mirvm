@@ -12,10 +12,13 @@ execution and peak optimization. The typed-bytecode [Liftoff compiler](https://v
 is also relevant to MIRVM: it avoids constructing a general optimization IR and maintains a simple
 register/stack state while generating code.
 
-MIRVM's Cranelift `speed_and_size` and `speed` configurations do not establish two substantially
-different compilation-cost tiers. Measure translation, register allocation, generation, linking and
-publication separately before choosing a cheaper pipeline or another backend. A fast baseline is
-justified by lower end-to-end cost on real workloads, not by its name or an earlier threshold.
+Changing Cranelift from `speed_and_size` to `speed` does not establish substantially different
+compilation-cost tiers. MIRVM instead bounds the cheap pipeline's local optimization and uses a
+single-pass allocator for small straight-line bodies; the
+[tier contract](jit-code-cache-design.md#26-adaptive-optimization-tiers) owns admission and flags.
+Measure translation, allocation, generation, linking and publication separately when their costs
+are uncertain. A fast baseline is justified by lower end-to-end cost on real workloads, not by its
+name or an earlier threshold. More spills can outweigh every millisecond saved in compilation.
 
 ## 2. Remove intermediate state across calls
 

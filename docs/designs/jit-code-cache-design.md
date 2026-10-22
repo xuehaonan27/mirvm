@@ -180,6 +180,12 @@ bounded leaf inlining. Instruction selection, native calling conventions, unwind
 safepoints are shared. Allocator and optimizer flags are part of the persistent key; code from
 different pipelines cannot alias. OSR uses the optimized pipeline and retains its borrowed frame.
 
+Once existing heat/work admission has earned compilation, the cheap tier is limited to a single
+returning block with at most 32 statements and a frame of at most 256 bytes. Requests for larger
+bodies or control-flow graphs use the optimizing tier; static shape does not itself trigger
+compilation. This limits spill and loop-throughput costs without allocating or scanning function
+metadata at startup. An explicitly optimized request is never downgraded.
+
 A cheaper baseline can spill more and execute more instructions. Admission and tier choice must
 therefore be judged by complete-process latency and CPU cost, including compilation, rather than
 compile time alone. Current call counters stop requesting compilation after an entry is published;
@@ -307,8 +313,9 @@ entries by the heat ledger. `cache purge --jit` takes the family whole.
    own ISA, module and jit-key, both publishing into the same slots), the pre-link wave prefers a stored
    optimized entry for a hot function and falls back to the baseline one, and the *request* a function
    raises while it is interpreted asks for the tier the heat ledger gives it (`JitState::tier_for`).
-   `fib32-jit-cache` asserts the split: a cold run is all baseline, a warm one links from the store and
-   compiles the functions the heat order names at the optimized tier.
+   The worker applies the structural cost bound in §2.6 before selecting a compiler. The
+   `fib32-jit-cache` check requires compilation on a cold run and reuse of stored code
+   on a warm run; scheduling does not require a warm process to perform new compilation.
    Two questions ask for a compilation, and the second one is why the policy is not a single call count:
    a function whose call counter crosses the threshold, and a function the interpreter has taken
    `ITERATION_REQUEST` back edges in. The call count is the right question for a body whose work is its

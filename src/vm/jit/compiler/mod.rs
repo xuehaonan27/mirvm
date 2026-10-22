@@ -248,7 +248,7 @@ pub(super) fn worker(
         // Current demand gets first service; historical work is bounded both ways so neither
         // a long heat list nor a steady request stream can starve the other.
         let ready = if served < 8 { rx.try_recv().ok() } else { None };
-        let request = if let Some(request) = ready {
+        let mut request = if let Some(request) = ready {
             request
         } else {
             let batch: Vec<_> = if cache {
@@ -330,6 +330,10 @@ pub(super) fn worker(
         {
             continue;
         }
+        request.tier = isa::entry_tier(
+            shared.module.funcs.header(func as usize).unwrap(),
+            request.tier,
+        );
         if dbg {
             crate::diag_debug!(
                 Jit,

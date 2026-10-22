@@ -1519,3 +1519,32 @@ fn baseline_folding_preserves_branch_merges_and_narrow_signed_values() {
     }
     std::mem::forget(compiler);
 }
+
+#[test]
+fn cheap_entry_tier_requires_bounded_straight_line_work() {
+    let mut probe = body("tier", Terminator::Return);
+    assert_eq!(
+        isa::entry_tier(ir::FuncHeader::Owned(&probe), Tier::Baseline),
+        Tier::Optimized
+    );
+    probe.blocks.truncate(1);
+    assert_eq!(
+        isa::entry_tier(ir::FuncHeader::Owned(&probe), Tier::Baseline),
+        Tier::Baseline
+    );
+    assert_eq!(
+        isa::entry_tier(ir::FuncHeader::Owned(&probe), Tier::Optimized),
+        Tier::Optimized
+    );
+    probe.blocks[0].term = Terminator::Goto(0);
+    assert_eq!(
+        isa::entry_tier(ir::FuncHeader::Owned(&probe), Tier::Baseline),
+        Tier::Optimized
+    );
+    probe.blocks[0].term = Terminator::Return;
+    probe.frame_size = 512;
+    assert_eq!(
+        isa::entry_tier(ir::FuncHeader::Owned(&probe), Tier::Baseline),
+        Tier::Optimized
+    );
+}

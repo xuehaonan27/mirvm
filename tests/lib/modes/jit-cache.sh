@@ -59,9 +59,9 @@ mode_run() {
 
     run cold MIRVM_JIT_STATS=1
     [ "$(cat "$TMP/cold.code")" = 0 ] || abort_test "cold run exited $(cat "$TMP/cold.code"): $(tail -3 "$TMP/cold.err")"
-    # Nothing is known about this program yet, so every function starts at the cheap tier.
-    grep -qE "tier_baseline=[1-9]" "$TMP/cold.err" \
-        || abort_test "the cold run did not compile at the baseline tier"
+    # The cold run compiles; structural cost and heat choose its tier independently of storage.
+    grep -qE "tier_(baseline|optimized)=[1-9]" "$TMP/cold.err" \
+        || abort_test "the cold run did not compile any function"
     grep -q "published from a stored entry" "$TMP/cold.err" \
         && abort_test "the cold run reused an entry no earlier run had written"
     [ -n "$(ls "$JIT_DIR"/*.pack 2>/dev/null)" ] \
